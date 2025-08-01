@@ -47,14 +47,22 @@ The C++ dependencies (`tinybvh` and `glm`) are included as Git submodules.
     # On Windows: .venv\Scripts\activate
     ```
 
-4.  **Install and Compile:**
-    Run the installation in editable mode. This will automatically download Python dependencies and compile the C++ extension module.
+4.  **Compile and install:**
+    Run `uv sync`. This will automatically download Python dependencies and compile the C++ extension module.
     ```bash
-    uv pip install -e .
+    uv sync
     ```
 
-If the process completes without errors, the `pytinybvh` module is now installed and ready to be used in your virtual environment.
+If the process completes without errors, the `pytinybvh` module is now installed and ready to be used in your virtual environment. This will automatically download Python dependencies and compile the C++ extension module.
 
+
+5. **Use in other projects:**
+    From the virtual environment of your other project, run the installation of `pytinybvh` in editable mode.
+    ```bash
+   # Still with uv
+    uv pip install -e /path/to/this/repo
+    ```
+    
 ## Usage
 
 The module provides two functions that take a numpy array and return a tuple of two numpy arrays for the BVH nodes and the primitive indices.

@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pytinybvh"
-version = "0.1.0"
+version = "0.9.0"
 authors = [
-    { name = "FlorentLM", email = "25004801+FlorentLM@users.noreply.github.com" }
+    { name = "Florent Le Moël", email = "25004801+FlorentLM@users.noreply.github.com" }
 ]
 description = "Tiny Python bindings for tinybvh"
 readme = "README.md"

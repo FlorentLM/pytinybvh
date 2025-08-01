@@ -2,10 +2,13 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Simple Python bindings for the great header-only C++ Bounding Volume Hierarchy (BVH) library [tinybvh](https://github.com/jbikker/tinybvh) by Jacco Bikker.
+Simple Python bindings for the great C++ Bounding Volume Hierarchy (BVH) library [tinybvh](https://github.com/jbikker/tinybvh) by Jacco Bikker.
 
-Expose `tinybvh`'s fast BVH construction algorithms to Python, to use for CPU-side BVH generation in Python applications.
-Typically used for real-time ray tracing with PyOpenGL or Vulkan, collision detection, and other spatial queries.
+Exposes `tinybvh`'s fast BVH construction algorithms to Python, to use for CPU-side BVH generation in Python applications.
+Typically used for real-time ray tracing with PyOpenGL or Vulkan, collision detection, etc.
+
+**Note:** For now, `pytinybvh` only provides the core functionality for building a BVH with the SAH method, from triangle or point data
+(see below for Roadmap).
 
 The output is provided as raw numpy arrays, designed to be uploaded directly to the GPU as Shader Storage Buffer Objects (SSBOs).
 
@@ -145,6 +148,54 @@ pytinybvh/
 ├── dragon.ply              # Stanford dragon as a.ply file
 └── README.md
 ```
+
+
+## Roadmap
+
+The current version of `pytinybvh` provides only the core functionality for building a high-quality BVH from triangle or point data.
+However, `tinybvh` is much more powerful and I plan to expand the Python API to include everything. 
+
+Contributions are welcome :)
+
+### Core BVH Features
+
+*   **1. Expose different build qualities:**
+    -   **What:** Wrap the `BuildQuick` and `BuildHQ` (SBVH) methods.
+    -   **Why:** Allows a trade-off between build time and traversal performance. A potential API could be `pytinybvh.build(..., quality='fast'|'default'|'high')`
+        -   `fast`: For dynamic scenes where build speed is critical.
+        -   `default`: The current high-quality SAH builder.
+        -   `high`: For static scenes where maximum ray tracing performance is desired, at the cost of a slower initial build.
+
+*   **2. BVH Refitting (`Refit`):**
+    -   **What:** Expose the `Refit()` method.
+    -   **Why:** This is a major performance optimization for dynamic scenes where vertices move but the topology is constant (e.g., skinned character animation, cloth simulation). Refitting only updates the AABB positions and is an order of magnitude faster than a full rebuild.
+
+*   **3. Indexed Geometry Support:**
+    -   **What:** Add a build function that accepts a vertex array `(V, 3)` and a face index array `(F, 3)`.
+    -   **Why:** This is far more memory-efficient for standard meshes, as vertex data is not duplicated for each triangle.
+
+*   **4. BVH Caching (`Save` / `Load`):**
+    -   **What:** Wrap the `Save()` and `Load()` methods.
+    -   **Why:** For very large static scenes, building the BVH can take time. This would allow building the BVH once, save it to a file, and load it almost instantly in future runs.
+    -   **NOTE**: Probably could be directly implemented in Python, it's fast enough
+    
+### Advanced features
+
+*   **5. Top-Level Acceleration Structure (TLAS) Support:**
+    -   **What:** Expose the `BLASInstance` class and the `Build` overload for instances.
+    -   **Why:** This is essential for rendering large, complex scenes composed of many distinct objects, especially if they are moving (e.g., cars in a city, trees in a forest). It allows building a two-level BVH (a BVH of BVHs), which is the standard approach in modern ray tracers.
+
+*   **6. CPU-side Ray Queries:**
+    -   **What:** Wrap the `Intersect` and `IsOccluded` methods.
+    -   **Why:** While the primary goal is GPU rendering, exposing CPU-side queries would be cool for Python-only applications like:
+        -   Collision detection
+        -   CPU-based ray casting for mouse picking or physics
+        -   Debugging and verification
+
+*   **7. Support for Custom Geometry:**
+    -   **What:** Expose the `Build` overload that accepts a callback function for getting custom primitive AABBs.
+    -   **Why:** This would allow building a BVH over arbitrary Python objects, not just triangles or points, by providing a function that returns the bounding box for a given object index.
+
 
 ## Acknowledgements
 

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0", "pybind11>=2.12"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pytinybvh"
+version = "0.1.0"
+authors = [
+    { name = "FlorentLM", email = "25004801+FlorentLM@users.noreply.github.com" }
+]
+description = "Tiny Python bindings for tinybvh"
+readme = "README.md"
+requires-python = ">=3.12"
+
+dependencies = [
+    "numpy>=2.0.0",
+]

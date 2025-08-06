@@ -14,13 +14,25 @@
 namespace py = pybind11;
 using namespace pybind11::literals;
 
-// mini 3D vector struct to avoid having a dependency on glm just for 3 floats (might change in the future tho)
-struct Vector3f {
-    float x = 0.f, y = 0.f, z = 0.f;
 
-    Vector3f() = default;
-    Vector3f(float x, float y, float z) : x(x), y(y), z(z) {}
-};
+// Helper to extract 3 floats from a Python object (list, tuple, numpy array)
+tinybvh::bvhvec3 py_obj_to_vec3(const py::object& obj) {
+    if (py::isinstance<py::list>(obj) || py::isinstance<py::tuple>(obj)) {
+        py::sequence seq = py::cast<py::sequence>(obj);
+        if (seq.size() != 3) {
+            throw std::runtime_error("Input sequence must have 3 elements for a 3D vector.");
+        }
+        return tinybvh::bvhvec3(seq[0].cast<float>(), seq[1].cast<float>(), seq[2].cast<float>());
+    }
+    if (py::isinstance<py::array>(obj)) {
+        py::array_t<float> arr = py::cast<py::array_t<float>>(obj);
+        if (arr.ndim() != 1 || arr.size() != 3) {
+            throw std::runtime_error("Input numpy array must have shape (3,) for a 3D vector.");
+        }
+        return tinybvh::bvhvec3(arr.at(0), arr.at(1), arr.at(2));
+    }
+    throw std::runtime_error("Input must be a list, tuple, or numpy array of 3 floats.");
+}
 
 // Enum for build quality selection
 enum class BuildQuality {
@@ -30,7 +42,7 @@ enum class BuildQuality {
 };
 
 // C++ class to wrap the tinybvh::BVH object and its associated data: this is the object held by the Python BVH class
-struct BVHWrapper {
+struct PyBVH {
     std::unique_ptr<tinybvh::BVH> bvh;
 
     py::array source_geometry; // ref to the Python numpy array that contains the source vertices
@@ -39,9 +51,9 @@ struct BVHWrapper {
 
     BuildQuality quality = BuildQuality::Balanced;
 
-    BVHWrapper() : bvh(std::make_unique<tinybvh::BVH>()) {}
+    PyBVH() : bvh(std::make_unique<tinybvh::BVH>()) {}
 
-    static std::unique_ptr<BVHWrapper> from_vertices_4f(py::array_t<float, py::array::c_style | py::array::forcecast> vertices_np, BuildQuality quality) {
+    static std::unique_ptr<PyBVH> from_vertices_4f(py::array_t<float, py::array::c_style | py::array::forcecast> vertices_np, BuildQuality quality) {
         if (vertices_np.ndim() != 2 || vertices_np.shape(1) != 4) {
             throw std::runtime_error("Input must be a 2D numpy array with shape (M, 4).");
         }
@@ -49,7 +61,7 @@ struct BVHWrapper {
             throw std::runtime_error("Input vertex count must be a multiple of 3.");
         }
 
-        auto wrapper = std::make_unique<BVHWrapper>();
+        auto wrapper = std::make_unique<PyBVH>();
         // no copy: ref to the numpy array
         wrapper->source_geometry = vertices_np;
 
@@ -75,14 +87,14 @@ struct BVHWrapper {
         return wrapper;
     }
 
-    static std::unique_ptr<BVHWrapper> from_triangles(py::array_t<float, py::array::c_style | py::array::forcecast> tris_np, BuildQuality quality) {
+    static std::unique_ptr<PyBVH> from_triangles(py::array_t<float, py::array::c_style | py::array::forcecast> tris_np, BuildQuality quality) {
         bool shape_ok = (tris_np.ndim() == 2 && tris_np.shape(1) == 9) ||
                         (tris_np.ndim() == 3 && tris_np.shape(1) == 3 && tris_np.shape(2) == 3);
         if (!shape_ok) {
             throw std::runtime_error("Input must be a 2D numpy array with shape (N, 9) or a 3D array with shape (N, 3, 3).");
         }
 
-        auto wrapper = std::make_unique<BVHWrapper>();
+        auto wrapper = std::make_unique<PyBVH>();
         wrapper->quality = quality;
 
         const size_t num_tris = tris_np.shape(0);
@@ -131,7 +143,7 @@ struct BVHWrapper {
         return wrapper;
     }
 
-    static std::unique_ptr<BVHWrapper> from_points(py::array_t<float, py::array::c_style | py::array::forcecast> points_np, float radius, BuildQuality quality) {
+    static std::unique_ptr<PyBVH> from_points(py::array_t<float, py::array::c_style | py::array::forcecast> points_np, float radius, BuildQuality quality) {
         if (points_np.ndim() != 2 || points_np.shape(1) != 3) {
             throw std::runtime_error("Input must be a 2D numpy array with shape (N, 3).");
         }
@@ -139,7 +151,7 @@ struct BVHWrapper {
             throw std::runtime_error("Point radius must be positive.");
         }
 
-        auto wrapper = std::make_unique<BVHWrapper>();
+        auto wrapper = std::make_unique<PyBVH>();
         wrapper->quality = quality;
 
         size_t num_points = points_np.shape(0);
@@ -200,8 +212,8 @@ struct BVHWrapper {
 
 // pybind11 wrapper for tinybvh::Ray to be used in intersection queries
 struct PyRay {
-    Vector3f origin;
-    Vector3f direction;
+    tinybvh::bvhvec3 origin;
+    tinybvh::bvhvec3 direction;
     float t = 1e30f;
     float u = 0.0f, v = 0.0f;
     uint32_t prim_id = -1;
@@ -230,20 +242,27 @@ PYBIND11_MODULE(pytinybvh, m) {
         .value("Balanced", BuildQuality::Balanced, "Balanced build time and query performance (default).")
         .value("High", BuildQuality::High, "Slowest build (uses spatial splits), highest quality queries.");
 
-    py::class_<Vector3f>(m, "vec3", "A 3D vector with float components.")
+    py::class_<tinybvh::bvhvec3>(m, "vec3", "A 3D vector with float components.")
         .def(py::init<float, float, float>(), "x"_a=0.f, "y"_a=0.f, "z"_a=0.f)
-        .def_readwrite("x", &Vector3f::x, "X-component of the vector.")
-        .def_readwrite("y", &Vector3f::y, "Y-component of the vector.")
-        .def_readwrite("z", &Vector3f::z, "Z-component of the vector.")
-        .def("__repr__", [](const Vector3f &v) {
+        .def_readwrite("x", &tinybvh::bvhvec3::x, "X-component of the vector.")
+        .def_readwrite("y", &tinybvh::bvhvec3::y, "Y-component of the vector.")
+        .def_readwrite("z", &tinybvh::bvhvec3::z, "Z-component of the vector.")
+        .def("__repr__", [](const tinybvh::bvhvec3 &v) {
             return "vec3(" + std::to_string(v.x) + ", " + std::to_string(v.y) + ", " + std::to_string(v.z) + ")";
         });
 
     py::class_<PyRay>(m, "Ray", "Represents a ray for intersection queries.")
-        .def(py::init<const Vector3f&, const Vector3f&, float>(),
-             "origin"_a, "direction"_a, "t"_a = 1e30f)
-        .def_readwrite("origin", &PyRay::origin, "The origin point of the ray.")
-        .def_readwrite("direction", &PyRay::direction, "The direction vector of the ray.")
+        .def(py::init([](const py::object& origin_obj, const py::object& direction_obj, float t) {
+                 return PyRay{py_obj_to_vec3(origin_obj), py_obj_to_vec3(direction_obj), t, 0.f, 0.f, (uint32_t)-1};
+             }), "origin"_a, "direction"_a, "t"_a = 1e30f)
+        .def_property("origin",
+            [](const PyRay &r) { return py::make_tuple(r.origin.x, r.origin.y, r.origin.z); },
+            [](PyRay &r, const py::object& obj) { r.origin = py_obj_to_vec3(obj); },
+            "The origin point of the ray (list, tuple, or numpy array).")
+        .def_property("direction",
+            [](const PyRay &r) { return py::make_tuple(r.direction.x, r.direction.y, r.direction.z); },
+            [](PyRay &r, const py::object& obj) { r.direction = py_obj_to_vec3(obj); },
+            "The direction vector of the ray (list, tuple, or numpy array).")
         .def_readwrite("t", &PyRay::t, "The maximum distance for intersection. Updated with hit distance.")
         .def_readonly("u", &PyRay::u, "Barycentric u-coordinate of the hit.")
         .def_readonly("v", &PyRay::v, "Barycentric v-coordinate of the hit.")
@@ -256,21 +275,21 @@ PYBIND11_MODULE(pytinybvh, m) {
         });
 
 
-    py::class_<BVHWrapper>(m, "BVH", "A Bounding Volume Hierarchy for fast ray intersections.")
-        .def_static("from_triangles", &BVHWrapper::from_triangles,
+    py::class_<PyBVH>(m, "BVH", "A Bounding Volume Hierarchy for fast ray intersections.")
+        .def_static("from_triangles", &PyBVH::from_triangles,
             R"((
                 Builds a BVH for triangles from a (N, 3, 3) or (N, 9) float array.
 
                 Args:
                     triangles (numpy.ndarray): A float32 array of shape (N, 3, 3) or (N, 9).
-                    quality (BuildQuality): The desired build quality.
+                    quality (BuildQuality): The desired quality of the BVH.
 
                 Returns:
                     BVH: A new BVH instance.
             ))",
             py::arg("triangles").noconvert(), py::arg("quality") = BuildQuality::Balanced)
 
-        .def_static("from_points", &BVHWrapper::from_points,
+        .def_static("from_points", &PyBVH::from_points,
              R"((
                 Builds a BVH for points from a (N, 3) float array.
 
@@ -279,14 +298,14 @@ PYBIND11_MODULE(pytinybvh, m) {
                 Args:
                     points (numpy.ndarray): A float32 array of shape (N, 3) representing N points.
                     radius (float): The radius used to create an AABB for each point.
-                    quality (BuildQuality): The desired build quality.
+                    quality (BuildQuality): The desired quality of the BVH.
 
                 Returns:
                     BVH: A new BVH instance.
             ))",
             py::arg("points").noconvert(), py::arg("radius") = 1e-5f, py::arg("quality") = BuildQuality::Balanced)
 
-        .def_static("from_vertices_4f", &BVHWrapper::from_vertices_4f,
+        .def_static("from_vertices_4f", &PyBVH::from_vertices_4f,
             R"((
                 Builds a BVH from a pre-formatted (M, 4) vertex array.
 
@@ -296,14 +315,14 @@ PYBIND11_MODULE(pytinybvh, m) {
 
                 Args:
                     vertices (numpy.ndarray): A float32 array of shape (M, 4).
-                    quality (BuildQuality): The desired build quality.
+                    quality (BuildQuality): The desired quality of the BVH.
 
                 Returns:
                     BVH: A new BVH instance.
             ))",
             py::arg("vertices").noconvert(), py::arg("quality") = BuildQuality::Balanced)
 
-        .def("save", [](const BVHWrapper& self, const py::object& filepath_obj) {
+        .def("save", [](const PyBVH& self, const py::object& filepath_obj) {
             std::string filepath = py::str(filepath_obj).cast<std::string>();
             self.bvh->Save(filepath.c_str());
         }, py::arg("filepath"),
@@ -322,7 +341,7 @@ PYBIND11_MODULE(pytinybvh, m) {
 
             std::string filepath = py::str(filepath_obj).cast<std::string>();
 
-            auto wrapper = std::make_unique<BVHWrapper>();
+            auto wrapper = std::make_unique<PyBVH>();
             wrapper->source_geometry = vertices_np; // Keep ref to vertices alive
 
             py::buffer_info buf = vertices_np.request();
@@ -358,7 +377,7 @@ PYBIND11_MODULE(pytinybvh, m) {
                     BVH: A new BVH instance.
             ))")
 
-        .def_property_readonly("nodes", [](BVHWrapper &self) -> py::array {
+        .def_property_readonly("nodes", [](PyBVH &self) -> py::array {
             if (!self.bvh || self.bvh->usedNodes == 0) {
                 py::dtype dt = py::dtype::of<tinybvh::BVH::BVHNode>();
                 return py::array(dt, {0}, {});
@@ -368,7 +387,7 @@ PYBIND11_MODULE(pytinybvh, m) {
             );
         }, "The structured numpy array of BVH nodes.")
 
-        .def_property_readonly("prim_indices", [](BVHWrapper &self) -> py::array {
+        .def_property_readonly("prim_indices", [](PyBVH &self) -> py::array {
             if (!self.bvh || self.bvh->idxCount == 0) {
                 return py::array_t<uint32_t>(0);
             }
@@ -379,16 +398,11 @@ PYBIND11_MODULE(pytinybvh, m) {
             );
         }, "The array of primitive indices, ordered for locality.")
 
-        .def_property_readonly("quality", [](const BVHWrapper &self) { return self.quality; },
+        .def_property_readonly("quality", [](const PyBVH &self) { return self.quality; },
             "The build quality level used to construct the BVH.")
 
-        .def("intersect", [](BVHWrapper &self, PyRay &py_ray) -> float {
-            tinybvh::Ray ray(
-                tinybvh::bvhvec3(py_ray.origin.x, py_ray.origin.y, py_ray.origin.z),
-                tinybvh::bvhvec3(py_ray.direction.x, py_ray.direction.y, py_ray.direction.z),
-                py_ray.t
-            );
-
+        .def("intersect", [](PyBVH &self, PyRay &py_ray) -> float {
+            tinybvh::Ray ray(py_ray.origin, py_ray.direction, py_ray.t);
             self.bvh->Intersect(ray);
 
             if (ray.hit.t < py_ray.t) {
@@ -415,7 +429,7 @@ PYBIND11_MODULE(pytinybvh, m) {
                     float: The hit distance `t` if a hit was found, otherwise `infinity`.
            ))")
 
-        .def("intersect_batch", [](BVHWrapper &self, py::array_t<float, py::array::c_style> origins_np,
+        .def("intersect_batch", [](PyBVH &self, py::array_t<float, py::array::c_style> origins_np,
                                    py::array_t<float, py::array::c_style> directions_np,
                                    py::object t_max_obj) -> py::array
         {
@@ -488,12 +502,11 @@ PYBIND11_MODULE(pytinybvh, m) {
                                    For misses, prim_id is -1 and t is infinity.
            ))")
 
-        .def("is_occluded", [](BVHWrapper &self, const PyRay &py_ray) -> bool {
+        .def("is_occluded", [](PyBVH &self, const PyRay &py_ray) -> bool {
             tinybvh::Ray ray(
-                tinybvh::bvhvec3(py_ray.origin.x, py_ray.origin.y, py_ray.origin.z),
-                tinybvh::bvhvec3(py_ray.direction.x, py_ray.direction.y, py_ray.direction.z),
-                py_ray.t // The ray's t is used as the maximum distance for the occlusion check
-            );
+                py_ray.origin,
+                py_ray.direction,
+                py_ray.t);  // The ray's t is used as the maximum distance for the occlusion check
             return self.bvh->IsOccluded(ray);
         }, py::arg("ray"),
            R"((
@@ -509,7 +522,7 @@ PYBIND11_MODULE(pytinybvh, m) {
                     bool: True if the ray is occluded, False otherwise.
            ))")
 
-        .def("is_occluded_batch", [](BVHWrapper &self, py::array_t<float, py::array::c_style> origins_np,
+        .def("is_occluded_batch", [](PyBVH &self, py::array_t<float, py::array::c_style> origins_np,
                                        py::array_t<float, py::array::c_style> directions_np,
                                        py::object t_max_obj) -> py::array_t<bool>
         {
@@ -579,7 +592,7 @@ PYBIND11_MODULE(pytinybvh, m) {
                     numpy.ndarray: A boolean array of shape (N,) where `True` indicates occlusion.
            ))")
 
-        .def("refit", &BVHWrapper::refit,
+        .def("refit", &PyBVH::refit,
              R"((
                 Refits the BVH to the current state of the source geometry, which is much faster than a full rebuild.
 
@@ -589,12 +602,24 @@ PYBIND11_MODULE(pytinybvh, m) {
                 Note: This will fail if the BVH was built with spatial splits (with BuildQuality.High).
              ))")
 
-        .def_property_readonly("node_count", [](const BVHWrapper &self){ return self.bvh->usedNodes; }, "Total number of nodes in the BVH.")
-        .def_property_readonly("prim_count", [](const BVHWrapper &self){ return self.bvh->triCount; }, "Total number of primitives in the BVH.")
-        .def_property_readonly("aabb_min", [](const BVHWrapper &self){
-            return Vector3f(self.bvh->aabbMin.x, self.bvh->aabbMin.y, self.bvh->aabbMin.z);
+        .def_property_readonly("node_count", [](const PyBVH &self){ return self.bvh->usedNodes; }, "Total number of nodes in the BVH.")
+        .def_property_readonly("prim_count", [](const PyBVH &self){ return self.bvh->triCount; }, "Total number of primitives in the BVH.")
+        .def_property_readonly("aabb_min", [](PyBVH &self) -> py::array {
+            if (!self.bvh) return py::array_t<float>(0);
+            // Create a 1D array of shape (3,) that is a view into the bvh.aabbMin data
+            return py::array_t<float>(
+                {3},                                // shape
+                {&self.bvh->aabbMin.x},             // data pointer
+                py::cast(self)                      // owner
+            );
         }, "The minimum corner of the root axis-aligned bounding box.")
-        .def_property_readonly("aabb_max", [](const BVHWrapper &self){
-            return Vector3f(self.bvh->aabbMax.x, self.bvh->aabbMax.y, self.bvh->aabbMax.z);
+        .def_property_readonly("aabb_max", [](PyBVH &self) -> py::array {
+            if (!self.bvh) return py::array_t<float>(0);
+            // Create a 1D array of shape (3,) that is a view into the bvh.aabbMax data
+            return py::array_t<float>(
+                {3},                                // shape
+                {&self.bvh->aabbMax.x},             // data pointer
+                py::cast(self)                      // owner
+            );
         }, "The maximum corner of the root axis-aligned bounding box.");
 }

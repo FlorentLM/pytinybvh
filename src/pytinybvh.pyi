@@ -1,10 +1,18 @@
 from __future__ import annotations
 from pathlib import Path
 import numpy as np
-from typing import Optional, Union
+from typing import Optional, Union, List, Tuple
 from enum import Enum
 
+
 PathLike = Union[str, Path]
+"""A type hint for file paths that can be a string or a pathlib.Path object."""
+
+Vec3Like = Union[List[float], Tuple[float, float, float], np.ndarray]
+"""
+A type hint for objects that can be interpreted as a 3D vector,
+including lists, tuples, and NumPy arrays of 3 floats.
+"""
 
 # A hint for the structured dtype of the BVH.nodes array.
 # bvh_node_dtype = np.dtype([
@@ -25,15 +33,6 @@ bvh_node_dtype: np.dtype
 hit_record_dtype: np.dtype
 
 
-class vec3:
-    """A 3D vector with float components."""
-    x: float
-    y: float
-    z: float
-
-    def __init__(self, x: float = 0.0, y: float = 0.0, z: float = 0.0) -> None: ...
-
-
 class BuildQuality(Enum):
     """Enum for selecting BVH build quality."""
     Quick: int
@@ -43,8 +42,8 @@ class BuildQuality(Enum):
 
 class Ray:
     """Represents a ray for intersection queries."""
-    origin: vec3
-    direction: vec3
+    origin: Vec3Like
+    direction: Vec3Like
     t: float
 
     @property
@@ -62,7 +61,7 @@ class Ray:
         """The ID of the primitive that was hit. -1 if no hit."""
         ...
 
-    def __init__(self, origin: vec3, direction: vec3, t: float = 1e30) -> None: ...
+    def __init__(self, origin: Vec3Like, direction: Vec3Like, t: float = 1e30) -> None: ...
 
 
 class BVH:
@@ -76,6 +75,7 @@ class BVH:
         Args:
             triangles (numpy.ndarray): A float32 array of shape (N, 3, 3) or (N, 9)
                                        representing N triangles.
+            quality (BuildQuality): The desired quality of the BVH.
 
         Returns:
             BVH: A new BVH instance.
@@ -92,6 +92,7 @@ class BVH:
         Args:
             points (numpy.ndarray): A float32 array of shape (N, 3) representing N points.
             radius (float): The radius used to create an AABB for each point.
+            quality (BuildQuality): The desired quality of the BVH.
 
         Returns:
             BVH: A new BVH instance.
@@ -109,6 +110,7 @@ class BVH:
 
         Args:
             vertices (numpy.ndarray): A float32 array of shape (M, 4).
+            quality (BuildQuality): The desired quality of the BVH.
 
         Returns:
             BVH: A new BVH instance.
@@ -239,12 +241,12 @@ class BVH:
         ...
 
     @property
-    def aabb_min(self) -> vec3:
+    def aabb_min(self) -> np.ndarray:
         """The minimum corner of the root axis-aligned bounding box."""
         ...
 
     @property
-    def aabb_max(self) -> vec3:
+    def aabb_max(self) -> np.ndarray:
         """The maximum corner of the root axis-aligned bounding box."""
         ...
 

@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 import numpy as np
 np.set_printoptions(precision=3, suppress=True)
-from pytinybvh import BVH, Ray, vec3, BuildQuality
+from pytinybvh import BVH, Ray, BuildQuality
 
 # Create some triangle geometry
 triangles = np.array([
@@ -88,8 +88,8 @@ print('\nStructure tests successful!')
 print("\n--- Testing single ray intersect ---")
 # This ray should hit the first triangle (ID 0) at t=10
 ray_hit = Ray(
-    origin=vec3(0.0, 0.0, -10.0),
-    direction=vec3(0.0, 0.0, 1.0)
+    origin=(0.0, 0.0, -10.0),
+    direction=(0.0, 0.0, 1.0)
 )
 hit_distance = bvh.intersect(ray_hit)
 print(f"Ray 1 (expect hit): Returned t={hit_distance:.3f}, Ray object updated to: {ray_hit}")
@@ -99,8 +99,8 @@ assert ray_hit.prim_id == 0 and np.isclose(ray_hit.t, 10.0)
 
 # This ray should miss everything
 ray_miss = Ray(
-    origin=vec3(10.0, 10.0, -10.0),
-    direction=vec3(0.0, 0.0, 1.0)
+    origin=(10.0, 10.0, -10.0),
+    direction=(0.0, 0.0, 1.0)
 )
 hit_distance_miss = bvh.intersect(ray_miss)
 print(f"Ray 2 (expect miss): Returned t={hit_distance_miss:.3f}, Ray object state: {ray_miss}")
@@ -154,8 +154,8 @@ print("\n--- Testing single ray occlusion ---")
 # This ray is occluded by the second triangle (at z=5)
 # Note: ray.t=100 defines the max distance for the occlusion check. The hit is at t=15.
 ray_occluded = Ray(
-    origin=vec3(3.0, 3.0, -10.0),
-    direction=vec3(0.0, 0.0, 1.0),
+    origin=(3.0, 3.0, -10.0),
+    direction=(0.0, 0.0, 1.0),
     t=100.0
 )
 is_occluded = bvh.is_occluded(ray_occluded)
@@ -164,8 +164,8 @@ assert is_occluded
 
 # This ray misses everything
 ray_not_occluded = Ray(
-    origin=vec3(10.0, 10.0, -10.0),
-    direction=vec3(0.0, 0.0, 1.0)
+    origin=(10.0, 10.0, -10.0),
+    direction=(0.0, 0.0, 1.0)
 )
 is_occluded_miss = bvh.is_occluded(ray_not_occluded)
 print(f"Ray 2 (expect not occluded): {is_occluded_miss}")
@@ -174,8 +174,8 @@ assert not is_occluded_miss
 # This ray is aimed at the second triangle, but its max distance (t) is too short.
 # The hit is at t=15, but we only check up to t=4.0, so it should NOT be considered occluded.
 ray_t_limited = Ray(
-    origin=vec3(3.0, 3.0, -10.0),
-    direction=vec3(0.0, 0.0, 1.0),
+    origin=(3.0, 3.0, -10.0),
+    direction=(0.0, 0.0, 1.0),
     t=4.0
 )
 is_occluded_t_limited = bvh.is_occluded(ray_t_limited)

@@ -7,7 +7,7 @@ Simple Python bindings for the great C++ Bounding Volume Hierarchy (BVH) library
 Exposes `tinybvh`'s fast BVH construction algorithms to Python, to use for CPU-side BVH generation in Python applications.
 Typically used for real-time ray tracing with PyOpenGL or Vulkan, collision detection, etc.
 
-**Note:** For now, `pytinybvh` only provides bsic core functionality for building a BVH with the SAH method (from triangle or point data), and some basic Ray intersection tests.
+**Note:** For now, `pytinybvh` only provides basic core functionality for building a BVH with the SAH method (from triangle or point data), and some basic Ray intersection tests.
 (see below for Roadmap).
 
 The output is provided as class containing numpy views, which can be interfaced from Python or uploaded directly to the GPU in Shader Storage Buffer Objects (SSBOs).

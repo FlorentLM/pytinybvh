@@ -92,7 +92,7 @@ class BVH:
         """
         ...
 
-    def intersect(self, ray: Ray) -> bool:
+    def intersect(self, ray: Ray) -> float:
         """
         Performs an intersection query with a single ray.
 
@@ -103,7 +103,7 @@ class BVH:
                        will be updated upon a successful hit.
 
         Returns:
-            bool: True if a hit was found, False otherwise.
+            float: The hit distance `t` if a hit was found, otherwise `infinity`.
         """
         ...
 
@@ -120,6 +120,36 @@ class BVH:
             numpy.ndarray: A structured array of shape (N,) with dtype
                            [('prim_id', '<u4'), ('t', '<f4'), ('u', '<f4'), ('v', '<f4')].
                            For misses, prim_id is -1 and t is infinity.
+        """
+        ...
+
+    def is_occluded(self, ray: Ray) -> bool:
+        """
+        Performs an occlusion query with a single ray.
+
+        Checks if any geometry is hit by the ray within the distance specified by `ray.t`.
+        This is typically faster than `intersect` as it can stop at the first hit.
+
+        Args:
+            ray (Ray): The ray to test.
+
+        Returns:
+            bool: True if the ray is occluded, False otherwise.
+        """
+        ...
+
+    def is_occluded_batch(self, origins: np.ndarray, directions: np.ndarray, t_max: Optional[np.ndarray] = None) -> np.ndarray:
+        """
+        Performs occlusion queries for a batch of rays.
+
+        Args:
+            origins (numpy.ndarray): A (N, 3) float array of ray origins.
+            directions (numpy.ndarray): A (N, 3) float array of ray directions.
+            t_max (numpy.ndarray, optional): A (N,) float array of maximum occlusion distances.
+                                             If a hit is found beyond this distance, it is ignored.
+
+        Returns:
+            numpy.ndarray: A boolean array of shape (N,) where `True` indicates occlusion.
         """
         ...
 

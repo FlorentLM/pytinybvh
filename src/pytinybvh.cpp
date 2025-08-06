@@ -270,7 +270,7 @@ PYBIND11_MODULE(pytinybvh, m) {
             );
         }, "The array of primitive indices, ordered for locality.")
 
-        .def("intersect", [](BVHWrapper &self, PyRay &py_ray) -> bool {
+        .def("intersect", [](BVHWrapper &self, PyRay &py_ray) -> float {
             tinybvh::Ray ray(
                 tinybvh::bvhvec3(py_ray.origin.x, py_ray.origin.y, py_ray.origin.z),
                 tinybvh::bvhvec3(py_ray.direction.x, py_ray.direction.y, py_ray.direction.z),
@@ -285,9 +285,10 @@ PYBIND11_MODULE(pytinybvh, m) {
                 py_ray.u = ray.hit.u;
                 py_ray.v = ray.hit.v;
                 py_ray.prim_id = ray.hit.prim;
-                return true;
+                return ray.hit.t;
             }
-            return false;
+            // no hit found (or no closer hit). Return infinity.
+            return INFINITY;
         }, py::arg("ray"),
            R"((
                 Performs an intersection query with a single ray.
@@ -299,7 +300,7 @@ PYBIND11_MODULE(pytinybvh, m) {
                                will be updated upon a successful hit.
 
                 Returns:
-                    bool: True if a hit was found, False otherwise.
+                    float: The hit distance `t` if a hit was found, otherwise `infinity`.
            ))")
 
         .def("intersect_batch", [](BVHWrapper &self, py::array_t<float, py::array::c_style> origins_np,
@@ -373,6 +374,91 @@ PYBIND11_MODULE(pytinybvh, m) {
                     numpy.ndarray: A structured array of shape (N,) with dtype
                                    [('prim_id', '<u4'), ('t', '<f4'), ('u', '<f4'), ('v', '<f4')].
                                    For misses, prim_id is -1 and t is infinity.
+           ))")
+
+        .def("is_occluded", [](BVHWrapper &self, const PyRay &py_ray) -> bool {
+            tinybvh::Ray ray(
+                tinybvh::bvhvec3(py_ray.origin.x, py_ray.origin.y, py_ray.origin.z),
+                tinybvh::bvhvec3(py_ray.direction.x, py_ray.direction.y, py_ray.direction.z),
+                py_ray.t // The ray's t is used as the maximum distance for the occlusion check
+            );
+            return self.bvh->IsOccluded(ray);
+        }, py::arg("ray"),
+           R"((
+                Performs an occlusion query with a single ray.
+
+                Checks if any geometry is hit by the ray within the distance specified by `ray.t`.
+                This is typically faster than `intersect` as it can stop at the first hit.
+
+                Args:
+                    ray (Ray): The ray to test.
+
+                Returns:
+                    bool: True if the ray is occluded, False otherwise.
+           ))")
+
+        .def("is_occluded_batch", [](BVHWrapper &self, py::array_t<float, py::array::c_style> origins_np,
+                                       py::array_t<float, py::array::c_style> directions_np,
+                                       py::object t_max_obj) -> py::array_t<bool>
+        {
+            // input validation
+            if (origins_np.ndim() != 2 || origins_np.shape(1) != 3) {
+                throw std::runtime_error("Origins must be a 2D numpy array with shape (N, 3).");
+            }
+            if (directions_np.ndim() != 2 || directions_np.shape(1) != 3) {
+                throw std::runtime_error("Directions must be a 2D numpy array with shape (N, 3).");
+            }
+            if (origins_np.shape(0) != directions_np.shape(0)) {
+                throw std::runtime_error("Origins and directions arrays must have the same number of rows.");
+            }
+
+            auto origins_buf = origins_np.request();
+            auto directions_buf = directions_np.request();
+            const size_t n_rays = origins_buf.shape[0];
+            const auto* origins_ptr = static_cast<const float*>(origins_buf.ptr);
+            const auto* directions_ptr = static_cast<const float*>(directions_buf.ptr);
+
+            const float* t_max_ptr = nullptr;
+            py::array_t<float, py::array::c_style> t_max_np;
+            if (!t_max_obj.is_none()) {
+                t_max_np = py::cast<py::array_t<float, py::array::c_style>>(t_max_obj);
+                if (t_max_np.ndim() != 1 || t_max_np.shape(0) != n_rays) {
+                    throw std::runtime_error("t_max must be a 1D array with length N.");
+                }
+                t_max_ptr = t_max_np.data();
+            }
+
+            // Create boolean output array
+            auto result_np = py::array_t<bool>(n_rays);
+            auto result_buf = result_np.request();
+            auto* result_ptr = static_cast<bool*>(result_buf.ptr);
+
+            for (size_t i = 0; i < n_rays; ++i) {
+                const size_t i3 = i * 3;
+                const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
+
+                tinybvh::Ray ray(
+                    tinybvh::bvhvec3(origins_ptr[i3], origins_ptr[i3+1], origins_ptr[i3+2]),
+                    tinybvh::bvhvec3(directions_ptr[i3], directions_ptr[i3+1], directions_ptr[i3+2]),
+                    t_init
+                );
+
+                result_ptr[i] = self.bvh->IsOccluded(ray);
+            }
+            return result_np;
+
+        }, py::arg("origins").noconvert(), py::arg("directions").noconvert(), py::arg("t_max") = py::none(),
+           R"((
+                Performs occlusion queries for a batch of rays.
+
+                Args:
+                    origins (numpy.ndarray): A (N, 3) float array of ray origins.
+                    directions (numpy.ndarray): A (N, 3) float array of ray directions.
+                    t_max (numpy.ndarray, optional): A (N,) float array of maximum occlusion distances.
+                                                     If a hit is found beyond this distance, it is ignored.
+
+                Returns:
+                    numpy.ndarray: A boolean array of shape (N,) where `True` indicates occlusion.
            ))")
 
         .def("refit", &BVHWrapper::refit,

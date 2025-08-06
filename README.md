@@ -25,7 +25,7 @@ Before installing, you need a few tools on your system:
 
 ## Installation
 
-The C++ dependencies (`tinybvh` and `glm`) are included as Git submodules.
+The C++ dependency (`tinybvh`) is included as a Git submodule.
 
 1.  **Clone the repository:**
     ```bash
@@ -33,7 +33,7 @@ The C++ dependencies (`tinybvh` and `glm`) are included as Git submodules.
     cd pytinybvh
     ```
 
-2.  **Initialize the C++ Submodules:**
+2.  **Initialize the C++ Submodule:**
     ```bash
     git submodule update --init --recursive
     ```
@@ -144,7 +144,6 @@ I included a simple `test.py` script that includes a 3D viewer.
 ```
 pytinybvh/
 ├── deps/                   # C++ dependencies (submodules)
-│   ├── glm/
 │   └── tinybvh/
 ├── src/                    # C++ wrapper source
 │   └── pytinybvh.cpp

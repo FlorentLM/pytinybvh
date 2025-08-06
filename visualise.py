@@ -2,7 +2,7 @@ import time
 import sys
 from pathlib import Path
 import numpy as np
-from pytinybvh import BVH
+from pytinybvh import BVH, BuildQuality
 
 
 def load_primitives_from_file(filepath: Path, points_only: bool) -> np.ndarray:
@@ -134,7 +134,7 @@ if __name__ == "__main__":
 
     if prims_np.shape[1] == 9:
         prim_type = "triangles"
-        bvh = BVH.from_triangles(prims_np)
+        bvh = BVH.from_triangles(prims_np, BuildQuality.Balanced)
     elif prims_np.shape[1] == 3:
         prim_type = "points"
         bvh = BVH.from_points(prims_np)
@@ -150,7 +150,7 @@ if __name__ == "__main__":
     reordered_primitives = prims_np[bvh.prim_indices]
     reorder_time = time.time_ns() - start_time
 
-    print(f"\nBVH built for {len(prims_np)} {prim_type}.")
+    print(f"\nBVH built for {len(prims_np)} {prim_type} (quality: {bvh.quality}).")
     print(f"  - Build      : {gen_time / 1e6:.4f} ms")
     print(f"  - Reordering : {reorder_time / 1e6:.4f} ms")
     print(f"  - Total      : {(gen_time + reorder_time) / 1e6:.2f} ms")

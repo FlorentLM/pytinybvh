@@ -1,6 +1,8 @@
+import os
+from pathlib import Path
 import numpy as np
 np.set_printoptions(precision=3, suppress=True)
-from pytinybvh import BVH, Ray, vec3
+from pytinybvh import BVH, Ray, vec3, BuildQuality
 
 # Create some triangle geometry
 triangles = np.array([
@@ -8,20 +10,62 @@ triangles = np.array([
     [[-1.0, -1.0, 0.0],
      [ 1.0, -1.0, 0.0],
      [ 0.0,  1.0, 0.0]],
-    # Triangle 1 (around (3,3), at z=5)
+    # Triangle 1 (around (3, 3), at z=5)
     [[ 2.0,  2.0, 5.0],
      [ 4.0,  2.0, 5.0],
      [ 3.0,  4.0, 5.0]],
 ], dtype=np.float32)
 
-bvh = BVH.from_triangles(triangles)
-print("BVH built successfully!")
+print("\n--- Testing Build Quality ---")
+bvh_balanced = BVH.from_triangles(triangles, quality=BuildQuality.Balanced)
+bvh_high = BVH.from_triangles(triangles, quality=BuildQuality.High)
+bvh_quick = BVH.from_triangles(triangles, quality=BuildQuality.Quick)
 
-print("Nodes array shape:", bvh.nodes.shape)
-print("Nodes array dtype:", bvh.nodes.dtype)
+assert(bvh_balanced.nodes.nbytes == 128)
+assert(bvh_high.nodes.nbytes == 128)
+assert(bvh_quick.nodes.nbytes == 128)
+
+assert bvh_balanced.quality == BuildQuality.Balanced
+assert bvh_high.quality == BuildQuality.High
+assert bvh_quick.quality == BuildQuality.Quick
+
+print("BVH correctly built with Balanced quality")
+print("BVH correctly built with High quality")
+print("BVH correctly built with Quick quality")
+
+try:
+    bvh_high.refit()
+    # This should not be reached
+    assert False, "Refit should have raised an exception for a High quality BVH."
+except RuntimeError as e:
+    print(f"Successfully caught expected error on refit: {e}")
+
+print("\nBuild quality tests successful!")
+
+# -------
+
+print("\n--- Testing Saving / Loading ---")
+bvh_balanced.save(Path("bvh_test.bvh"))
+assert os.path.exists("bvh_test.bvh")
+print(f'Saved file size: {os.stat("bvh_test.bvh").st_size} bytes')
+vertices_4f = np.zeros((len(triangles) * 3, 4), dtype=np.float32)
+vertices_4f[:, :3] = triangles.reshape(-1, 3)
+bvh = BVH.load(vertices_4f, "bvh_test.bvh")
+os.remove("bvh_test.bvh")
+
+assert np.all(bvh.nodes == bvh_balanced.nodes)
+assert np.all(bvh.prim_indices == bvh_balanced.prim_indices)
+assert bvh.prim_count == bvh_balanced.prim_count
+assert bvh.quality == bvh_balanced.quality
+
+print("\nSave/load tests successful!")
+
+# -------
+
+print("\n--- Testing Structure ---")
 
 # Access fields by name
-root_node = bvh.nodes[1]
+root_node = bvh.nodes[0]
 
 print("\nRoot node (index 0):")
 print("  AABB Min :", root_node['aabb_min'])
@@ -32,7 +76,12 @@ print(f"  Children : {root_node['left_first']} and {root_node['left_first'] + 1}
 # Access whole columns at once
 all_tri_counts = bvh.nodes['prim_count']
 leaf_nodes = bvh.nodes[all_tri_counts > 0]
-print(f"\nFound {len(leaf_nodes)} leaf nodes.")
+
+assert len(bvh.nodes) == 4
+assert len(leaf_nodes) == 2
+
+print(f"\nFound {len(bvh.nodes)} nodes, incliding {len(leaf_nodes)} leaf nodes.")
+print('\nStructure tests successful!')
 
 # -------
 

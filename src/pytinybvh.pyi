@@ -1,11 +1,27 @@
 from __future__ import annotations
+from pathlib import Path
 import numpy as np
-from typing import Optional
+from typing import Optional, Union
+from enum import Enum
 
-# Represents the structured dtype for BVH nodes returned by the `nodes` property.
+PathLike = Union[str, Path]
+
+# A hint for the structured dtype of the BVH.nodes array.
+# bvh_node_dtype = np.dtype([
+#     ('aabb_min', ('<f4', (3,))),
+#     ('left_first', '<u4'),
+#     ('aabb_max', ('<f4', (3,))),
+#     ('prim_count', '<u4')
+# ])
 bvh_node_dtype: np.dtype
 
-# Represents the structured dtype for hit records returned by `intersect_batch`.
+# A hint for the structured dtype of the intersect_batch return array.
+# hit_record_dtype = np.dtype([
+#     ('prim_id', '<u4'),
+#     ('t', '<f4'),
+#     ('u', '<f4'),
+#     ('v', '<f4')
+# ])
 hit_record_dtype: np.dtype
 
 
@@ -16,6 +32,13 @@ class vec3:
     z: float
 
     def __init__(self, x: float = 0.0, y: float = 0.0, z: float = 0.0) -> None: ...
+
+
+class BuildQuality(Enum):
+    """Enum for selecting BVH build quality."""
+    Quick: int
+    Balanced: int
+    High: int
 
 
 class Ray:
@@ -46,7 +69,7 @@ class BVH:
     """A Bounding Volume Hierarchy for fast ray intersections."""
 
     @staticmethod
-    def from_triangles(triangles: np.ndarray) -> BVH:
+    def from_triangles(triangles: np.ndarray, quality: BuildQuality = ...) -> BVH:
         """
         Builds a BVH for triangles from a (N, 3, 3) or (N, 9) float array.
 
@@ -60,7 +83,7 @@ class BVH:
         ...
 
     @staticmethod
-    def from_points(points: np.ndarray, radius: float = 1e-05) -> BVH:
+    def from_points(points: np.ndarray, radius: float = 1e-05, quality: BuildQuality = ...) -> BVH:
         """
         Builds a BVH for points from a (N, 3) float array.
 
@@ -76,7 +99,7 @@ class BVH:
         ...
 
     @staticmethod
-    def from_vertices_4f(vertices: np.ndarray) -> BVH:
+    def from_vertices_4f(vertices: np.ndarray, quality: BuildQuality = ...) -> BVH:
         """
         Builds a BVH from a pre-formatted (M, 4) vertex array.
 
@@ -89,6 +112,36 @@ class BVH:
 
         Returns:
             BVH: A new BVH instance.
+        """
+        ...
+
+    @staticmethod
+    def load(vertices: np.ndarray, filepath: PathLike) -> BVH:
+        """
+        Loads a BVH from a file, requires the original vertex data.
+
+        Per design tinybvh does not save the geometric vertex data in its file format;
+        only the acceleration structure itself (the nodes and primitive indices).
+
+        Thus, the vertex data that was used to create the original BVH must be provided:
+        this function re-links the loaded acceleration structure to the vertex data in memory.
+
+        Args:
+            vertices (numpy.ndarray): A float32, C-style contiguous numpy array of shape (M, 4) representing
+                the vertex data. This must be the same data that was used when the BVH was originally built and saved.
+            filepath (str or pathlib.Path): The path to the saved BVH file.
+
+        Returns:
+            BVH: A new BVH instance.
+        """
+        ...
+
+    def save(self, filepath: PathLike) -> None:
+        """
+        Saves the BVH to a file.
+
+        Args:
+            filepath (str or pathlib.Path): The path where the BVH file will be saved.
         """
         ...
 
@@ -161,7 +214,7 @@ class BVH:
         Should be called after the underlying vertex data (numpy array used for construction)
         has been modified.
 
-        Note: This will fail if the BVH was built with spatial splits.
+        Note: This will fail if the BVH was built with spatial splits (high-quality preset).
         """
         ...
 
@@ -193,4 +246,9 @@ class BVH:
     @property
     def aabb_max(self) -> vec3:
         """The maximum corner of the root axis-aligned bounding box."""
+        ...
+
+    @property
+    def quality(self) -> BuildQuality:
+        """The build quality level used to construct the BVH."""
         ...

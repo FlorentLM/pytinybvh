@@ -7,10 +7,10 @@ Simple Python bindings for the great C++ Bounding Volume Hierarchy (BVH) library
 Exposes `tinybvh`'s fast BVH construction algorithms to Python, to use for CPU-side BVH generation in Python applications.
 Typically used for real-time ray tracing with PyOpenGL or Vulkan, collision detection, etc.
 
-**Note:** For now, `pytinybvh` only provides the core functionality for building a BVH with the SAH method, from triangle or point data
+**Note:** For now, `pytinybvh` only provides bsic core functionality for building a BVH with the SAH method (from triangle or point data), and some basic Ray intersection tests.
 (see below for Roadmap).
 
-The output is provided as raw numpy arrays, designed to be uploaded directly to the GPU as Shader Storage Buffer Objects (SSBOs).
+The output is provided as class containing numpy views, which can be interfaced from Python or uploaded directly to the GPU in Shader Storage Buffer Objects (SSBOs).
 
 ## Prerequisites
 
@@ -55,7 +55,6 @@ The C++ dependency (`tinybvh`) is included as a Git submodule.
 
 If the process completes without errors, the `pytinybvh` module is now installed and ready to be used in your virtual environment. This will automatically download Python dependencies and compile the C++ extension module.
 
-
 5. **Use in other projects:**
     From the virtual environment of your other project, run the installation of `pytinybvh` in editable mode.
     ```bash
@@ -69,11 +68,11 @@ The module provides two functions that take a numpy array and return a tuple of 
 
 ### For Triangle Meshes
 
-The input must be a NumPy array of shape `(N, 9)`, where N is the number of triangles.
+The input must be a NumPy array of shape `(N, 9)` or `(N, 3, 3)`, where N is the number of triangles.
 
 ```python
 import numpy as np
-import pytinybvh
+from pytinybvh import BVH
 
 # Create a flat array of triangle data (2 triangles)
 triangles_np = np.array([
@@ -83,10 +82,10 @@ triangles_np = np.array([
 ], dtype=np.float32)
 
 # Build the BVH
-bvh_nodes, prim_indices = pytinybvh.from_triangles(triangles_np)
+bvh_nodes, prim_indices = BVH.from_points(triangles_np)
 
 # For rendering, reorder the original triangles
-reordered_triangles = triangles_np[prim_indices]
+reordered_triangles = triangles_np[bvh.prim_indices]
 
 # 'bvh_nodes' and 'reordered_triangles' can now be uploaded to SSBOs
 ```
@@ -97,7 +96,7 @@ The input must be a NumPy array of shape `(N, 3)`, where N is the number of poin
 
 ```python
 import numpy as np
-import pytinybvh
+from pytinybvh import BVH
 
 # Create an array of 3D points
 points_np = np.array([
@@ -108,15 +107,15 @@ points_np = np.array([
 ], dtype=np.float32)
 
 # Build the BVH
-bvh_nodes, prim_indices = pytinybvh.from_points(points_np)
+bvh = BVH.from_points(points_np)
 
 # For rendering, reorder the original points
-reordered_points = points_np[prim_indices]
+reordered_points = points_np[bvh.prim_indices]
 
 # 'bvh_nodes' and 'reordered_points' can now be uploaded to SSBOs
 ```
 
-## Running the Demo script
+## Running the demo viewer
 
 I included a simple `test.py` script that includes a 3D viewer.
 
@@ -130,13 +129,12 @@ I included a simple `test.py` script that includes a 3D viewer.
     ```python
     TEST_SCENE_FILE = Path('dragon.ply') # File to load
     POINTS_ONLY = False                  # Set True for points, False for triangles
-    VISUALIZE = True                     # Set True to open the 3D viewer (needs pyvista)
     VISUALIZE_DEPTH = 7                  # Max BVH depth to display
     ```
 
 2.  **Run it:**
     ```bash
-    python test.py
+    python visualise.py
     ```
 
 ## Project Structure
@@ -150,7 +148,8 @@ pytinybvh/
 ├── .gitmodules             # Git submodule configuration
 ├── pyproject.toml          # Python build configuration
 ├── setup.py                # Build script for the C++ extension
-├── test.py                 # Demo and visualization script
+├── tests.py                # Demo and tests script
+├── visualise.py            # View the BVH with the geometry in 3D
 ├── LICENSE                 # MIT License
 ├── dragon.ply              # Stanford dragon as a.ply file
 └── README.md

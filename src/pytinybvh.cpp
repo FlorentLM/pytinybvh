@@ -169,11 +169,10 @@ struct PyRay {
 PYBIND11_MODULE(pytinybvh, m) {
     m.doc() = "Python bindings for the tinybvh library";
 
+    // HitRecord struct and its numpy dtype
     struct HitRecord {
         uint32_t prim_id;
-        float t;
-        float u;
-        float v;
+        float t, u, v;
     };
     PYBIND11_NUMPY_DTYPE(HitRecord, prim_id, t, u, v);
 
@@ -209,31 +208,57 @@ PYBIND11_MODULE(pytinybvh, m) {
 
     py::class_<BVHWrapper>(m, "BVH", "A Bounding Volume Hierarchy for fast ray intersections.")
         .def_static("from_triangles", &BVHWrapper::from_triangles,
-            "Builds a BVH for triangles from a (N, 3, 3) or (N, 9) float array.",
-            py::arg("triangles").noconvert("Must be a numpy.ndarray"))
-        .def_static("from_points", &BVHWrapper::from_points,
-            "Builds a BVH for points from a (N, 3) float array.",
-            py::arg("points").noconvert("Must be a numpy.ndarray"), py::arg("radius") = 1e-5f)
-        .def_static("from_vertices_4f", &BVHWrapper::from_vertices_4f,
-            "Builds a BVH from a pre-formatted (N*3, 4) vertex array. This is a zero-copy operation.",
-            py::arg("vertices").noconvert("Must be a numpy.ndarray"))
+            R"((
+                Builds a BVH for triangles from a (N, 3, 3) or (N, 9) float array.
 
-        // Expose internal BVH nodes array as zero-copy array view
+                Args:
+                    triangles (numpy.ndarray): A float32 array of shape (N, 3, 3) or (N, 9)
+                                               representing N triangles.
+
+                Returns:
+                    BVH: A new BVH instance.
+            ))",
+            py::arg("triangles").noconvert())
+        .def_static("from_points", &BVHWrapper::from_points,
+            R"((
+                Builds a BVH for points from a (N, 3) float array.
+
+                Internally, this represents each point as a small axis-aligned bounding box.
+
+                Args:
+                    points (numpy.ndarray): A float32 array of shape (N, 3) representing N points.
+                    radius (float): The radius used to create an AABB for each point.
+
+                Returns:
+                    BVH: A new BVH instance.
+            ))",
+            py::arg("points").noconvert(), py::arg("radius") = 1e-5f)
+        .def_static("from_vertices_4f", &BVHWrapper::from_vertices_4f,
+            R"((
+                Builds a BVH from a pre-formatted (M, 4) vertex array.
+
+                This is a zero-copy operation. The BVH will hold a reference to the
+                provided numpy array's memory buffer. The array must not be garbage-collected
+                while the BVH is in use. M must be a multiple of 3.
+
+                Args:
+                    vertices (numpy.ndarray): A float32 array of shape (M, 4).
+
+                Returns:
+                    BVH: A new BVH instance.
+            ))",
+            py::arg("vertices").noconvert())
+
         .def_property_readonly("nodes", [](BVHWrapper &self) -> py::array {
             if (!self.bvh || self.bvh->usedNodes == 0) {
-                // empty array with the correct structured dtype
                 py::dtype dt = py::dtype::of<tinybvh::BVH::BVHNode>();
                 return py::array(dt, {0}, {});
             }
-            // create 1D array of BVHNode structs, Pybind11 will automatically use the structured dtype
             return py::array_t<tinybvh::BVH::BVHNode>(
-                { (py::ssize_t)self.bvh->usedNodes }, // shape (N,)
-                self.bvh->bvhNode,                   // data pointer
-                py::cast(self)                      // This py::cast tells numpy that BVHWrapper owns this memory
+                { (py::ssize_t)self.bvh->usedNodes }, self.bvh->bvhNode, py::cast(self)
             );
         }, "The structured numpy array of BVH nodes.")
 
-        // Expose primitive index array as zero-copy array view
         .def_property_readonly("prim_indices", [](BVHWrapper &self) -> py::array {
             if (!self.bvh || self.bvh->idxCount == 0) {
                 return py::array_t<uint32_t>(0);
@@ -246,8 +271,6 @@ PYBIND11_MODULE(pytinybvh, m) {
         }, "The array of primitive indices, ordered for locality.")
 
         .def("intersect", [](BVHWrapper &self, PyRay &py_ray) -> bool {
-
-            // python Ray -> C++ Ray
             tinybvh::Ray ray(
                 tinybvh::bvhvec3(py_ray.origin.x, py_ray.origin.y, py_ray.origin.z),
                 tinybvh::bvhvec3(py_ray.direction.x, py_ray.direction.y, py_ray.direction.z),
@@ -265,10 +288,21 @@ PYBIND11_MODULE(pytinybvh, m) {
                 return true;
             }
             return false;
-        }, py::arg("ray"), "Performs an intersection query with a ray. Modifies the ray object in-place.")
+        }, py::arg("ray"),
+           R"((
+                Performs an intersection query with a single ray.
 
-        .def("intersect_batch", [](BVHWrapper &self,
-                                   py::array_t<float, py::array::c_style> origins_np,
+                This method modifies the passed Ray object in-place if a closer hit is found.
+
+                Args:
+                    ray (Ray): The ray to test. Its `t`, `u`, `v`, and `prim_id` attributes
+                               will be updated upon a successful hit.
+
+                Returns:
+                    bool: True if a hit was found, False otherwise.
+           ))")
+
+        .def("intersect_batch", [](BVHWrapper &self, py::array_t<float, py::array::c_style> origins_np,
                                    py::array_t<float, py::array::c_style> directions_np,
                                    py::object t_max_obj) -> py::array
         {
@@ -321,24 +355,35 @@ PYBIND11_MODULE(pytinybvh, m) {
                 if (ray.hit.t < t_init) {
                     result_ptr[i] = {ray.hit.prim, ray.hit.t, ray.hit.u, ray.hit.v};
                 } else {
-                    // sentinel values for a miss
+                    // sentinel value for a miss is all the bits to 1
                     result_ptr[i] = {static_cast<uint32_t>(-1), INFINITY, 0.0f, 0.0f};
                 }
             }
-
             return result_np;
         }, py::arg("origins").noconvert(), py::arg("directions").noconvert(), py::arg("t_max") = py::none(),
-           "Performs intersection queries for a batch of rays.\n\n"
-           "Args:\n"
-           "    origins (numpy.ndarray): A (N, 3) float array of ray origins.\n"
-           "    directions (numpy.ndarray): A (N, 3) float array of ray directions.\n"
-           "    t_max (numpy.ndarray, optional): A (N,) float array of maximum intersection distances.\n\n"
-           "Returns:\n"
-           "    numpy.ndarray: A structured array of shape (N,) with dtype\n"
-           "                   [('prim_id', '<u4'), ('t', '<f4'), ('u', '<f4'), ('v', '<f4')].\n"
-           "                   For misses, prim_id is -1 and t is infinity.")
+           R"((
+                Performs intersection queries for a batch of rays.
 
-        .def("refit", &BVHWrapper::refit, "Refits the BVH to the current state of the source geometry.")
+                Args:
+                    origins (numpy.ndarray): A (N, 3) float array of ray origins.
+                    directions (numpy.ndarray): A (N, 3) float array of ray directions.
+                    t_max (numpy.ndarray, optional): A (N,) float array of maximum intersection distances.
+
+                Returns:
+                    numpy.ndarray: A structured array of shape (N,) with dtype
+                                   [('prim_id', '<u4'), ('t', '<f4'), ('u', '<f4'), ('v', '<f4')].
+                                   For misses, prim_id is -1 and t is infinity.
+           ))")
+
+        .def("refit", &BVHWrapper::refit,
+             R"((
+                Refits the BVH to the current state of the source geometry, which is much faster than a full rebuild.
+
+                Should be called after the underlying vertex data (numpy array used for construction)
+                has been modified.
+
+                Note: This will fail if the BVH was built with spatial splits.
+             ))")
 
         .def_property_readonly("node_count", [](const BVHWrapper &self){ return self.bvh->usedNodes; }, "Total number of nodes in the BVH.")
         .def_property_readonly("prim_count", [](const BVHWrapper &self){ return self.bvh->triCount; }, "Total number of primitives in the BVH.")

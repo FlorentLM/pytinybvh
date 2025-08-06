@@ -2,10 +2,6 @@
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
 
-#define GLM_ENABLE_EXPERIMENTAL
-#pragma warning(disable : 4201)
-#include <glm/glm/glm.hpp>
-
 #define TINYBVH_IMPLEMENTATION
 #include "tinybvh/tiny_bvh.h"
 

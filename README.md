@@ -87,7 +87,7 @@ bvh = BVH.from_points(triangles_np)
 # For rendering, reorder the original triangles
 reordered_triangles = triangles_np[bvh.prim_indices]
 
-# 'bvh_nodes' and 'reordered_triangles' can now be uploaded to SSBOs
+# 'bvh.nodes' and 'reordered_triangles' can now be uploaded to SSBOs
 ```
 
 ### For Point Clouds
@@ -112,7 +112,7 @@ bvh = BVH.from_points(points_np)
 # For rendering, reorder the original points
 reordered_points = points_np[bvh.prim_indices]
 
-# 'bvh_nodes' and 'reordered_points' can now be uploaded to SSBOs
+# 'bvh.nodes' and 'reordered_points' can now be uploaded to SSBOs
 ```
 
 ## Running the demo viewer

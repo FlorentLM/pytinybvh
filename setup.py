@@ -7,9 +7,7 @@ ext_modules = [
         'pytinybvh',
         sources=['src/pytinybvh.cpp'],
         include_dirs=[
-            # Path to pybind11 headers
             pybind11.get_include(),
-            # Path to tinybvh and glm headers inside the deps directory
             'deps/',
         ],
         language='c++',

@@ -82,7 +82,7 @@ triangles_np = np.array([
 ], dtype=np.float32)
 
 # Build the BVH
-bvh_nodes, prim_indices = BVH.from_points(triangles_np)
+bvh = BVH.from_points(triangles_np)
 
 # For rendering, reorder the original triangles
 reordered_triangles = triangles_np[bvh.prim_indices]

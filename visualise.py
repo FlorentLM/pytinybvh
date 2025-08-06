@@ -2,7 +2,7 @@ import time
 import sys
 from pathlib import Path
 import numpy as np
-import pytinybvh
+from pytinybvh import BVH
 
 
 def load_primitives_from_file(filepath: Path, points_only: bool) -> np.ndarray:
@@ -96,7 +96,6 @@ if __name__ == "__main__":
 
     TEST_SCENE_FILE = Path('dragon.ply')
     POINTS_ONLY = False     # True for point clouds, False for triangle meshes
-    VISUALISE = True        # True to show the PyVista debug viewer
     VISUALISE_DEPTH = 7     # Viewer max depth
 
     if TEST_SCENE_FILE.exists():
@@ -106,14 +105,12 @@ if __name__ == "__main__":
             print(f"\nError: Configuration requires loading '{TEST_SCENE_FILE}', but `trimesh` is not installed.")
             print("Please install it with: `uv pip install trimesh`")
             sys.exit(1)
-
-    if VISUALISE:
-        try:
-            import pyvista
-        except ImportError:
-            print("\nError: Configuration has `VISUALISE = True`, but `pyvista` is not installed.")
-            print("Please install it with: `uv pip install pyvista`")
-            sys.exit(1)
+    try:
+        import pyvista
+    except ImportError:
+        print("\n`pyvista` is not installed.")
+        print("Please install it with: `uv pip install pyvista`")
+        sys.exit(1)
 
     prims_np = np.array([], dtype=np.float32)
 
@@ -131,26 +128,26 @@ if __name__ == "__main__":
 
     print(f"\nUsing numpy array `prims_np` of shape {prims_np.shape}")
 
+    # BVH building
+    print("\nBuilding BVH using pytinybvh...")
+    start_time = time.time_ns()
+
     if prims_np.shape[1] == 9:
         prim_type = "triangles"
-        build_func = pytinybvh.from_triangles
+        bvh = BVH.from_triangles(prims_np)
     elif prims_np.shape[1] == 3:
         prim_type = "points"
-        build_func = pytinybvh.from_points
+        bvh = BVH.from_points(prims_np)
     else:
         print(f"Error: Unsupported primitive shape {prims_np.shape}. Must be (N, 3) or (N, 9).")
         sys.exit(1)
 
-    # BVH building
-    print("\nBuilding BVH using pytinybvh...")
-    start_time = time.time_ns()
-    bvh_nodes, prim_indices = build_func(prims_np)
     gen_time = time.time_ns() - start_time
     print(f"BVH build complete!")
 
     # Reordering primitives for rendering (simulates what a shader would need)
     start_time = time.time_ns()
-    reordered_primitives = prims_np[prim_indices]
+    reordered_primitives = prims_np[bvh.prim_indices]
     reorder_time = time.time_ns() - start_time
 
     print(f"\nBVH built for {len(prims_np)} {prim_type}.")
@@ -159,5 +156,4 @@ if __name__ == "__main__":
     print(f"  - Total      : {(gen_time + reorder_time) / 1e6:.2f} ms")
     print(f"    (could be recomputed {1 / ((gen_time + reorder_time) / 1e9):.2f} times per second)")
 
-    if VISUALISE:
-        view_bvh(prims_np, bvh_nodes, max_depth=VISUALISE_DEPTH)
+    view_bvh(prims_np, bvh.nodes, max_depth=VISUALISE_DEPTH)

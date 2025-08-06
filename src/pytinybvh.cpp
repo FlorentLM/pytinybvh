@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <memory> // for std::unique_ptr
 #include <string>
+#include <cmath>
 
 namespace py = pybind11;
 using namespace pybind11::literals;
@@ -168,6 +169,15 @@ struct PyRay {
 PYBIND11_MODULE(pytinybvh, m) {
     m.doc() = "Python bindings for the tinybvh library";
 
+    struct HitRecord {
+        uint32_t prim_id;
+        float t;
+        float u;
+        float v;
+    };
+    PYBIND11_NUMPY_DTYPE(HitRecord, prim_id, t, u, v);
+
+
     PYBIND11_NUMPY_DTYPE(tinybvh::bvhvec3, x, y, z);
     PYBIND11_NUMPY_DTYPE_EX(tinybvh::BVH::BVHNode, aabbMin, "aabb_min", leftFirst, "left_first", aabbMax, "aabb_max", triCount, "prim_count");
 
@@ -256,6 +266,77 @@ PYBIND11_MODULE(pytinybvh, m) {
             }
             return false;
         }, py::arg("ray"), "Performs an intersection query with a ray. Modifies the ray object in-place.")
+
+        .def("intersect_batch", [](BVHWrapper &self,
+                                   py::array_t<float, py::array::c_style> origins_np,
+                                   py::array_t<float, py::array::c_style> directions_np,
+                                   py::object t_max_obj) -> py::array
+        {
+            // input validation
+            if (origins_np.ndim() != 2 || origins_np.shape(1) != 3) {
+                throw std::runtime_error("Origins must be a 2D numpy array with shape (N, 3).");
+            }
+            if (directions_np.ndim() != 2 || directions_np.shape(1) != 3) {
+                throw std::runtime_error("Directions must be a 2D numpy array with shape (N, 3).");
+            }
+            if (origins_np.shape(0) != directions_np.shape(0)) {
+                throw std::runtime_error("Origins and directions arrays must have the same number of rows.");
+            }
+
+            // access the numpy array buffers
+            auto origins_buf = origins_np.request();
+            auto directions_buf = directions_np.request();
+            const size_t n_rays = origins_buf.shape[0];
+            const auto* origins_ptr = static_cast<const float*>(origins_buf.ptr);
+            const auto* directions_ptr = static_cast<const float*>(directions_buf.ptr);
+
+            // handle optional t_max array
+            const float* t_max_ptr = nullptr;
+            py::array_t<float, py::array::c_style> t_max_np;
+            if (!t_max_obj.is_none()) {
+                t_max_np = py::cast<py::array_t<float, py::array::c_style>>(t_max_obj);
+                if (t_max_np.ndim() != 1 || t_max_np.shape(0) != n_rays) {
+                    throw std::runtime_error("t_max must be a 1D array with length N.");
+                }
+                t_max_ptr = t_max_np.data();
+            }
+
+            // Create output structured numpy array
+            auto result_np = py::array_t<HitRecord>(n_rays);
+            auto result_buf = result_np.request();
+            auto* result_ptr = static_cast<HitRecord*>(result_buf.ptr);
+
+            for (size_t i = 0; i < n_rays; ++i) {
+                const size_t i3 = i * 3;
+                const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
+
+                tinybvh::Ray ray(
+                    tinybvh::bvhvec3(origins_ptr[i3], origins_ptr[i3+1], origins_ptr[i3+2]),
+                    tinybvh::bvhvec3(directions_ptr[i3], directions_ptr[i3+1], directions_ptr[i3+2]),
+                    t_init
+                );
+
+                self.bvh->Intersect(ray);
+
+                if (ray.hit.t < t_init) {
+                    result_ptr[i] = {ray.hit.prim, ray.hit.t, ray.hit.u, ray.hit.v};
+                } else {
+                    // sentinel values for a miss
+                    result_ptr[i] = {static_cast<uint32_t>(-1), INFINITY, 0.0f, 0.0f};
+                }
+            }
+
+            return result_np;
+        }, py::arg("origins").noconvert(), py::arg("directions").noconvert(), py::arg("t_max") = py::none(),
+           "Performs intersection queries for a batch of rays.\n\n"
+           "Args:\n"
+           "    origins (numpy.ndarray): A (N, 3) float array of ray origins.\n"
+           "    directions (numpy.ndarray): A (N, 3) float array of ray directions.\n"
+           "    t_max (numpy.ndarray, optional): A (N,) float array of maximum intersection distances.\n\n"
+           "Returns:\n"
+           "    numpy.ndarray: A structured array of shape (N,) with dtype\n"
+           "                   [('prim_id', '<u4'), ('t', '<f4'), ('u', '<f4'), ('v', '<f4')].\n"
+           "                   For misses, prim_id is -1 and t is infinity.")
 
         .def("refit", &BVHWrapper::refit, "Refits the BVH to the current state of the source geometry.")
 

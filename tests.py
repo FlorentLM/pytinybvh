@@ -1,27 +1,24 @@
 import numpy as np
+np.set_printoptions(precision=3, suppress=True)
 from pytinybvh import BVH, Ray, vec3
 
 # Create some triangle geometry
 triangles = np.array([
-    [   # Tri 1
-        [-1.0, -1.0, 0.0],
-        [1.0, -1.0, 0.0],
-        [1.0, 1.0, 0.0]
-    ],
-
-    [   # Tri 2
-        [-1.0, -1.0, 0.0],
-        [1.0, 1.0, 0.0],
-        [-1.0, 1.0, 0.0]
-    ],
+    # Triangle 0 (around origin, at z=0)
+    [[-1.0, -1.0, 0.0],
+     [ 1.0, -1.0, 0.0],
+     [ 0.0,  1.0, 0.0]],
+    # Triangle 1 (around (3,3), at z=5)
+    [[ 2.0,  2.0, 5.0],
+     [ 4.0,  2.0, 5.0],
+     [ 3.0,  4.0, 5.0]],
 ], dtype=np.float32)
 
-# Option A: User-friendly (with copy)
 bvh = BVH.from_triangles(triangles)
-
 print("BVH built successfully!")
-print("Node array shape:", bvh.nodes.shape)
-print("Node array dtype:", bvh.nodes.dtype)
+
+print("Nodes array shape:", bvh.nodes.shape)
+print("Nodes array dtype:", bvh.nodes.dtype)
 
 # Access fields by name
 print("\nRoot node (index 0):")
@@ -38,16 +35,61 @@ print(f"\nFound {len(leaf_nodes)} leaf nodes.")
 
 # -------
 
-# Perform an intersection query
-ray = Ray(
-    origin=vec3(0.0, 0.0, -1.0),
+print("\n--- Testing single ray intersect ---")
+# This ray should hit the first triangle (ID 0) at t=10
+ray_hit = Ray(
+    origin=vec3(0.0, 0.0, -10.0),
     direction=vec3(0.0, 0.0, 1.0)
 )
-print("\nBefore intersect:", ray)
+has_hit = bvh.intersect(ray_hit)
+print(f"Ray 1 (expect hit): {ray_hit}")
+assert has_hit and ray_hit.prim_id == 0 and np.isclose(ray_hit.t, 10.0)
 
-hit = bvh.intersect(ray)
+# This ray should miss everything
+ray_miss = Ray(
+    origin=vec3(10.0, 10.0, -10.0),
+    direction=vec3(0.0, 0.0, 1.0)
+)
+has_hit_miss = bvh.intersect(ray_miss)
+print(f"Ray 2 (expect miss): {ray_miss}")
+assert not has_hit_miss
 
-print("Hit:", hit)
-print("After intersect:", ray)
-if hit:
-    print(f"Intersection Details: t={ray.t:.3f}, prim_id={ray.prim_id}")
+print("\n--- Testing batch ray intersect ---")
+# Prepare batch of rays specifically aimed at their targets
+origins = np.array([
+    [0.0, 0.0, -10.0],   # Ray 0: Aimed at tri 0. Should hit at t=10.
+    [3.0, 3.0, -10.0],   # Ray 1: Aimed at tri 1. Should hit at t=15.
+    [10.0, 10.0, -10.0], # Ray 2: Aimed at nothing. Should miss.
+    [0.0, 0.0, -10.0],   # Ray 3: Aimed at tri 0, but will be stopped by t_max.
+], dtype=np.float32)
+
+directions = np.array([
+    [0.0, 0.0, 1.0],
+    [0.0, 0.0, 1.0],
+    [0.0, 0.0, 1.0],
+    [0.0, 0.0, 1.0],
+], dtype=np.float32)
+
+# Optional t_max array. Ray 3 has t_max=4, so it won't reach tri 0 at t=10
+t_max = np.array([100.0, 100.0, 100.0, 4.0], dtype=np.float32)
+
+# Perform the batch intersection
+hits = bvh.intersect_batch(origins, directions, t_max)
+
+print("Batch intersection results (structured array):")
+print(hits)
+print("\nIndividual hit results:")
+print(f"Hit 0 (prim_id, t): ({hits[0]['prim_id'].astype(np.int32)}, {hits[0]['t']:.3f}) -> Expected: (0, 10.0)")
+print(f"Hit 1 (prim_id, t): ({hits[1]['prim_id'].astype(np.int32)}, {hits[1]['t']:.3f}) -> Expected: (1, 15.0)")
+print(f"Hit 2 (prim_id, t): ({hits[2]['prim_id'].astype(np.int32)}, {hits[2]['t']:.3f}) -> Expected: (-1, inf)")
+print(f"Hit 3 (prim_id, t): ({hits[3]['prim_id'].astype(np.int32)}, {hits[3]['t']:.3f}) -> Expected: (-1, inf) due to t_max")
+
+# Assert for hit on triangle 0
+assert hits[0]['prim_id'] == 0 and np.isclose(hits[0]['t'], 10.0)
+# Assert for hit on triangle 1
+assert hits[1]['prim_id'] == 1 and np.isclose(hits[1]['t'], 15.0)
+prim_ids_as_signed = hits['prim_id'].astype(np.int32)
+assert prim_ids_as_signed[2] == -1 and np.isinf(hits[2]['t'])
+assert prim_ids_as_signed[3] == -1 and np.isinf(hits[3]['t'])
+
+print("\nBatch test successful!")

@@ -34,6 +34,26 @@ tinybvh::bvhvec3 py_obj_to_vec3(const py::object& obj) {
     throw std::runtime_error("Input must be a list, tuple, or numpy array of 3 floats.");
 }
 
+
+// thread_local pointer to pass the AABB data to the C-style callback
+thread_local const float* g_aabbs_ptr = nullptr;
+
+void aabb_callback_wrapper(const unsigned int i, tinybvh::bvhvec3& bmin, tinybvh::bvhvec3& bmax) {
+    if (!g_aabbs_ptr) {
+        // this should never happen if used correctly
+        throw std::runtime_error("Internal error: AABB data pointer is null in callback.");
+    }
+    const size_t offset = i * 6; // 2 vectors * 3 floats
+    bmin.x = g_aabbs_ptr[offset + 0];
+    bmin.y = g_aabbs_ptr[offset + 1];
+    bmin.z = g_aabbs_ptr[offset + 2];
+    bmax.x = g_aabbs_ptr[offset + 3];
+    bmax.y = g_aabbs_ptr[offset + 4];
+    bmax.z = g_aabbs_ptr[offset + 5];
+}
+
+
+
 // Enum for build quality selection
 enum class BuildQuality {
     Quick,
@@ -52,7 +72,9 @@ struct PyBVH {
 
     PyBVH() : bvh(std::make_unique<tinybvh::BVH>()) {}
 
-    static std::unique_ptr<PyBVH> from_triangle_soup(py::array_t<float, py::array::c_style | py::array::forcecast> vertices_np, BuildQuality quality) {
+    // Core builders (zero-copy)
+
+    static std::unique_ptr<PyBVH> from_vertices(py::array_t<float, py::array::c_style | py::array::forcecast> vertices_np, BuildQuality quality) {
         if (vertices_np.ndim() != 2 || vertices_np.shape(1) != 4) {
             throw std::runtime_error("Input must be a 2D numpy array with shape (M, 4).");
         }
@@ -65,20 +87,20 @@ struct PyBVH {
         wrapper->source_geometry_refs.append(vertices_np);   // reference to the numpy array
         wrapper->quality = quality;
 
-        py::buffer_info buf = vertices_np.request();
-        auto vertices_ptr = static_cast<const tinybvh::bvhvec4*>(buf.ptr);
-        size_t prim_count = buf.shape[0] / 3;
+        py::buffer_info vertices_buf = vertices_np.request();
+        auto vertices_ptr = static_cast<const tinybvh::bvhvec4*>(vertices_buf.ptr);
+        const uint32_t prim_count = static_cast<uint32_t>(vertices_buf.shape[0] / 3);
 
         switch (quality) {
             case BuildQuality::Quick:
-                wrapper->bvh->BuildQuick(vertices_ptr, static_cast<uint32_t>(prim_count));
+                wrapper->bvh->BuildQuick(vertices_ptr, prim_count);
                 break;
             case BuildQuality::High:
-                wrapper->bvh->BuildHQ(vertices_ptr, static_cast<uint32_t>(prim_count));
+                wrapper->bvh->BuildHQ(vertices_ptr, prim_count);
                 break;
             case BuildQuality::Balanced:
             default:
-                wrapper->bvh->Build(vertices_ptr, static_cast<uint32_t>(prim_count));
+                wrapper->bvh->Build(vertices_ptr, prim_count);
                 break;
         }
 
@@ -108,24 +130,66 @@ struct PyBVH {
 
         auto vertices_ptr = static_cast<const tinybvh::bvhvec4*>(vertices_buf.ptr);
         auto indices_ptr = static_cast<const uint32_t*>(indices_buf.ptr);
-        size_t prim_count = indices_buf.shape[0];
+        const uint32_t prim_count = static_cast<uint32_t>(indices_buf.shape[0]);
 
         switch (quality) {
             case BuildQuality::Quick:
                 // tinybvh doesn't have an indexed BuildQuick so fall back to Balanced
-                wrapper->bvh->Build(vertices_ptr, indices_ptr, static_cast<uint32_t>(prim_count));
+                wrapper->bvh->Build(vertices_ptr, indices_ptr, prim_count);
                 break;
             case BuildQuality::High:
-                wrapper->bvh->BuildHQ(vertices_ptr, indices_ptr, static_cast<uint32_t>(prim_count));
+                wrapper->bvh->BuildHQ(vertices_ptr, indices_ptr, prim_count);
                 break;
             case BuildQuality::Balanced:
             default:
-                wrapper->bvh->Build(vertices_ptr, indices_ptr, static_cast<uint32_t>(prim_count));
+                wrapper->bvh->Build(vertices_ptr, indices_ptr, prim_count);
                 break;
         }
 
         return wrapper;
     }
+
+    static std::unique_ptr<PyBVH> from_aabbs(py::array_t<float, py::array::c_style | py::array::forcecast> aabbs_np, BuildQuality quality) {
+        if (aabbs_np.ndim() != 3 || aabbs_np.shape(1) != 2 || aabbs_np.shape(2) != 3) {
+            throw std::runtime_error("Input must be a 3D numpy array with shape (N, 2, 3).");
+        }
+
+        auto wrapper = std::make_unique<PyBVH>();
+        wrapper->source_geometry_refs.append(aabbs_np);
+        wrapper->quality = quality;
+
+        py::buffer_info aabbs_buf = aabbs_np.request();
+        const auto* aabbs_ptr = static_cast<const float*>(aabbs_buf.ptr);
+        const uint32_t prim_count = static_cast<uint32_t>(aabbs_buf.shape[0]);
+
+        // thread-local pointer before calling Build
+        g_aabbs_ptr = aabbs_ptr;
+
+        try {
+            // BuildQuick and BuildHQ don't support custom AABB getters, so default to Balanced
+            switch (quality) {
+                case BuildQuality::High:
+                case BuildQuality::Quick:
+                case BuildQuality::Balanced:
+                default:
+                     // Pass the C-style function pointer, not the lambda
+                     wrapper->bvh->Build(aabb_callback_wrapper, prim_count);
+                     break;
+            }
+        } catch (...) {
+            // ensure global pointer is cleared even if an exception occurs
+            g_aabbs_ptr = nullptr;
+            throw;
+        }
+
+        // clear the pointer after the build is complete
+        g_aabbs_ptr = nullptr;
+
+        return wrapper;
+    }
+
+
+    // Convenience builders (with copying)
 
     static std::unique_ptr<PyBVH> from_triangles(py::array_t<float, py::array::c_style | py::array::forcecast> tris_np, BuildQuality quality) {
         bool shape_ok = (tris_np.ndim() == 2 && tris_np.shape(1) == 9) ||
@@ -134,39 +198,34 @@ struct PyBVH {
             throw std::runtime_error("Input must be a 2D numpy array with shape (N, 9) or a 3D array with shape (N, 3, 3).");
         }
 
+        // this must be done inside this function so vertices_np stays alive
         auto wrapper = std::make_unique<PyBVH>();
         wrapper->quality = quality;
 
         const size_t num_tris = tris_np.shape(0);
-        const float* tris_ptr = tris_np.data();
 
-        // This copy is necessary to bridge the Python friendly (N, 9) layout to tinybvh's layout
+        //new numpy array to hold the reformatted data
         auto vertices_np = py::array_t<float>(py::array::ShapeContainer({(py::ssize_t)num_tris * 3, 4}));
-        auto v_buf = vertices_np.request();
-        float* v_ptr = static_cast<float*>(v_buf.ptr);
 
+        // reference to it *in* the wrapper so it doesn't get garbage collected
+        wrapper->source_geometry_refs.append(vertices_np);
+
+        // Reformat the data
+        const float* tris_ptr = tris_np.data();
+        float* v_ptr = vertices_np.mutable_data();
         for (size_t i = 0; i < num_tris; ++i) {
-            // Triangle i, vertex 0
-            v_ptr[(i * 3 + 0) * 4 + 0] = tris_ptr[i * 9 + 0];
-            v_ptr[(i * 3 + 0) * 4 + 1] = tris_ptr[i * 9 + 1];
-            v_ptr[(i * 3 + 0) * 4 + 2] = tris_ptr[i * 9 + 2];
-            v_ptr[(i * 3 + 0) * 4 + 3] = 0.0f; // Dummy w
-            // Triangle i, vertex 1
-            v_ptr[(i * 3 + 1) * 4 + 0] = tris_ptr[i * 9 + 3];
-            v_ptr[(i * 3 + 1) * 4 + 1] = tris_ptr[i * 9 + 4];
-            v_ptr[(i * 3 + 1) * 4 + 2] = tris_ptr[i * 9 + 5];
-            v_ptr[(i * 3 + 1) * 4 + 3] = 0.0f; // Dummy w
-            // Triangle i, vertex 2
-            v_ptr[(i * 3 + 2) * 4 + 0] = tris_ptr[i * 9 + 6];
-            v_ptr[(i * 3 + 2) * 4 + 1] = tris_ptr[i * 9 + 7];
-            v_ptr[(i * 3 + 2) * 4 + 2] = tris_ptr[i * 9 + 8];
-            v_ptr[(i * 3 + 2) * 4 + 3] = 0.0f; // Dummy w
+            for (size_t v = 0; v < 3; ++v) {
+                const size_t v_idx = (i * 3 + v) * 4;
+                const size_t t_idx = i * 9 + v * 3;
+                v_ptr[v_idx + 0] = tris_ptr[t_idx + 0];
+                v_ptr[v_idx + 1] = tris_ptr[t_idx + 1];
+                v_ptr[v_idx + 2] = tris_ptr[t_idx + 2];
+                v_ptr[v_idx + 3] = 0.0f; // Dummy w
+            }
         }
 
-        wrapper->source_geometry_refs.append(vertices_np); // keep formatted geometry alive
-
-        auto vertices_ptr = static_cast<const tinybvh::bvhvec4*>(v_buf.ptr);
-
+        py::buffer_info vertices_buf = vertices_np.request();
+        auto vertices_ptr = static_cast<const tinybvh::bvhvec4*>(vertices_buf.ptr);
         switch (quality) {
             case BuildQuality::Quick:
                 wrapper->bvh->BuildQuick(vertices_ptr, static_cast<uint32_t>(num_tris));
@@ -191,53 +250,28 @@ struct PyBVH {
             throw std::runtime_error("Point radius must be positive.");
         }
 
-        auto wrapper = std::make_unique<PyBVH>();
-        wrapper->quality = quality;
-
         size_t num_points = points_np.shape(0);
-        const float* ptr = points_np.data();
+        const float* points_ptr = points_np.data();
 
-        auto vertices_np = py::array_t<float>(py::array::ShapeContainer({(py::ssize_t)num_points * 3, 4}));
-        float* v_ptr = vertices_np.mutable_data();
+        // Create the (N, 2, 3) AABB array
+        auto aabbs_np = py::array_t<float>(py::array::ShapeContainer({(py::ssize_t)num_points, 2, 3}));
+        float* aabbs_ptr = aabbs_np.mutable_data();
 
         for (size_t i = 0; i < num_points; ++i) {
-            float x = ptr[i * 3 + 0];
-            float y = ptr[i * 3 + 1];
-            float z = ptr[i * 3 + 2];
-            // v0: min corner
-            v_ptr[(i * 3 + 0) * 4 + 0] = x - radius;
-            v_ptr[(i * 3 + 0) * 4 + 1] = y - radius;
-            v_ptr[(i * 3 + 0) * 4 + 2] = z - radius;
-            v_ptr[(i * 3 + 0) * 4 + 3] = 0.0f;
-            // v1: max corner
-            v_ptr[(i * 3 + 1) * 4 + 0] = x + radius;
-            v_ptr[(i * 3 + 1) * 4 + 1] = y + radius;
-            v_ptr[(i * 3 + 1) * 4 + 2] = z + radius;
-            v_ptr[(i * 3 + 1) * 4 + 3] = 0.0f;
-            // v2: repeat min corner
-            v_ptr[(i * 3 + 2) * 4 + 0] = x - radius;
-            v_ptr[(i * 3 + 2) * 4 + 1] = y - radius; v_ptr[(i * 3 + 2) * 4 + 2] = z - radius;
-            v_ptr[(i * 3 + 2) * 4 + 3] = 0.0f;
+            const size_t p_off = i * 3;
+            const size_t a_off = i * 6;
+            // Min corner
+            aabbs_ptr[a_off + 0] = points_ptr[p_off + 0] - radius;
+            aabbs_ptr[a_off + 1] = points_ptr[p_off + 1] - radius;
+            aabbs_ptr[a_off + 2] = points_ptr[p_off + 2] - radius;
+            // Max corner
+            aabbs_ptr[a_off + 3] = points_ptr[p_off + 0] + radius;
+            aabbs_ptr[a_off + 4] = points_ptr[p_off + 1] + radius;
+            aabbs_ptr[a_off + 5] = points_ptr[p_off + 2] + radius;
         }
 
-        wrapper->source_geometry_refs.append(vertices_np); // keep formatted geometry alive
-
-        py::buffer_info buf = vertices_np.request();
-        auto vertices_ptr = static_cast<const tinybvh::bvhvec4*>(buf.ptr);
-
-        switch (quality) {
-            case BuildQuality::Quick:
-                wrapper->bvh->BuildQuick(vertices_ptr, static_cast<uint32_t>(num_points));
-                break;
-            case BuildQuality::High:
-                wrapper->bvh->BuildHQ(vertices_ptr, static_cast<uint32_t>(num_points));
-                break;
-            case BuildQuality::Balanced:
-            default:
-                wrapper->bvh->Build(vertices_ptr, static_cast<uint32_t>(num_points));
-                break;
-        }
-        return wrapper;
+        // delegate to zero-copy from_aabbs builder
+        return from_aabbs(aabbs_np, quality);
     }
 
     void refit() {
@@ -316,14 +350,16 @@ PYBIND11_MODULE(pytinybvh, m) {
 
 
     py::class_<PyBVH>(m, "BVH", "A Bounding Volume Hierarchy for fast ray intersections.")
+
+        // Convenience Builders
         .def_static("from_triangles", &PyBVH::from_triangles,
             R"((
-                Builds a BVH for triangles from a (N, 3, 3) or (N, 9) float array.
-
-                This is a convenience method that copies the data into the required internal format.
+                Builds a BVH from a standard triangle array. This is a convenience method that
+                copies and reformats the data into the layout required by the BVH.
 
                 Args:
-                    triangles (numpy.ndarray): A float32 array of shape (N, 3, 3) or (N, 9).
+                    triangles (numpy.ndarray): A float32 array of shape (N, 3, 3) or (N, 9)
+                                               representing N triangles.
                     quality (BuildQuality): The desired quality of the BVH.
 
                 Returns:
@@ -333,11 +369,8 @@ PYBIND11_MODULE(pytinybvh, m) {
 
         .def_static("from_points", &PyBVH::from_points,
              R"((
-                Builds a BVH for points from a (N, 3) float array.
-
-                Internally, this represents each point as a small axis-aligned bounding box.
-
-                This is a convenience method that copies the data into the required internal format.
+                Builds a BVH from a point cloud. This is a convenience method that creates an
+                axis-aligned bounding box for each point and builds the BVH from those.
 
                 Args:
                     points (numpy.ndarray): A float32 array of shape (N, 3) representing N points.
@@ -349,7 +382,8 @@ PYBIND11_MODULE(pytinybvh, m) {
             ))",
             py::arg("points").noconvert(), py::arg("radius") = 1e-5f, py::arg("quality") = BuildQuality::Balanced)
 
-        .def_static("from_triangle_soup", &PyBVH::from_triangle_soup,
+        // Core Builders
+        .def_static("from_vertices", &PyBVH::from_vertices,
             R"((
                 Builds a BVH from a flat array of vertices (N * 3, 4).
 
@@ -398,6 +432,24 @@ PYBIND11_MODULE(pytinybvh, m) {
             ))",
             py::arg("vertices").noconvert(), py::arg("indices").noconvert(), py::arg("quality") = BuildQuality::Balanced)
 
+        .def_static("from_aabbs", &PyBVH::from_aabbs,
+            R"((
+                Builds a BVH from an array of Axis-Aligned Bounding Boxes.
+
+                This is a zero-copy operation. The BVH will hold a reference to the
+                provided numpy array's memory buffer. This is useful for building a BVH over
+                custom geometry or for creating a Top-Level Acceleration Structure (TLAS).
+
+                Args:
+                    aabbs (numpy.ndarray): A float32, C-contiguous array of shape (N, 2, 3),
+                                           where each item is a pair of [min_corner, max_corner].
+                    quality (BuildQuality): The desired quality of the BVH.
+
+                Returns:
+                    BVH: A new BVH instance.
+            ))",
+            py::arg("aabbs").noconvert(), py::arg("quality") = BuildQuality::Balanced)
+
         .def_static("load", [](
             const py::object& filepath_obj,
             py::array_t<float, py::array::c_style | py::array::forcecast> vertices_np,
@@ -416,9 +468,9 @@ PYBIND11_MODULE(pytinybvh, m) {
                 // Case: non-indexed geometry
                 wrapper->source_geometry_refs.append(vertices_np);
 
-                py::buffer_info vbuf = vertices_np.request();
-                auto vertices_ptr = static_cast<const tinybvh::bvhvec4*>(vbuf.ptr);
-                uint32_t prim_count = vbuf.shape[0] / 3;
+                py::buffer_info vertices_buf = vertices_np.request();
+                auto vertices_ptr = static_cast<const tinybvh::bvhvec4*>(vertices_buf.ptr);
+                const uint32_t prim_count = static_cast<uint32_t>(vertices_buf.shape[0] / 3);
 
                 success = wrapper->bvh->Load(filepath.c_str(), vertices_ptr, prim_count);
             } else {
@@ -432,12 +484,11 @@ PYBIND11_MODULE(pytinybvh, m) {
                 wrapper->source_geometry_refs.append(vertices_np);
                 wrapper->source_geometry_refs.append(indices_np);
 
-                py::buffer_info vbuf = vertices_np.request();
-                py::buffer_info ibuf = indices_np.request();
-                auto vertices_ptr = static_cast<const tinybvh::bvhvec4*>(vbuf.ptr);
-                auto indices_ptr = static_cast<const uint32_t*>(ibuf.ptr);
-                uint32_t prim_count = ibuf.shape[0];
-
+                py::buffer_info vertices_buf = vertices_np.request();
+                py::buffer_info indices_buf = indices_np.request();
+                auto vertices_ptr = static_cast<const tinybvh::bvhvec4*>(vertices_buf.ptr);
+                auto indices_ptr = static_cast<const uint32_t*>(indices_buf.ptr);
+                const uint32_t prim_count = static_cast<uint32_t>(indices_buf.shape[0]);
                 success = wrapper->bvh->Load(filepath.c_str(), vertices_ptr, indices_ptr, prim_count);
             }
 

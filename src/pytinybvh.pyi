@@ -70,9 +70,8 @@ class BVH:
     @staticmethod
     def from_triangles(triangles: np.ndarray, quality: BuildQuality = ...) -> BVH:
         """
-        Builds a BVH for triangles from a (N, 3, 3) or (N, 9) float array.
-
-        This is a convenience method that copies the data into the required internal format.
+        Builds a BVH from a standard triangle array. This is a convenience method that
+        copies and reformats the data into the layout required by the BVH.
 
         Args:
             triangles (numpy.ndarray): A float32 array of shape (N, 3, 3) or (N, 9)
@@ -87,11 +86,8 @@ class BVH:
     @staticmethod
     def from_points(points: np.ndarray, radius: float = 1e-05, quality: BuildQuality = ...) -> BVH:
         """
-        Builds a BVH for points from a (N, 3) float array.
-
-        Internally, this represents each point as a small axis-aligned bounding box.
-
-        This is a convenience method that copies the data into the required internal format.
+        Builds a BVH from a point cloud. This is a convenience method that creates an
+        axis-aligned bounding box for each point and builds the BVH from those.
 
         Args:
             points (numpy.ndarray): A float32 array of shape (N, 3) representing N points.
@@ -104,16 +100,17 @@ class BVH:
         ...
 
     @staticmethod
-    def from_triangle_soup(vertices: np.ndarray, quality: BuildQuality = ...) -> BVH:
+    def from_vertices(vertices: np.ndarray, quality: BuildQuality = ...) -> BVH:
         """
-        Builds a BVH from a flat array of vertices (N * 3, 4).
+        Builds a BVH from a flat array of vertices in tinybvh's native format.
 
         This is a zero-copy operation. The BVH will hold a reference to the
         provided numpy array's memory buffer. The array must not be garbage-collected
         while the BVH is in use. The number of vertices must be a multiple of 3.
 
         Args:
-            vertices (numpy.ndarray): A float32 array of shape (M, 4).
+            vertices (numpy.ndarray): A float32, C-contiguous array of shape (N * 3, 4).
+                                      The 4th component is for padding and is ignored.
             quality (BuildQuality): The desired quality of the BVH.
 
         Returns:
@@ -131,10 +128,29 @@ class BVH:
         The BVH will hold a reference to both provided numpy arrays.
 
         Args:
-            vertices (numpy.ndarray): A float32 array of shape (V, 4), where V is the
-                                      number of unique vertices.
-            indices (numpy.ndarray): A uint32 array of shape (N, 3), where N is the
+            vertices (numpy.ndarray): A float32, C-contiguous array of shape (V, 4), where V is the
+                                      number of unique vertices. The 4th component is for padding.
+            indices (numpy.ndarray): A uint32, C-contiguous array of shape (N, 3), where N is the
                                      number of triangles.
+            quality (BuildQuality): The desired quality of the BVH.
+
+        Returns:
+            BVH: A new BVH instance.
+        """
+        ...
+
+    @staticmethod
+    def from_aabbs(aabbs: np.ndarray, quality: BuildQuality = ...) -> BVH:
+        """
+        Builds a BVH from an array of Axis-Aligned Bounding Boxes.
+
+        This is a zero-copy operation. The BVH will hold a reference to the
+        provided numpy array's memory buffer. This is useful for building a BVH over
+        custom geometry or for creating a Top-Level Acceleration Structure (TLAS).
+
+        Args:
+            aabbs (numpy.ndarray): A float32, C-contiguous array of shape (N, 2, 3),
+                                   where each item is a pair of [min_corner, max_corner].
             quality (BuildQuality): The desired quality of the BVH.
 
         Returns:

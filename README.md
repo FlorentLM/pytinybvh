@@ -140,7 +140,8 @@ aabbs_np = np.array([
 bvh = BVH.from_aabbs(aabbs_np)
 ```
 
-**Note:** When using a BVH built from AABBs, intersection tests are performed directly against the bounding boxes. The hit record will contain the primitive ID of the AABB, but the barycentric coordinates u and v will always be 0.0.
+**Note:** When using a BVH built from AABBs, intersection tests are performed directly against the bounding boxes.
+The hit record will contain the primitive ID of the AABB, and the `u` and `v` coordinates will contain 2D position of the hit on the specific face of the box that was intersected.
 
 ---
 
@@ -181,7 +182,7 @@ bvh = BVH.from_points(points_np, radius=0.01)
 
 ```
 
-**Note:** Since the primitives are spheres, the barycentric coordinates u and v in the hit record will always be 0.0.
+**Note:** Since the primitives are spheres, the `u` and `v` coordinates represent the spherical coordinates (lat, lon) of the intersection point.
 
 ---
 

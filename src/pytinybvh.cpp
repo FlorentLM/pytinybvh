@@ -39,6 +39,7 @@ tinybvh::bvhvec3 py_obj_to_vec3(const py::object& obj) {
 thread_local const float* g_aabbs_ptr = nullptr;
 thread_local const float* g_points_ptr = nullptr;
 thread_local float g_sphere_radius = 0.0f;
+thread_local const float* g_inv_extents_ptr = nullptr;
 
 // C-style callback for building from AABBs
 void aabb_build_callback(const unsigned int i, tinybvh::bvhvec3& bmin, tinybvh::bvhvec3& bmax) {
@@ -56,13 +57,62 @@ bool aabb_intersect_callback(tinybvh::Ray& ray, const unsigned int prim_id) {
     const tinybvh::bvhvec3 bmin = {g_aabbs_ptr[offset], g_aabbs_ptr[offset + 1], g_aabbs_ptr[offset + 2]};
     const tinybvh::bvhvec3 bmax = {g_aabbs_ptr[offset + 3], g_aabbs_ptr[offset + 4], g_aabbs_ptr[offset + 5]};
 
-    float t = tinybvh_intersect_aabb(ray, bmin, bmax);
+    float t = tinybvh::tinybvh_intersect_aabb(ray, bmin, bmax);
 
     if (t < ray.hit.t) {
         ray.hit.t = t;
         ray.hit.prim = prim_id;
-        ray.hit.u = 0.0f; // No barycentric coords for AABB
-        ray.hit.v = 0.0f;
+
+        // Calculate UV coordinates on the hit face
+        const tinybvh::bvhvec3 hit_point = ray.O + ray.D * t;
+
+        // Use pre-computed reciprocal extent
+        const size_t inv_offset = prim_id * 3;
+        const tinybvh::bvhvec3 inv_extent = {g_inv_extents_ptr[inv_offset], g_inv_extents_ptr[inv_offset + 1], g_inv_extents_ptr[inv_offset + 2]};
+
+        const float dx0 = std::abs(hit_point.x - bmin.x);
+        const float dx1 = std::abs(hit_point.x - bmax.x);
+        const float dy0 = std::abs(hit_point.y - bmin.y);
+        const float dy1 = std::abs(hit_point.y - bmax.y);
+        const float dz0 = std::abs(hit_point.z - bmin.z);
+        const float dz1 = std::abs(hit_point.z - bmax.z);
+
+        float min_dist = dx0;
+        int face_id = 0; // -X face
+
+        if (dx1 < min_dist) { min_dist = dx1; face_id = 1; }
+        if (dy0 < min_dist) { min_dist = dy0; face_id = 2; }
+        if (dy1 < min_dist) { min_dist = dy1; face_id = 3; }
+        if (dz0 < min_dist) { min_dist = dz0; face_id = 4; }
+        if (dz1 < min_dist) { min_dist = dz1; face_id = 5; }
+
+        switch (face_id) {
+            case 0: // -X face
+                ray.hit.u = (hit_point.z - bmin.z) * inv_extent.z;
+                ray.hit.v = (bmax.y - hit_point.y) * inv_extent.y;
+                break;
+            case 1: // +X face
+                ray.hit.u = (bmax.z - hit_point.z) * inv_extent.z; // Flipped u for consistency
+                ray.hit.v = (bmax.y - hit_point.y) * inv_extent.y; // Flipped v for consistency
+                break;
+            case 2: // -Y face
+                ray.hit.u = (hit_point.x - bmin.x) * inv_extent.x;
+                ray.hit.v = (hit_point.z - bmin.z) * inv_extent.z;
+                break;
+            case 3: // +Y face
+                ray.hit.u = (hit_point.x - bmin.x) * inv_extent.x;
+                ray.hit.v = (bmax.z - hit_point.z) * inv_extent.z; // Flipped v for consistency
+                break;
+            case 4: // -Z face
+                ray.hit.u = (bmax.x - hit_point.x) * inv_extent.x; // Flipped u for consistency
+                ray.hit.v = (bmax.y - hit_point.y) * inv_extent.y; // Flipped v for consistency
+                break;
+            case 5: // +Z face
+                ray.hit.u = (hit_point.x - bmin.x) * inv_extent.x;
+                ray.hit.v = (bmax.y - hit_point.y) * inv_extent.y; // Flipped v for consistency
+                break;
+        }
+
         return true;
     }
     return false;
@@ -71,17 +121,21 @@ bool aabb_intersect_callback(tinybvh::Ray& ray, const unsigned int prim_id) {
 // C-style callback for occlusion testing with AABBs
 bool aabb_isoccluded_callback(const tinybvh::Ray& ray, const unsigned int prim_id) {
     if (!g_aabbs_ptr) throw std::runtime_error("Internal error: AABB data pointer is null in occlusion callback.");
+
     const size_t offset = prim_id * 6;
     const tinybvh::bvhvec3 bmin = {g_aabbs_ptr[offset], g_aabbs_ptr[offset + 1], g_aabbs_ptr[offset + 2]};
     const tinybvh::bvhvec3 bmax = {g_aabbs_ptr[offset + 3], g_aabbs_ptr[offset + 4], g_aabbs_ptr[offset + 5]};
 
-    // Inlined slab test
+    // slab test
     float tx1 = (bmin.x - ray.O.x) * ray.rD.x, tx2 = (bmax.x - ray.O.x) * ray.rD.x;
 	float tmin = tinybvh::tinybvh_min( tx1, tx2 ), tmax = tinybvh::tinybvh_max( tx1, tx2 );
 	float ty1 = (bmin.y - ray.O.y) * ray.rD.y, ty2 = (bmax.y - ray.O.y) * ray.rD.y;
+
 	tmin = tinybvh::tinybvh_max( tmin, tinybvh::tinybvh_min( ty1, ty2 ) );
 	tmax = tinybvh::tinybvh_min( tmax, tinybvh::tinybvh_max( ty1, ty2 ) );
+
 	float tz1 = (bmin.z - ray.O.z) * ray.rD.z, tz2 = (bmax.z - ray.O.z) * ray.rD.z;
+
 	tmin = tinybvh::tinybvh_max( tmin, tinybvh::tinybvh_min( tz1, tz2 ) );
 	tmax = tinybvh::tinybvh_min( tmax, tinybvh::tinybvh_max( tz1, tz2 ) );
 
@@ -91,6 +145,11 @@ bool aabb_isoccluded_callback(const tinybvh::Ray& ray, const unsigned int prim_i
 // C-style callback for ray-sphere intersection
 bool sphere_intersect_callback(tinybvh::Ray& ray, const unsigned int prim_id) {
     if (!g_points_ptr) throw std::runtime_error("Internal error: Sphere data pointer is null.");
+
+    // Pre-computed reciprocals
+    constexpr float PI = 3.1415926535f;
+    constexpr float INV_PI = 1.0f / PI;
+    constexpr float INV_TWO_PI = 1.0f / (2.0f * PI);
 
     // Get sphere center
     const size_t offset = prim_id * 3;
@@ -106,12 +165,19 @@ bool sphere_intersect_callback(tinybvh::Ray& ray, const unsigned int prim_id) {
     if (discriminant < 0) {
         return false;
     } else {
-        float t = (-b - sqrt(discriminant)) / (2.0f * a);
+        float t = (-b - sqrt(discriminant)) * 0.5f; // Since a=1.0
         if (t > 1e-6f && t < ray.hit.t) { // Check for valid t range
             ray.hit.t = t;
             ray.hit.prim = prim_id;
-            ray.hit.u = 0.0f; // No barycentric coords for sphere
-            ray.hit.v = 0.0f;
+
+            const tinybvh::bvhvec3 hit_point = ray.O + ray.D * t;
+            tinybvh::bvhvec3 normal = tinybvh::tinybvh_normalize(hit_point - center);
+
+            // u = longitude, v = latitude
+            ray.hit.u = 0.5f + atan2f(normal.z, normal.x) * INV_TWO_PI;
+            ray.hit.v = 0.5f - asinf(normal.y) * INV_PI; // asin maps [-PI/2, PI/2] to [0, 1]
+            // TODO: alternatively, could use ray.hit.v = acosf(normal.y) / PI; // Maps [0, PI] to [0, 1]
+
             return true;
         }
     }
@@ -133,7 +199,7 @@ bool sphere_isoccluded_callback(const tinybvh::Ray& ray, const unsigned int prim
 
     if (discriminant < 0) return false;
 
-    const float t = (-b - sqrt(discriminant)) / (2.0f * a);
+    const float t = (-b - sqrt(discriminant)) * 0.5f; // Since a=1.0
     return (t > 1e-6f && t < ray.hit.t);
 }
 
@@ -256,7 +322,24 @@ struct PyBVH {
         const auto* aabbs_ptr = static_cast<const float*>(aabbs_buf.ptr);
         const uint32_t prim_count = static_cast<uint32_t>(aabbs_buf.shape[0]);
 
-        // thread-local pointer before calling Build
+        // Pre-compute reciprocal extents for faster intersection tests
+        auto inv_extents_np = py::array_t<float>(py::array::ShapeContainer({(py::ssize_t)prim_count, 3}));
+        float* inv_extents_ptr = inv_extents_np.mutable_data();
+
+        for(size_t i = 0; i < prim_count; ++i) {
+            const size_t a_off = i * 6;
+            const size_t i_off = i * 3;
+            const float ex = aabbs_ptr[a_off + 3] - aabbs_ptr[a_off + 0];
+            const float ey = aabbs_ptr[a_off + 4] - aabbs_ptr[a_off + 1];
+            const float ez = aabbs_ptr[a_off + 5] - aabbs_ptr[a_off + 2];
+            inv_extents_ptr[i_off + 0] = ex > 1e-6f ? 1.0f / ex : 0.0f;
+            inv_extents_ptr[i_off + 1] = ey > 1e-6f ? 1.0f / ey : 0.0f;
+            inv_extents_ptr[i_off + 2] = ez > 1e-6f ? 1.0f / ez : 0.0f;
+        }
+        // reference to reciprocals array to keep it alive
+        wrapper->source_geometry_refs.append(inv_extents_np);
+
+        // Use the original AABBs for the build callback
         g_aabbs_ptr = aabbs_ptr;
 
         try {
@@ -656,7 +739,9 @@ PYBIND11_MODULE(pytinybvh, m) {
 
             if (self.custom_type == PyBVH::CustomType::AABB) {
                 auto aabbs_np = py::cast<py::array_t<float>>(self.source_geometry_refs[0]);
+                auto inv_extents_np = py::cast<py::array_t<float>>(self.source_geometry_refs[1]);
                 g_aabbs_ptr = aabbs_np.data();
+                g_inv_extents_ptr = inv_extents_np.data();
             } else if (self.custom_type == PyBVH::CustomType::Sphere) {
                 auto points_np = py::cast<py::array_t<float>>(self.source_geometry_refs[0]);
                 g_points_ptr = points_np.data();
@@ -669,6 +754,7 @@ PYBIND11_MODULE(pytinybvh, m) {
             // unset pointers
             g_aabbs_ptr = nullptr;
             g_points_ptr = nullptr;
+            g_inv_extents_ptr = nullptr;
 
             if (ray.hit.t < py_ray.t) {
                 // update python Ray with hit information

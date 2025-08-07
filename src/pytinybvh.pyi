@@ -48,12 +48,18 @@ class Ray:
 
     @property
     def u(self) -> float:
-        """Barycentric u-coordinate of the hit."""
+        """
+        Barycentric u-coordinate for triangle hits, or the first
+        texture coordinate for custom geometry like spheres and AABBs.
+        """
         ...
 
     @property
     def v(self) -> float:
-        """Barycentric v-coordinate of the hit."""
+        """
+        Barycentric v-coordinate for triangle hits, or the second
+        texture coordinate for custom geometry like spheres and AABBs.
+        """
         ...
 
     @property

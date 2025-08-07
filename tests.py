@@ -218,6 +218,11 @@ print(f"Ray aimed at AABB 0: Returned t={hit_dist:.3f}, Ray object: {ray_test_aa
 assert np.isclose(hit_dist, 0.9)
 assert ray_test_aabbs.prim_id == 0
 
+# Test AABB UV coordinates
+print(f"  Hit UVs: ({ray_test_aabbs.u:.3f}, {ray_test_aabbs.v:.3f}) -> Expected: (0.500, 0.500)")
+assert np.isclose(ray_test_aabbs.u, 0.5)
+assert np.isclose(ray_test_aabbs.v, 0.5)
+
 print("BVH from_aabbs successful.")
 
 
@@ -256,10 +261,20 @@ print("\nTesting from_points...")
 points = np.array([[10,10,10], [20,20,20]], dtype=np.float32)
 bvh_points = BVH.from_points(points, radius=0.5)
 assert bvh_points.prim_count == 2
-# Hit the first point's AABB
+
+# Hit the first point's sphere
 ray_test_points = Ray(origin=(10,10,0), direction=(0.0, 0.0, 1.0))
-bvh_points.intersect(ray_test_points)
+hit_dist = bvh_points.intersect(ray_test_points)
+print(f"Ray aimed at sphere 0: Returned t={hit_dist:.3f}, Ray object: {ray_test_points}")
+
 assert np.isclose(ray_test_points.t, 9.5) # Hits at z = 10 - 0.5
+assert ray_test_points.prim_id == 0
+
+# Test Sphere UV coordinates
+print(f"  Hit UVs: ({ray_test_points.u:.3f}, {ray_test_points.v:.3f}) -> Expected: (0.250, 0.500)")
+assert np.isclose(ray_test_points.u, 0.25)
+assert np.isclose(ray_test_points.v, 0.5)
+
 print("BVH from_points successful.")
 
 print("Testing occlusion for sphere BVH...")

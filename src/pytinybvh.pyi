@@ -72,6 +72,8 @@ class BVH:
         """
         Builds a BVH for triangles from a (N, 3, 3) or (N, 9) float array.
 
+        This is a convenience method that copies the data into the required internal format.
+
         Args:
             triangles (numpy.ndarray): A float32 array of shape (N, 3, 3) or (N, 9)
                                        representing N triangles.
@@ -89,6 +91,8 @@ class BVH:
 
         Internally, this represents each point as a small axis-aligned bounding box.
 
+        This is a convenience method that copies the data into the required internal format.
+
         Args:
             points (numpy.ndarray): A float32 array of shape (N, 3) representing N points.
             radius (float): The radius used to create an AABB for each point.
@@ -100,13 +104,13 @@ class BVH:
         ...
 
     @staticmethod
-    def from_vertices_4f(vertices: np.ndarray, quality: BuildQuality = ...) -> BVH:
+    def from_triangle_soup(vertices: np.ndarray, quality: BuildQuality = ...) -> BVH:
         """
-        Builds a BVH from a pre-formatted (M, 4) vertex array.
+        Builds a BVH from a flat array of vertices (N * 3, 4).
 
         This is a zero-copy operation. The BVH will hold a reference to the
         provided numpy array's memory buffer. The array must not be garbage-collected
-        while the BVH is in use. M must be a multiple of 3.
+        while the BVH is in use. The number of vertices must be a multiple of 3.
 
         Args:
             vertices (numpy.ndarray): A float32 array of shape (M, 4).
@@ -118,20 +122,40 @@ class BVH:
         ...
 
     @staticmethod
-    def load(vertices: np.ndarray, filepath: PathLike) -> BVH:
+    def from_indexed_mesh(vertices: np.ndarray, indices: np.ndarray, quality: BuildQuality = ...) -> BVH:
         """
-        Loads a BVH from a file, requires the original vertex data.
+        Builds a BVH from a vertex buffer and an index buffer.
 
-        Per design tinybvh does not save the geometric vertex data in its file format;
-        only the acceleration structure itself (the nodes and primitive indices).
-
-        Thus, the vertex data that was used to create the original BVH must be provided:
-        this function re-links the loaded acceleration structure to the vertex data in memory.
+        This is the most memory-efficient method for triangle meshes and allows for
+        efficient refitting after vertex deformation. This is a zero-copy operation.
+        The BVH will hold a reference to both provided numpy arrays.
 
         Args:
-            vertices (numpy.ndarray): A float32, C-style contiguous numpy array of shape (M, 4) representing
-                the vertex data. This must be the same data that was used when the BVH was originally built and saved.
+            vertices (numpy.ndarray): A float32 array of shape (V, 4), where V is the
+                                      number of unique vertices.
+            indices (numpy.ndarray): A uint32 array of shape (N, 3), where N is the
+                                     number of triangles.
+            quality (BuildQuality): The desired quality of the BVH.
+
+        Returns:
+            BVH: A new BVH instance.
+        """
+        ...
+
+    @staticmethod
+    def load(filepath: PathLike, vertices: np.ndarray, indices: Optional[np.ndarray] = None) -> BVH:
+        """
+        Loads a BVH from a file, re-linking it to the provided geometry.
+
+        The geometry must be provided in the same layout as when the BVH was originally
+        built and saved. If it was built from an indexed mesh, both the vertices and the indices must be provided.
+
+        Args:
             filepath (str or pathlib.Path): The path to the saved BVH file.
+            vertices (numpy.ndarray): A float32, C-style contiguous numpy array of shape (V, 4)
+                                      representing the vertex data.
+            indices (numpy.ndarray, optional): A uint32, C-style contiguous array of shape (N, 3)
+                                               if the BVH was built from an indexed mesh.
 
         Returns:
             BVH: A new BVH instance.

@@ -45,15 +45,14 @@ enum class BuildQuality {
 struct PyBVH {
     std::unique_ptr<tinybvh::BVH> bvh;
 
-    py::array source_geometry; // ref to the Python numpy array that contains the source vertices
-    // This prevents Python's garbage collector from freeing the memory while the C++ BVH object might still be using it
-    // (that's important especially for refitting)
+    py::list source_geometry_refs; // refs to the numpy arrays that contains the source data (vertices, indices)
+    // this prevents Python's garbage collector from freeing the memory while the C++ BVH object might still be using it
 
     BuildQuality quality = BuildQuality::Balanced;
 
     PyBVH() : bvh(std::make_unique<tinybvh::BVH>()) {}
 
-    static std::unique_ptr<PyBVH> from_vertices_4f(py::array_t<float, py::array::c_style | py::array::forcecast> vertices_np, BuildQuality quality) {
+    static std::unique_ptr<PyBVH> from_triangle_soup(py::array_t<float, py::array::c_style | py::array::forcecast> vertices_np, BuildQuality quality) {
         if (vertices_np.ndim() != 2 || vertices_np.shape(1) != 4) {
             throw std::runtime_error("Input must be a 2D numpy array with shape (M, 4).");
         }
@@ -62,9 +61,8 @@ struct PyBVH {
         }
 
         auto wrapper = std::make_unique<PyBVH>();
-        // no copy: ref to the numpy array
-        wrapper->source_geometry = vertices_np;
 
+        wrapper->source_geometry_refs.append(vertices_np);   // reference to the numpy array
         wrapper->quality = quality;
 
         py::buffer_info buf = vertices_np.request();
@@ -81,6 +79,48 @@ struct PyBVH {
             case BuildQuality::Balanced:
             default:
                 wrapper->bvh->Build(vertices_ptr, static_cast<uint32_t>(prim_count));
+                break;
+        }
+
+        return wrapper;
+    }
+
+    static std::unique_ptr<PyBVH> from_indexed_mesh(
+        py::array_t<float, py::array::c_style | py::array::forcecast> vertices_np,
+        py::array_t<uint32_t, py::array::c_style | py::array::forcecast> indices_np,
+        BuildQuality quality)
+    {
+        if (vertices_np.ndim() != 2 || vertices_np.shape(1) != 4) {
+            throw std::runtime_error("Input vertices must be a 2D numpy array with shape (V, 4).");
+        }
+        if (indices_np.ndim() != 2 || indices_np.shape(1) != 3) {
+            throw std::runtime_error("Input indices must be a 2D numpy array with shape (N, 3).");
+        }
+
+        auto wrapper = std::make_unique<PyBVH>();
+
+        wrapper->source_geometry_refs.append(vertices_np);  // references to vertices numpy array
+        wrapper->source_geometry_refs.append(indices_np);   // and indexes numpy array
+        wrapper->quality = quality;
+
+        py::buffer_info vertices_buf = vertices_np.request();
+        py::buffer_info indices_buf = indices_np.request();
+
+        auto vertices_ptr = static_cast<const tinybvh::bvhvec4*>(vertices_buf.ptr);
+        auto indices_ptr = static_cast<const uint32_t*>(indices_buf.ptr);
+        size_t prim_count = indices_buf.shape[0];
+
+        switch (quality) {
+            case BuildQuality::Quick:
+                // tinybvh doesn't have an indexed BuildQuick so fall back to Balanced
+                wrapper->bvh->Build(vertices_ptr, indices_ptr, static_cast<uint32_t>(prim_count));
+                break;
+            case BuildQuality::High:
+                wrapper->bvh->BuildHQ(vertices_ptr, indices_ptr, static_cast<uint32_t>(prim_count));
+                break;
+            case BuildQuality::Balanced:
+            default:
+                wrapper->bvh->Build(vertices_ptr, indices_ptr, static_cast<uint32_t>(prim_count));
                 break;
         }
 
@@ -123,7 +163,7 @@ struct PyBVH {
             v_ptr[(i * 3 + 2) * 4 + 3] = 0.0f; // Dummy w
         }
 
-        wrapper->source_geometry = vertices_np; // keep formatted geometry alive
+        wrapper->source_geometry_refs.append(vertices_np); // keep formatted geometry alive
 
         auto vertices_ptr = static_cast<const tinybvh::bvhvec4*>(v_buf.ptr);
 
@@ -180,7 +220,7 @@ struct PyBVH {
             v_ptr[(i * 3 + 2) * 4 + 3] = 0.0f;
         }
 
-        wrapper->source_geometry = vertices_np; // keep formatted geometry alive
+        wrapper->source_geometry_refs.append(vertices_np); // keep formatted geometry alive
 
         py::buffer_info buf = vertices_np.request();
         auto vertices_ptr = static_cast<const tinybvh::bvhvec4*>(buf.ptr);
@@ -280,6 +320,8 @@ PYBIND11_MODULE(pytinybvh, m) {
             R"((
                 Builds a BVH for triangles from a (N, 3, 3) or (N, 9) float array.
 
+                This is a convenience method that copies the data into the required internal format.
+
                 Args:
                     triangles (numpy.ndarray): A float32 array of shape (N, 3, 3) or (N, 9).
                     quality (BuildQuality): The desired quality of the BVH.
@@ -295,6 +337,8 @@ PYBIND11_MODULE(pytinybvh, m) {
 
                 Internally, this represents each point as a small axis-aligned bounding box.
 
+                This is a convenience method that copies the data into the required internal format.
+
                 Args:
                     points (numpy.ndarray): A float32 array of shape (N, 3) representing N points.
                     radius (float): The radius used to create an AABB for each point.
@@ -305,13 +349,13 @@ PYBIND11_MODULE(pytinybvh, m) {
             ))",
             py::arg("points").noconvert(), py::arg("radius") = 1e-5f, py::arg("quality") = BuildQuality::Balanced)
 
-        .def_static("from_vertices_4f", &PyBVH::from_vertices_4f,
+        .def_static("from_triangle_soup", &PyBVH::from_triangle_soup,
             R"((
-                Builds a BVH from a pre-formatted (M, 4) vertex array.
+                Builds a BVH from a flat array of vertices (N * 3, 4).
 
                 This is a zero-copy operation. The BVH will hold a reference to the
                 provided numpy array's memory buffer. The array must not be garbage-collected
-                while the BVH is in use. M must be a multiple of 3.
+                while the BVH is in use. The number of vertices must be a multiple of 3.
 
                 Args:
                     vertices (numpy.ndarray): A float32 array of shape (M, 4).
@@ -334,44 +378,94 @@ PYBIND11_MODULE(pytinybvh, m) {
             ))"
         )
 
-        .def_static("load", [](py::array_t<float, py::array::c_style | py::array::forcecast> vertices_np, const py::object& filepath_obj) {
+        .def_static("from_indexed_mesh", &PyBVH::from_indexed_mesh,
+            R"((
+                Builds a BVH from a vertex buffer and an index buffer.
+
+                This is the most memory-efficient method for triangle meshes and allows for
+                efficient refitting after vertex deformation. This is a zero-copy operation.
+                The BVH will hold a reference to both provided numpy arrays.
+
+                Args:
+                    vertices (numpy.ndarray): A float32 array of shape (V, 4), where V is the
+                                              number of unique vertices.
+                    indices (numpy.ndarray): A uint32 array of shape (N, 3), where N is the
+                                             number of triangles.
+                    quality (BuildQuality): The desired quality of the BVH.
+
+                Returns:
+                    BVH: A new BVH instance.
+            ))",
+            py::arg("vertices").noconvert(), py::arg("indices").noconvert(), py::arg("quality") = BuildQuality::Balanced)
+
+        .def_static("load", [](
+            const py::object& filepath_obj,
+            py::array_t<float, py::array::c_style | py::array::forcecast> vertices_np,
+            py::object indices_obj // py::object to accept an array or None
+        ) {
             if (vertices_np.ndim() != 2 || vertices_np.shape(1) != 4) {
-                throw std::runtime_error("Vertex data for loading must be a 2D numpy array with shape (M, 4).");
+                throw std::runtime_error("Vertex data for loading must be a 2D numpy array with shape (V, 4).");
             }
 
             std::string filepath = py::str(filepath_obj).cast<std::string>();
-
             auto wrapper = std::make_unique<PyBVH>();
-            wrapper->source_geometry = vertices_np; // Keep ref to vertices alive
+            bool success = false;
 
-            py::buffer_info buf = vertices_np.request();
-            auto vertices_ptr = static_cast<const tinybvh::bvhvec4*>(buf.ptr);
-            uint32_t prim_count = buf.shape[0] / 3;
+            if (indices_obj.is_none()) {
 
-            bool success = wrapper->bvh->Load(filepath.c_str(), vertices_ptr, prim_count);
-            if (!success) {
-                throw std::runtime_error("Failed to load BVH from file. Check file integrity, version, and geometry compatibility.");
+                // Case: non-indexed geometry
+                wrapper->source_geometry_refs.append(vertices_np);
+
+                py::buffer_info vbuf = vertices_np.request();
+                auto vertices_ptr = static_cast<const tinybvh::bvhvec4*>(vbuf.ptr);
+                uint32_t prim_count = vbuf.shape[0] / 3;
+
+                success = wrapper->bvh->Load(filepath.c_str(), vertices_ptr, prim_count);
+            } else {
+
+                // Case: indexed geometry
+                auto indices_np = py::cast<py::array_t<uint32_t, py::array::c_style | py::array::forcecast>>(indices_obj);
+                if (indices_np.ndim() != 2 || indices_np.shape(1) != 3) {
+                    throw std::runtime_error("Indices must be a 2D numpy array with shape (N, 3).");
+                }
+
+                wrapper->source_geometry_refs.append(vertices_np);
+                wrapper->source_geometry_refs.append(indices_np);
+
+                py::buffer_info vbuf = vertices_np.request();
+                py::buffer_info ibuf = indices_np.request();
+                auto vertices_ptr = static_cast<const tinybvh::bvhvec4*>(vbuf.ptr);
+                auto indices_ptr = static_cast<const uint32_t*>(ibuf.ptr);
+                uint32_t prim_count = ibuf.shape[0];
+
+                success = wrapper->bvh->Load(filepath.c_str(), vertices_ptr, indices_ptr, prim_count);
             }
 
-            // Infer quality from refittable flag
+            if (!success) {
+                throw std::runtime_error(
+                    "Failed to load BVH from file. Check file integrity, version, and that "
+                    "you provided the correct geometry layout (indexed vs. non-indexed)."
+                );
+            }
+
+            // Infer quality from refittable flag since it is not stored in the file
             wrapper->quality = wrapper->bvh->refittable ? BuildQuality::Balanced : BuildQuality::High;
 
             return wrapper;
 
-        }, py::arg("vertices").noconvert(), py::arg("filepath"),
+        }, py::arg("filepath"), py::arg("vertices").noconvert(), py::arg("indices").noconvert() = py::none(),
             R"((
-                Loads a BVH from a file, requires the original vertex data.
+                Loads a BVH from a file, re-linking it to the provided geometry.
 
-                Per design tinybvh does not save the geometric vertex data in its file format;
-                only the acceleration structure itself (the nodes and primitive indices).
-
-                Thus, the vertex data that was used to create the original BVH must be provided:
-                this function re-links the loaded acceleration structure to the vertex data in memory.
+                The geometry must be provided in the same layout as when the BVH was originally
+                built and saved. If it was built from an indexed mesh, both the vertices and the indices must be provided.
 
                 Args:
-                    vertices (numpy.ndarray): A float32, C-style contiguous numpy array of shape (M, 4) representing
-                        the vertex data. This must be the same data that was used when the BVH was originally built and saved.
                     filepath (str or pathlib.Path): The path to the saved BVH file.
+                    vertices (numpy.ndarray): A float32, C-style contiguous numpy array of shape (V, 4)
+                                              representing the vertex data.
+                    indices (numpy.ndarray, optional): A uint32, C-style contiguous array of shape (N, 3)
+                                                       if the BVH was built from an indexed mesh.
 
                 Returns:
                     BVH: A new BVH instance.

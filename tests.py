@@ -4,6 +4,119 @@ import numpy as np
 np.set_printoptions(precision=3, suppress=True)
 from pytinybvh import BVH, Ray, BuildQuality
 
+# ==============================================================================
+
+try:
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+
+
+def plot_aabb(ax, aabb_min, aabb_max, color='gray', linestyle='--', alpha=0.8):
+
+    if not MATPLOTLIB_AVAILABLE:
+        return
+
+    points = np.array([
+        [aabb_min[0], aabb_min[1], aabb_min[2]],
+        [aabb_max[0], aabb_min[1], aabb_min[2]],
+        [aabb_max[0], aabb_max[1], aabb_min[2]],
+        [aabb_min[0], aabb_max[1], aabb_min[2]],
+        [aabb_min[0], aabb_min[1], aabb_max[2]],
+        [aabb_max[0], aabb_min[1], aabb_max[2]],
+        [aabb_max[0], aabb_max[1], aabb_max[2]],
+        [aabb_min[0], aabb_max[1], aabb_max[2]],
+    ])
+    edges = [
+        [points[0], points[1], points[2], points[3], points[0]],
+        [points[4], points[5], points[6], points[7], points[4]],
+        [points[0], points[4]],
+        [points[1], points[5]],
+        [points[2], points[6]],
+        [points[3], points[7]],
+    ]
+    for edge in edges:
+        line = np.array(edge)
+        ax.plot(line[:, 0], line[:, 1], line[:, 2], color, linestyle=linestyle, alpha=alpha)
+
+
+def plot_bvh_n_rays(bvh, source_triangles, origins, directions, hits, tmax_values):
+
+    if not MATPLOTLIB_AVAILABLE:
+        return
+
+    fig = plt.figure(figsize=(12, 10))
+    ax = fig.add_subplot(111, projection='3d')
+
+    colors = plt.cm.Accent(np.linspace(0, 1, len(origins)))
+
+    # Plot triangles
+    poly_collection = Poly3DCollection(source_triangles, alpha=0.3, facecolor='cyan', edgecolor='k')
+    ax.add_collection3d(poly_collection)
+    ax.text(0.0, 1.0, 0.1, "Tri 0", color='black')
+    ax.text(3.0, 4.0, 5.1, "Tri 1", color='black')
+
+    # Plot BVH nodes
+    root_node = bvh.nodes[0]
+    plot_aabb(ax, root_node['aabb_min'], root_node['aabb_max'], color='purple', linestyle='-', alpha=0.6)
+    ax.text(root_node['aabb_min'][0], root_node['aabb_min'][1], root_node['aabb_max'][2], "Root BVH", color='purple')
+
+    if not (root_node['prim_count'] > 0):  # If not a leaf
+        left_child = bvh.nodes[root_node['left_first']]
+        right_child = bvh.nodes[root_node['left_first'] + 1]
+        plot_aabb(ax, left_child['aabb_min'], left_child['aabb_max'], color='orange', linestyle='--', alpha=0.5)
+        plot_aabb(ax, right_child['aabb_min'], right_child['aabb_max'], color='orange', linestyle='--', alpha=0.5)
+
+    # Plot rays
+    for i in range(len(origins)):
+        origin = origins[i]
+        direction = directions[i]
+        hit_record = hits[i]
+        color = colors[i]
+        tmax = tmax_values[i] * 2
+
+        prim_id_as_int = hit_record['prim_id'].astype(np.int32)
+
+        if prim_id_as_int != -1:  # Hit
+            hit_point = origin + direction * hit_record['t']
+            ax.plot([origin[0], hit_point[0]], [origin[1], hit_point[1]], [origin[2], hit_point[2]],
+                    color=color, marker='o', markevery=[0], markersize=5,
+                    label=f'Ray {i} (Hit @ t={hit_record["t"]:.1f})')
+            ax.scatter(hit_point[0], hit_point[1], hit_point[2], color=color, s=60, edgecolor='black')
+        else:  # Miss
+            # slightly desaturated color for miss
+            end_point = origin + direction * min(tmax, 20)
+
+            ax.plot([origin[0], end_point[0]], [origin[1], end_point[1]], [origin[2], end_point[2]],
+                    color=color, alpha=0.9, linestyle=':', marker='o', markevery=[0], markersize=5,
+                    label=f'Ray {i} (Miss)')
+            ax.scatter(end_point[0], end_point[1], end_point[2], color=color, alpha=0.9, marker='x', s=50)
+
+    # ︵‿︵‿୨♡୧‿︵‿︵ aesthetics ︵‿︵‿୨♡୧‿︵‿︵
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.set_title('BVH Visualization with Ray Intersections')
+    ax.auto_scale_xyz(  # auto-scale axes to fit main BVH
+        [bvh.aabb_min[0], bvh.aabb_max[0]],
+        [bvh.aabb_min[1], bvh.aabb_max[1]],
+        [bvh.aabb_min[2], bvh.aabb_max[2]]
+    )
+    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout(rect=(0, 0, 0.85, 1))  # adjust layout to make space for legend
+    plt.show()
+
+
+# ==============================================================================
+
+# ==============================================================================
+# --- BUILD QUALITY TESTS ---
+# ==============================================================================
+
+
 # Create some triangle geometry
 triangles = np.array([
     # Triangle 0 (around origin, at z=0)
@@ -16,7 +129,7 @@ triangles = np.array([
      [ 3.0,  4.0, 5.0]],
 ], dtype=np.float32)
 
-print("\n--- Testing Build Quality ---")
+print("\n--- Testing Build Quality (from_triangles) ---")
 bvh_balanced = BVH.from_triangles(triangles, quality=BuildQuality.Balanced)
 bvh_high = BVH.from_triangles(triangles, quality=BuildQuality.High)
 bvh_quick = BVH.from_triangles(triangles, quality=BuildQuality.Quick)
@@ -42,25 +155,105 @@ except RuntimeError as e:
 
 print("\nBuild quality tests successful!")
 
-# -------
 
-print("\n--- Testing Saving / Loading ---")
-bvh_balanced.save(Path("bvh_test.bvh"))
-assert os.path.exists("bvh_test.bvh")
-print(f'Saved file size: {os.stat("bvh_test.bvh").st_size} bytes')
-vertices_4f = np.zeros((len(triangles) * 3, 4), dtype=np.float32)
-vertices_4f[:, :3] = triangles.reshape(-1, 3)
-bvh = BVH.load(vertices_4f, "bvh_test.bvh")
-os.remove("bvh_test.bvh")
+# ==============================================================================
+# --- INDEXED MESH TEST ---
+# ==============================================================================
 
-assert np.all(bvh.nodes == bvh_balanced.nodes)
-assert np.all(bvh.prim_indices == bvh_balanced.prim_indices)
-assert bvh.prim_count == bvh_balanced.prim_count
-assert bvh.quality == bvh_balanced.quality
+print("\n--- Testing Indexed Mesh Construction ---")
+
+# Define geometry for an indexed quad (2 triangles sharing an edge)
+# 4 unique vertices, 2 triangles
+indexed_vertices_3d = np.array([
+    [0.0, 0.0, 10.0], # 0
+    [5.0, 0.0, 10.0], # 1
+    [0.0, 5.0, 10.0], # 2
+    [5.0, 5.0, 10.0], # 3
+], dtype=np.float32)
+
+# Convert to 4D
+indexed_vertices = np.zeros((4, 4), dtype=np.float32)
+indexed_vertices[:, :3] = indexed_vertices_3d
+
+indices = np.array([
+    [0, 1, 2], # First triangle
+    [1, 3, 2], # Second triangle, shares edge (1, 2)
+], dtype=np.uint32)
+
+bvh_indexed = BVH.from_indexed_mesh(indexed_vertices, indices, quality=BuildQuality.Balanced)
+
+assert bvh_indexed.prim_count == 2
+assert bvh_indexed.node_count > 0
+print("BVH correctly built from indexed mesh.")
+
+
+# Test intersection with the indexed mesh
+ray_hit_indexed = Ray(origin=(2.5, 2.5, 0.0), direction=(0.0, 0.0, 1.0))
+hit_dist = bvh_indexed.intersect(ray_hit_indexed)
+
+print(f"Ray aimed at indexed quad: Returned t={hit_dist:.3f}, Ray object: {ray_hit_indexed}")
+assert np.isclose(hit_dist, 10.0)
+assert ray_hit_indexed.prim_id in [0, 1] # Can hit either triangle of the quad
+
+# Test refitting with indexed mesh
+print("Testing refit on indexed mesh...")
+indexed_vertices[:, 2] = 20.0 # Move all vertices to z=20
+bvh_indexed.refit()
+
+ray_refit = Ray(origin=(2.5, 2.5, 0.0), direction=(0.0, 0.0, 1.0))
+hit_dist_refit = bvh_indexed.intersect(ray_refit)
+print(f"Ray aimed at *refit* indexed quad: Returned t={hit_dist_refit:.3f}, Ray object: {ray_refit}")
+assert np.isclose(hit_dist_refit, 20.0)
+
+print("\nIndexed mesh construction and refit tests successful!")
+
+
+# ==============================================================================
+# --- SAVE/LOAD TEST ---
+# ==============================================================================
+
+print("\n--- Testing Saving / Loading (Indexed and Non-Indexed) ---")
+
+# Test non-indexed ("triangle soup") save/load
+bvh_soup = BVH.from_triangles(triangles, quality=BuildQuality.Balanced)
+soup_vertices_4f = np.zeros((len(triangles) * 3, 4), dtype=np.float32)
+soup_vertices_4f[:, :3] = triangles.reshape(-1, 3)
+
+bvh_soup.save("bvh_soup_test.bvh")
+assert os.path.exists("bvh_soup_test.bvh")
+print(f'Saved soup file size: {os.stat("bvh_soup_test.bvh").st_size} bytes')
+
+bvh_loaded_soup = BVH.load("bvh_soup_test.bvh", soup_vertices_4f)
+os.remove("bvh_soup_test.bvh")
+
+assert np.all(bvh_loaded_soup.nodes == bvh_soup.nodes)
+assert np.all(bvh_loaded_soup.prim_indices == bvh_soup.prim_indices)
+print("Non-indexed BVH saved and loaded correctly.")
+
+# est indexed mesh save/load
+bvh_indexed.save(Path("bvh_indexed_test.bvh"))  # save with a Path object
+assert os.path.exists("bvh_indexed_test.bvh")
+print(f'Saved indexed file size: {os.stat("bvh_indexed_test.bvh").st_size} bytes')
+# Load with both vertices and indices
+bvh_loaded_indexed = BVH.load("bvh_indexed_test.bvh", indexed_vertices, indices)     # load with a str
+os.remove("bvh_indexed_test.bvh")
+
+assert np.all(bvh_loaded_indexed.nodes == bvh_indexed.nodes)
+assert np.all(bvh_loaded_indexed.prim_indices == bvh_indexed.prim_indices)
+print("Indexed BVH saved and loaded correctly.")
 
 print("\nSave/load tests successful!")
 
-# -------
+
+# ==============================================================================
+
+# Use the loaded soup BVH for subsequent tests for consistency
+bvh = bvh_loaded_soup
+
+
+# ==============================================================================
+# --- BVH STRUCTURE TESTS ---
+# ==============================================================================
 
 print("\n--- Testing Structure ---")
 
@@ -80,10 +273,13 @@ leaf_nodes = bvh.nodes[all_tri_counts > 0]
 assert len(bvh.nodes) == 4
 assert len(leaf_nodes) == 2
 
-print(f"\nFound {len(bvh.nodes)} nodes, incliding {len(leaf_nodes)} leaf nodes.")
+print(f"\nFound {len(bvh.nodes)} nodes, including {len(leaf_nodes)} leaf nodes.")
 print('\nStructure tests successful!')
 
-# -------
+
+# ==============================================================================
+# --- RAY INTERSECTION TESTS ---
+# ==============================================================================
 
 print("\n--- Testing single ray intersect ---")
 # This ray should hit the first triangle (ID 0) at t=10
@@ -107,13 +303,15 @@ print(f"Ray 2 (expect miss): Returned t={hit_distance_miss:.3f}, Ray object stat
 assert np.isinf(hit_distance_miss)
 assert ray_miss.prim_id == np.iinfo(np.uint32).max # Check that the ray was not modified
 
+
 print("\n--- Testing batch ray intersect ---")
-# Prepare batch of rays specifically aimed at their targets
+# Prepare batch of rays with staggered origins for better visualization
 origins = np.array([
-    [0.0, 0.0, -10.0],   # Ray 0: Aimed at tri 0. Should hit at t=10.
-    [3.0, 3.0, -10.0],   # Ray 1: Aimed at tri 1. Should hit at t=15.
-    [10.0, 10.0, -10.0], # Ray 2: Aimed at nothing. Should miss.
-    [0.0, 0.0, -10.0],   # Ray 3: Aimed at tri 0, but will be stopped by t_max.
+    [0.1, 0.1, -10.0],   # Ray 0: Aimed at tri 0. Should hit at t=10
+    [3.1, 2.9, -10.0],   # Ray 1: Aimed at tri 1. Should hit at t=15
+    [4.5, 4.5, -10.0],    # Ray 2: Aimed at nothing. Should miss.
+    [0.2, -0.2, -10.0],  # Ray 3: Aimed at tri 0, but will be stopped by t_max
+    [1.5, 1.5, -10.0],  # Ray 4: Aimed between the two triangles. Hits the bounding boxes but not the prims.
 ], dtype=np.float32)
 
 directions = np.array([
@@ -121,10 +319,11 @@ directions = np.array([
     [0.0, 0.0, 1.0],
     [0.0, 0.0, 1.0],
     [0.0, 0.0, 1.0],
+    [0.0, 0.0, 1.0],
 ], dtype=np.float32)
 
 # Optional t_max array. Ray 3 has t_max=4, so it won't reach tri 0 at t=10
-t_max = np.array([100.0, 100.0, 100.0, 4.0], dtype=np.float32)
+t_max = np.array([100.0, 100.0, 100.0, 4.0, 100.0], dtype=np.float32)
 
 # Perform the batch intersection
 hits = bvh.intersect_batch(origins, directions, t_max)
@@ -136,6 +335,7 @@ print(f"Hit 0 (prim_id, t): ({hits[0]['prim_id'].astype(np.int32)}, {hits[0]['t'
 print(f"Hit 1 (prim_id, t): ({hits[1]['prim_id'].astype(np.int32)}, {hits[1]['t']:.3f}) -> Expected: (1, 15.0)")
 print(f"Hit 2 (prim_id, t): ({hits[2]['prim_id'].astype(np.int32)}, {hits[2]['t']:.3f}) -> Expected: (-1, inf)")
 print(f"Hit 3 (prim_id, t): ({hits[3]['prim_id'].astype(np.int32)}, {hits[3]['t']:.3f}) -> Expected: (-1, inf) due to t_max")
+print(f"Hit 4 (prim_id, t): ({hits[4]['prim_id'].astype(np.int32)}, {hits[4]['t']:.3f}) -> Expected: (-1, inf)")
 
 # Assert for hit on triangle 0
 assert hits[0]['prim_id'] == 0 and np.isclose(hits[0]['t'], 10.0)
@@ -144,10 +344,14 @@ assert hits[1]['prim_id'] == 1 and np.isclose(hits[1]['t'], 15.0)
 prim_ids_as_signed = hits['prim_id'].astype(np.int32)
 assert prim_ids_as_signed[2] == -1 and np.isinf(hits[2]['t'])
 assert prim_ids_as_signed[3] == -1 and np.isinf(hits[3]['t'])
+assert prim_ids_as_signed[4] == -1 and np.isinf(hits[4]['t'])
 
 print("\nBatch test successful!")
 
-# -------
+
+# ==============================================================================
+# --- RAY OCCLUSION TESTS ---
+# ==============================================================================
 
 
 print("\n--- Testing single ray occlusion ---")
@@ -201,3 +405,17 @@ print("Expected results:                     ", expected_occlusion)
 np.testing.assert_array_equal(occluded_results, expected_occlusion)
 
 print("\nOcclusion tests successful!")
+
+# ================================== DONE ======================================
+
+print("\n\nAll tests passed!")
+
+if MATPLOTLIB_AVAILABLE:
+    plot_bvh_n_rays(
+        bvh=bvh,
+        source_triangles=triangles,
+        origins=origins,
+        directions=directions,
+        hits=hits,
+        tmax_values=t_max,
+    )

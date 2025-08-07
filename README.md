@@ -44,20 +44,69 @@ The C++ dependency (`tinybvh`) is included as a Git submodule.
     # On Windows: .venv\Scripts\activate
     ```
 
-4.  **Compile and install:**
-    Run `uv sync`. This will automatically download Python dependencies and compile the C++ extension module.
+4.   **Compile and install:**
+    This command will automatically download Python dependencies (if any) and compile the C++ extension module.
     ```bash
-    uv sync
+    uv pip install .
     ```
 
 If the process completes without errors, the `pytinybvh` module is now installed and ready to be used in your virtual environment.
+
 5. **Use in other projects:**
     From the virtual environment of your other project, run the installation of `pytinybvh` in editable mode.
     ```bash
    # Still with uv
     uv pip install -e /path/to/this/repo
     ```
-    
+
+## Performance & Build optimizations
+
+For users building from source who want maximum performance on their specific machine, `pytinybvh` supports two key optimizations that can be enabled during installation.
+
+### 1. Parallelization with OpenMP (Enabled by default if available)
+
+The batch intersection and occlusion methods (`intersect_batch`, `is_occluded_batch`) are parallelized using OpenMP to take advantage of multiple CPU cores. The setup script should automatically detect if your compiler supports OpenMP and enable it.
+
+-   **GCC/Clang:** Requires `-fopenmp`.
+-   **MSVC:** Requires `/openmp`.
+
+If your compiler does not support OpenMP, `pytinybvh` will compile and run in serial (single-threaded) mode. You will see a message during installation indicating whether parallelization is enabled.
+
+### 2. AVX and AVX2 SIMD Optimizations
+
+`tinybvh` also includes highly optimized code paths that use AVX2 and FMA instructions for significant speedups in BVH traversal on CPU.
+#### AVX Support (Enabled by default if available)
+
+Modern CPUs (since ~2011) support AVX. This instruction set is required for `tinybvh`'s highly optimized `Intersect256RaysSSE` function, which provides a significant speedup for `intersect_batch`. The build script will **automatically detect and enable AVX support** if your compiler and system can handle it.
+
+#### AVX2 Support (Opt-in)
+
+Even faster code paths are available using AVX2 and FMA instructions (found on Intel Haswell CPUs from ~2013 and newer, and AMD Zen from ~2017 and newer). However, binaries compiled with these flags _will_ crash on CPUs that do not support them. For this reason, AVX2 is an opt-in feature only.
+
+If you are compiling on a machine with a modern CPU (Intel Haswell or newer, AMD Zen or newer) and intend to run the code on the same or a similarly capable machine, you can enable AVX2 support with an environment variable before running the installation.
+
+**On Linux/macOS:**
+
+```bash
+PYTINYBVH_ENABLE_AVX2=1 uv pip install .
+# or if using pip directly:
+# PYTINYBVH_ENABLE_AVX2=1 pip install .
+```
+
+**On Windows (Command Prompt):**
+```cmd
+set PYTINYBVH_ENABLE_AVX2=1
+uv pip install .
+```
+
+**On Windows (PowerShell)**
+```powershell
+$env:PYTINYBVH_ENABLE_AVX2="1"
+uv pip install .
+```
+
+The build script will print a message confirming that AVX2 optimizations are being compiled. If you enable this option, the resulting wheel will _only_ be usable on machines that support AVX2.
+
 ## Usage examples
 
 `pytinybvh` provides two types of BVH builders: **Core (zero-copy)** builders for performance and **Convenience (include copying)** builders for ease of use with common data formats.

@@ -799,67 +799,112 @@ PYBIND11_MODULE(pytinybvh, m) {
                 throw std::runtime_error("Origins and directions arrays must have the same number of rows.");
             }
 
-            // access the numpy array buffers
-            auto origins_buf = origins_np.request();
-            auto directions_buf = directions_np.request();
-            const size_t n_rays = origins_buf.shape[0];
-            const auto* origins_ptr = static_cast<const float*>(origins_buf.ptr);
-            const auto* directions_ptr = static_cast<const float*>(directions_buf.ptr);
+            const py::ssize_t n_rays = origins_np.shape(0);
+            if (n_rays == 0) return py::array_t<HitRecord>(0);
 
-            // handle optional t_max array
+            auto origins_ptr = origins_np.data();
+            auto directions_ptr = directions_np.data();
+
             const float* t_max_ptr = nullptr;
             py::array_t<float, py::array::c_style> t_max_np;
             if (!t_max_obj.is_none()) {
                 t_max_np = py::cast<py::array_t<float, py::array::c_style>>(t_max_obj);
-                if (t_max_np.ndim() != 1 || t_max_np.shape(0) != n_rays) {
-                    throw std::runtime_error("t_max must be a 1D array with length N.");
-                }
+                if (t_max_np.ndim() != 1 || t_max_np.shape(0) != n_rays) throw std::runtime_error("t_max must be a 1D array with length N.");
                 t_max_ptr = t_max_np.data();
             }
 
             // Create output structured numpy array
             auto result_np = py::array_t<HitRecord>(n_rays);
-            auto result_buf = result_np.request();
-            auto* result_ptr = static_cast<HitRecord*>(result_buf.ptr);
+            auto* result_ptr = result_np.mutable_data();
+            std::vector<tinybvh::Ray> rays(n_rays);
 
-            if (self.custom_type == PyBVH::CustomType::AABB) {
-                auto aabbs_np = py::cast<py::array_t<float>>(self.source_geometry_refs[0]);
-                g_aabbs_ptr = aabbs_np.data();
-            } else if (self.custom_type == PyBVH::CustomType::Sphere) {
-                auto points_np = py::cast<py::array_t<float>>(self.source_geometry_refs[0]);
-                g_points_ptr = points_np.data();
-                g_sphere_radius = self.sphere_radius;
-            }
 
-            for (size_t i = 0; i < n_rays; ++i) {
-                const size_t i3 = i * 3;
-                const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
+            // Threading and Batching logic
+            // For custom geometry, it has to run serially due to the thread_local callback data
+            bool use_256_batch = (self.custom_type == PyBVH::CustomType::None);
 
-                tinybvh::Ray ray(
-                    tinybvh::bvhvec3(origins_ptr[i3], origins_ptr[i3+1], origins_ptr[i3+2]),
-                    tinybvh::bvhvec3(directions_ptr[i3], directions_ptr[i3+1], directions_ptr[i3+2]),
-                    t_init
-                );
+            {
+                py::gil_scoped_release release; // Release GIL for threading
 
-                self.bvh->Intersect(ray);
+                // Initialize rays in parallel
+                #ifdef _OPENMP
+                    #pragma omp parallel for schedule(static)
+                #endif
+                for (py::ssize_t i = 0; i < n_rays; ++i) {
+                    const size_t i3 = i * 3;
+                    const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
+                    rays[i] = tinybvh::Ray(
+                        {origins_ptr[i3], origins_ptr[i3+1], origins_ptr[i3+2]},
+                        {directions_ptr[i3], directions_ptr[i3+1], directions_ptr[i3+2]},
+                        t_init
+                    );
+                }
 
-                if (ray.hit.t < t_init) {
-                    result_ptr[i] = {ray.hit.prim, ray.hit.t, ray.hit.u, ray.hit.v};
+                if (use_256_batch) {
+                    // Fast path: Standard triangles, using Intersect256Rays
+                    #ifdef _OPENMP
+                        #pragma omp parallel for schedule(dynamic)
+                    #endif
+                    for (py::ssize_t i = 0; i < n_rays; i += 256) {
+                        const py::ssize_t end = std::min(i + 256, n_rays);
+                        const py::ssize_t count = end - i;
+                        if (count == 256) {
+                            #ifdef BVH_USEAVX
+                                self.bvh->Intersect256RaysSSE(&rays[i]);
+                            #else
+                                self.bvh->Intersect256Rays(&rays[i]);
+                            #endif
+                        } else {
+                            for (py::ssize_t j = i; j < end; ++j) self.bvh->Intersect(rays[j]);
+                        }
+                    }
                 } else {
-                    // sentinel value for a miss is all the bits to 1
+                    // Slow path for custom geometry (process serially to handle thread_local data)
+
+                    // Note: This part is not parallelized to ensure thread safety with the global pointers
+                    // A parallel version would require passing userdata through the callbacks
+                    if (self.custom_type == PyBVH::CustomType::AABB) {
+                        auto aabbs_np = py::cast<py::array_t<float>>(self.source_geometry_refs[0]);
+                        auto inv_extents_np = py::cast<py::array_t<float>>(self.source_geometry_refs[1]);
+                        g_aabbs_ptr = aabbs_np.data();
+                        g_inv_extents_ptr = inv_extents_np.data();
+
+                    } else if (self.custom_type == PyBVH::CustomType::Sphere) {
+                        auto points_np = py::cast<py::array_t<float>>(self.source_geometry_refs[0]);
+                        g_points_ptr = points_np.data();
+                        g_sphere_radius = self.sphere_radius;
+                    }
+
+                    for (py::ssize_t i = 0; i < n_rays; ++i) {
+                        self.bvh->Intersect(rays[i]);
+                    }
+
+                    g_aabbs_ptr = nullptr;
+                    g_inv_extents_ptr = nullptr;
+                    g_points_ptr = nullptr;
+                }
+            } // GIL re-acquired here
+
+            // Copy results back to numpy
+            for (py::ssize_t i = 0; i < n_rays; ++i) {
+                const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
+                if (rays[i].hit.t < t_init) {
+                    result_ptr[i] = {rays[i].hit.prim, rays[i].hit.t, rays[i].hit.u, rays[i].hit.v};
+                } else {
                     result_ptr[i] = {static_cast<uint32_t>(-1), INFINITY, 0.0f, 0.0f};
                 }
             }
-
-            // unset pointers
-            g_aabbs_ptr = nullptr;
-            g_points_ptr = nullptr;
 
             return result_np;
 
         }, py::arg("origins").noconvert(), py::arg("directions").noconvert(), py::arg("t_max") = py::none(),
            R"((
                 Performs intersection queries for a batch of rays.
+
+                This method leverages both multi-core processing (via OpenMP) and SIMD instructions
+                (via tinybvh's Intersect256Rays functions) for maximum throughput on standard
+                triangle meshes. For custom geometry like AABBs or spheres, it falls back to a
+                serial implementation.
 
                 Args:
                     origins (numpy.ndarray): A (N, 3) float array of ray origins.
@@ -925,56 +970,54 @@ PYBIND11_MODULE(pytinybvh, m) {
                 throw std::runtime_error("Origins and directions arrays must have the same number of rows.");
             }
 
-            auto origins_buf = origins_np.request();
-            auto directions_buf = directions_np.request();
-            const size_t n_rays = origins_buf.shape[0];
-            const auto* origins_ptr = static_cast<const float*>(origins_buf.ptr);
-            const auto* directions_ptr = static_cast<const float*>(directions_buf.ptr);
+
+            const py::ssize_t n_rays = origins_np.shape(0);
+            if (n_rays == 0) return py::array_t<bool>(0);
+
+            auto origins_ptr = origins_np.data();
+            auto directions_ptr = directions_np.data();
 
             const float* t_max_ptr = nullptr;
             py::array_t<float, py::array::c_style> t_max_np;
             if (!t_max_obj.is_none()) {
                 t_max_np = py::cast<py::array_t<float, py::array::c_style>>(t_max_obj);
-                if (t_max_np.ndim() != 1 || t_max_np.shape(0) != n_rays) {
-                    throw std::runtime_error("t_max must be a 1D array with length N.");
-                }
+                if (t_max_np.ndim() != 1 || t_max_np.shape(0) != n_rays) throw std::runtime_error("t_max must be a 1D array with length N.");
                 t_max_ptr = t_max_np.data();
             }
 
-            // Create boolean output array
             auto result_np = py::array_t<bool>(n_rays);
-            auto result_buf = result_np.request();
-            auto* result_ptr = static_cast<bool*>(result_buf.ptr);
+            auto* result_ptr = result_np.mutable_data();
 
-// TODO: This might work fine too, but maybe less explicit, idk
-//            const size_t n_rays = origins_np.shape(0);
-//            const auto* origins_ptr = origins_np.data();
-//            const auto* directions_ptr = directions_np.data();
+            {
+                py::gil_scoped_release release; // Release GIL for threading
 
+                // is_occluded doesn't have a 256-wide version, but we can still parallelize it per-ray
+                #ifdef _OPENMP
+                #pragma omp parallel for schedule(dynamic)
+                #endif
+                for (py::ssize_t i = 0; i < n_rays; ++i) {
+                    // Set thread_local pointers inside the parallel loop for custom geometry
+                    if (self.custom_type == PyBVH::CustomType::AABB) {
+                        auto aabbs_np = py::cast<py::array_t<float>>(self.source_geometry_refs[0]);
+                        g_aabbs_ptr = aabbs_np.data();
+                    } else if (self.custom_type == PyBVH::CustomType::Sphere) {
+                        auto points_np = py::cast<py::array_t<float>>(self.source_geometry_refs[0]);
+                        g_points_ptr = points_np.data();
+                        g_sphere_radius = self.sphere_radius;
+                    }
 
-            if (self.custom_type == PyBVH::CustomType::AABB) {
-                auto aabbs_np = py::cast<py::array_t<float>>(self.source_geometry_refs[0]);
-                g_aabbs_ptr = aabbs_np.data();
-            } else if (self.custom_type == PyBVH::CustomType::Sphere) {
-                auto points_np = py::cast<py::array_t<float>>(self.source_geometry_refs[0]);
-                g_points_ptr = points_np.data();
-                g_sphere_radius = self.sphere_radius;
-            }
+                    const size_t i3 = i * 3;
+                    const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
+                    tinybvh::Ray ray(
+                        {origins_ptr[i3], origins_ptr[i3+1], origins_ptr[i3+2]},
+                        {directions_ptr[i3], directions_ptr[i3+1], directions_ptr[i3+2]},
+                        t_init
+                    );
+                    result_ptr[i] = self.bvh->IsOccluded(ray);
+                }
+            } // GIL re-acquired
 
-            for (size_t i = 0; i < n_rays; ++i) {
-                const size_t i3 = i * 3;
-                const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
-
-                tinybvh::Ray ray(
-                    tinybvh::bvhvec3(origins_ptr[i3], origins_ptr[i3+1], origins_ptr[i3+2]),
-                    tinybvh::bvhvec3(directions_ptr[i3], directions_ptr[i3+1], directions_ptr[i3+2]),
-                    t_init
-                );
-
-                result_ptr[i] = self.bvh->IsOccluded(ray);
-            }
-
-            // unset pointers
+            // Pointers are thread_local so they are automatically cleaned up but let's reset them on the main thread jic
             g_aabbs_ptr = nullptr;
             g_points_ptr = nullptr;
 
@@ -982,7 +1025,9 @@ PYBIND11_MODULE(pytinybvh, m) {
 
         }, py::arg("origins").noconvert(), py::arg("directions").noconvert(), py::arg("t_max") = py::none(),
            R"((
-                Performs occlusion queries for a batch of rays.
+                Performs occlusion queries for a batch of rays, parallelized for performance.
+
+                This method leverages multi-core processing (via OpenMP) for maximum throughput.
 
                 Args:
                     origins (numpy.ndarray): A (N, 3) float array of ray origins.

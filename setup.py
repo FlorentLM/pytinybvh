@@ -13,35 +13,40 @@ class CppBuildExt(build_ext):
             compile_args = ['/std:c++20', '/O2']
             link_args = []
         else:  # assuming GCC or Clang
-            compile_args = ['-std:c++20', '-O3', '-Wno-unused-variable']
+            compile_args = ['-std=c++20', '-O3', '-Wno-unused-variable']
             link_args = []
 
-        # Check for OpenMP support (enabled by default if available)
+        # Check for OpenMP support
         if self._has_openmp_support():
             print("Compiler supports OpenMP. Building with parallelization enabled.")
             if self.compiler.compiler_type == 'msvc':
                 compile_args.append('/openmp')
-                link_args.append('/openmp')
             else:
                 compile_args.append('-fopenmp')
                 link_args.append('-fopenmp')
         else:
             print("Compiler does not support OpenMP. Building in serial mode.")
 
-        # Check for AVX2 support (opt-in via environment variable)
-        if os.environ.get('PYTINYBVH_ENABLE_AVX2', '0') == '1':
+        use_avx2 = os.environ.get('PYTINYBVH_ENABLE_AVX2', '0') == '1'
+
+        if use_avx2:
             print("AVX2 support requested via environment variable.")
             if self._has_avx2_support():
                 print("Compiler supports AVX2. Building with AVX2 optimizations.")
                 if self.compiler.compiler_type == 'msvc':
                     compile_args.append('/arch:AVX2')
                 else:
-                    compile_args.extend(['-mavx2', '-mfma'])  # FMA is crucial for tinybvh's AVX2 paths
+                    compile_args.extend(['-mavx2', '-mfma'])
             else:
-                print(
-                    "WARNING: AVX2 support was requested, but the compiler does not support it. Building without AVX2.")
+                print("WARNING: AVX2 support was requested, but the compiler does not support it. Building without AVX2.")
+        elif self._has_avx_support():
+            print("Compiler supports AVX. Building with AVX optimizations (for Intersect256RaysSSE).")
+            if self.compiler.compiler_type == 'msvc':
+                compile_args.append('/arch:AVX')
+            else:
+                compile_args.append('-mavx')
         else:
-            print("Building without AVX2 optimizations. Set PYTINYBVH_ENABLE_AVX2=1 to enable.")
+            print("Building without AVX/AVX2 optimizations.")
 
         for ext in self.extensions:
             ext.extra_compile_args = compile_args
@@ -81,6 +86,21 @@ class CppBuildExt(build_ext):
         return self._compile_test_program(
             cpp_code,
             ['/openmp'] if self.compiler.compiler_type == 'msvc' else ['-fopenmp']
+        )
+
+    def _has_avx_support(self):
+        """Check if the compiler supports AVX"""
+        cpp_code = """
+        #include <immintrin.h>
+        int main() {
+            __m256 a = _mm256_setzero_ps();
+            (void)a;
+            return 0;
+        }
+        """
+        return self._compile_test_program(
+            cpp_code,
+            ['/arch:AVX'] if self.compiler.compiler_type == 'msvc' else ['-mavx']
         )
 
     def _has_avx2_support(self):

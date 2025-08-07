@@ -212,6 +212,11 @@ class BVH:
         """
         Performs intersection queries for a batch of rays.
 
+        This method leverages both multi-core processing (via OpenMP) and SIMD instructions
+        (via tinybvh's Intersect256Rays functions) for maximum throughput on standard
+        triangle meshes. For custom geometry like AABBs or spheres, it falls back to a
+        serial implementation.
+
         Args:
             origins (numpy.ndarray): A (N, 3) float array of ray origins.
             directions (numpy.ndarray): A (N, 3) float array of ray directions.
@@ -241,7 +246,9 @@ class BVH:
 
     def is_occluded_batch(self, origins: np.ndarray, directions: np.ndarray, t_max: Optional[np.ndarray] = None) -> np.ndarray:
         """
-        Performs occlusion queries for a batch of rays.
+        Performs occlusion queries for a batch of rays, parallelized for performance.
+
+        This method leverages multi-core processing (via OpenMP) for maximum throughput.
 
         Args:
             origins (numpy.ndarray): A (N, 3) float array of ray origins.

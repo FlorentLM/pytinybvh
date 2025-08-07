@@ -112,6 +112,7 @@ def plot_bvh_n_rays(bvh, source_triangles, origins, directions, hits, tmax_value
 
 # ==============================================================================
 
+
 # ==============================================================================
 # --- BUILD QUALITY TESTS ---
 # ==============================================================================
@@ -157,92 +158,107 @@ print("\nBuild quality tests successful!")
 
 
 # ==============================================================================
-# --- INDEXED MESH TEST ---
+# --- CORE ZERO-COPY BUILDER TESTS ---
 # ==============================================================================
 
-print("\n--- Testing Indexed Mesh Construction ---")
+print("\n--- Testing Core (Zero-Copy) Builders ---")
 
-# Define geometry for an indexed quad (2 triangles sharing an edge)
-# 4 unique vertices, 2 triangles
-indexed_vertices_3d = np.array([
-    [0.0, 0.0, 10.0], # 0
-    [5.0, 0.0, 10.0], # 1
-    [0.0, 5.0, 10.0], # 2
-    [5.0, 5.0, 10.0], # 3
-], dtype=np.float32)
+# --- from_vertices Test ---
+print("\nTesting from_vertices...")
+vertices_4d = np.zeros((6, 4), dtype=np.float32)
+vertices_4d[:, :3] = triangles.reshape(6, 3)
+bvh_vertices = BVH.from_vertices(vertices_4d)
+assert bvh_vertices.prim_count == 2
+ray_test_vertices = Ray(origin=(0,0,-1), direction=(0,0,1))
+bvh_vertices.intersect(ray_test_vertices)
+assert np.isclose(ray_test_vertices.t, 1.0)
+print("BVH from_vertices successful.")
 
-# Convert to 4D
+
+# --- from_indexed_mesh Test ---
+print("\nTesting from_indexed_mesh...")
+indexed_vertices_3d = np.array([[0,0,10], [5,0,10], [0,5,10], [5,5,10]], dtype=np.float32)
 indexed_vertices = np.zeros((4, 4), dtype=np.float32)
 indexed_vertices[:, :3] = indexed_vertices_3d
-
-indices = np.array([
-    [0, 1, 2], # First triangle
-    [1, 3, 2], # Second triangle, shares edge (1, 2)
-], dtype=np.uint32)
-
-bvh_indexed = BVH.from_indexed_mesh(indexed_vertices, indices, quality=BuildQuality.Balanced)
-
+indices = np.array([[0, 1, 2], [1, 3, 2]], dtype=np.uint32)
+bvh_indexed = BVH.from_indexed_mesh(indexed_vertices, indices)
 assert bvh_indexed.prim_count == 2
-assert bvh_indexed.node_count > 0
-print("BVH correctly built from indexed mesh.")
+ray_test_indexed = Ray(origin=(2.5, 2.5, 0), direction=(0, 0, 1))
+bvh_indexed.intersect(ray_test_indexed)
+assert np.isclose(ray_test_indexed.t, 10.0)
+print("BVH from_indexed_mesh successful.")
 
-
-# Test intersection with the indexed mesh
-ray_hit_indexed = Ray(origin=(2.5, 2.5, 0.0), direction=(0.0, 0.0, 1.0))
-hit_dist = bvh_indexed.intersect(ray_hit_indexed)
-
-print(f"Ray aimed at indexed quad: Returned t={hit_dist:.3f}, Ray object: {ray_hit_indexed}")
-assert np.isclose(hit_dist, 10.0)
-assert ray_hit_indexed.prim_id in [0, 1] # Can hit either triangle of the quad
 
 # Test refitting with indexed mesh
 print("Testing refit on indexed mesh...")
 indexed_vertices[:, 2] = 20.0 # Move all vertices to z=20
 bvh_indexed.refit()
-
 ray_refit = Ray(origin=(2.5, 2.5, 0.0), direction=(0.0, 0.0, 1.0))
 hit_dist_refit = bvh_indexed.intersect(ray_refit)
 print(f"Ray aimed at *refit* indexed quad: Returned t={hit_dist_refit:.3f}, Ray object: {ray_refit}")
 assert np.isclose(hit_dist_refit, 20.0)
+print("Indexed mesh refit successful.")
 
-print("\nIndexed mesh construction and refit tests successful!")
 
+# --- from_aabbs Test ---
+print("\nTesting from_aabbs...")
+aabbs = np.array([
+    [[-1, -1, -0.1], [1, 1, 0.1]], # AABB for first triangle
+    [[2, 2, 4.9], [4, 4, 5.1]],    # AABB for second triangle
+], dtype=np.float32)
+bvh_aabbs = BVH.from_aabbs(aabbs)
+assert bvh_aabbs.prim_count == 2
+# Test intersection (since AABBs are represented as degenerate triangles, it should hit)
+ray_test_aabbs = Ray(origin=(0,0,-1), direction=(0.0, 0.0, 1.0))
+
+bvh_aabbs.intersect(ray_test_aabbs)
+# Note: The hit distance will be to the degenerate triangle plane, not the AABB face
+assert np.isclose(ray_test_aabbs.t, 0.9) # Hits at z = -0.1
+print("BVH from_aabbs successful.")
+
+
+# ==============================================================================
+# --- CONVENIENCE BUILDER TESTS ---
+# ==============================================================================
+print("\n--- Testing Convenience (Copying) Builders ---")
+
+# --- from_points Test ---
+print("\nTesting from_points...")
+points = np.array([[10,10,10], [20,20,20]], dtype=np.float32)
+bvh_points = BVH.from_points(points, radius=0.5)
+assert bvh_points.prim_count == 2
+# Hit the first point's AABB
+ray_test_points = Ray(origin=(10,10,0), direction=(0.0, 0.0, 1.0))
+bvh_points.intersect(ray_test_points)
+assert np.isclose(ray_test_points.t, 9.5) # Hits at z = 10 - 0.5
+print("BVH from_points successful.")
 
 # ==============================================================================
 # --- SAVE/LOAD TEST ---
 # ==============================================================================
 
 print("\n--- Testing Saving / Loading (Indexed and Non-Indexed) ---")
-
-# Test non-indexed ("triangle soup") save/load
-bvh_soup = BVH.from_triangles(triangles, quality=BuildQuality.Balanced)
-soup_vertices_4f = np.zeros((len(triangles) * 3, 4), dtype=np.float32)
-soup_vertices_4f[:, :3] = triangles.reshape(-1, 3)
-
+bvh_soup = BVH.from_vertices(vertices_4d) # zero-copy builder
 bvh_soup.save("bvh_soup_test.bvh")
 assert os.path.exists("bvh_soup_test.bvh")
 print(f'Saved soup file size: {os.stat("bvh_soup_test.bvh").st_size} bytes')
-
-bvh_loaded_soup = BVH.load("bvh_soup_test.bvh", soup_vertices_4f)
+bvh_loaded_soup = BVH.load("bvh_soup_test.bvh", vertices_4d)
 os.remove("bvh_soup_test.bvh")
-
 assert np.all(bvh_loaded_soup.nodes == bvh_soup.nodes)
 assert np.all(bvh_loaded_soup.prim_indices == bvh_soup.prim_indices)
 print("Non-indexed BVH saved and loaded correctly.")
 
-# est indexed mesh save/load
-bvh_indexed.save(Path("bvh_indexed_test.bvh"))  # save with a Path object
+bvh_indexed.save(Path("bvh_indexed_test.bvh"))
 assert os.path.exists("bvh_indexed_test.bvh")
 print(f'Saved indexed file size: {os.stat("bvh_indexed_test.bvh").st_size} bytes')
-# Load with both vertices and indices
-bvh_loaded_indexed = BVH.load("bvh_indexed_test.bvh", indexed_vertices, indices)     # load with a str
+bvh_loaded_indexed = BVH.load("bvh_indexed_test.bvh", indexed_vertices, indices)
 os.remove("bvh_indexed_test.bvh")
-
 assert np.all(bvh_loaded_indexed.nodes == bvh_indexed.nodes)
 assert np.all(bvh_loaded_indexed.prim_indices == bvh_indexed.prim_indices)
 print("Indexed BVH saved and loaded correctly.")
 
 print("\nSave/load tests successful!")
+
 
 
 # ==============================================================================

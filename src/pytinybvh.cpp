@@ -35,23 +35,50 @@ tinybvh::bvhvec3 py_obj_to_vec3(const py::object& obj) {
 }
 
 
-// thread_local pointer to pass the AABB data to the C-style callback
+// thread_local pointer to pass the AABB data to the C-style callbacks
 thread_local const float* g_aabbs_ptr = nullptr;
 
-void aabb_callback_wrapper(const unsigned int i, tinybvh::bvhvec3& bmin, tinybvh::bvhvec3& bmax) {
-    if (!g_aabbs_ptr) {
-        // this should never happen if used correctly
-        throw std::runtime_error("Internal error: AABB data pointer is null in callback.");
-    }
+// C-style callback for building from AABBs
+void aabb_build_callback(const unsigned int i, tinybvh::bvhvec3& bmin, tinybvh::bvhvec3& bmax) {
+    if (!g_aabbs_ptr) throw std::runtime_error("Internal error: AABB data pointer is null in build callback.");
     const size_t offset = i * 6; // 2 vectors * 3 floats
-    bmin.x = g_aabbs_ptr[offset + 0];
-    bmin.y = g_aabbs_ptr[offset + 1];
-    bmin.z = g_aabbs_ptr[offset + 2];
-    bmax.x = g_aabbs_ptr[offset + 3];
-    bmax.y = g_aabbs_ptr[offset + 4];
-    bmax.z = g_aabbs_ptr[offset + 5];
+    bmin.x = g_aabbs_ptr[offset + 0]; bmin.y = g_aabbs_ptr[offset + 1]; bmin.z = g_aabbs_ptr[offset + 2];
+    bmax.x = g_aabbs_ptr[offset + 3]; bmax.y = g_aabbs_ptr[offset + 4]; bmax.z = g_aabbs_ptr[offset + 5];
 }
 
+// C-style callback for intersecting AABBs
+bool aabb_intersect_callback(tinybvh::Ray& ray, const unsigned int prim_id) {
+    if (!g_aabbs_ptr) throw std::runtime_error("Internal error: AABB data pointer is null in intersect callback.");
+
+    const size_t offset = prim_id * 6;
+    const tinybvh::bvhvec3 bmin = {g_aabbs_ptr[offset], g_aabbs_ptr[offset + 1], g_aabbs_ptr[offset + 2]};
+    const tinybvh::bvhvec3 bmax = {g_aabbs_ptr[offset + 3], g_aabbs_ptr[offset + 4], g_aabbs_ptr[offset + 5]};
+
+    float t = tinybvh_intersect_aabb(ray, bmin, bmax);
+
+    if (t < ray.hit.t) {
+        ray.hit.t = t;
+        ray.hit.prim = prim_id;
+        ray.hit.u = 0.0f; // No barycentric coords for AABB
+        ray.hit.v = 0.0f;
+        return true;
+    }
+    return false;
+}
+
+// C-style callback for occlusion testing with AABBs
+bool aabb_isoccluded_callback(const tinybvh::Ray& ray, const unsigned int prim_id) {
+    if (!g_aabbs_ptr) throw std::runtime_error("Internal error: AABB data pointer is null in occlusion callback.");
+
+    const size_t offset = prim_id * 6;
+    const tinybvh::bvhvec3 bmin = {g_aabbs_ptr[offset], g_aabbs_ptr[offset + 1], g_aabbs_ptr[offset + 2]};
+    const tinybvh::bvhvec3 bmax = {g_aabbs_ptr[offset + 3], g_aabbs_ptr[offset + 4], g_aabbs_ptr[offset + 5]};
+
+    // Create a temporary copy of the ray to pass to the intersect function
+    tinybvh::Ray temp_ray = ray;
+    float t = tinybvh_intersect_aabb(temp_ray, bmin, bmax);
+    return (t < ray.hit.t); // Returns true if there's any hit within the ray's max distance
+}
 
 
 // Enum for build quality selection
@@ -69,6 +96,8 @@ struct PyBVH {
     // this prevents Python's garbage collector from freeing the memory while the C++ BVH object might still be using it
 
     BuildQuality quality = BuildQuality::Balanced;
+
+    bool has_custom_geometry = false;
 
     PyBVH() : bvh(std::make_unique<tinybvh::BVH>()) {}
 
@@ -157,6 +186,11 @@ struct PyBVH {
         auto wrapper = std::make_unique<PyBVH>();
         wrapper->source_geometry_refs.append(aabbs_np);
         wrapper->quality = quality;
+        wrapper->has_custom_geometry = true;
+
+        // custom intersection functions
+        wrapper->bvh->customIntersect = aabb_intersect_callback;
+        wrapper->bvh->customIsOccluded = aabb_isoccluded_callback;
 
         py::buffer_info aabbs_buf = aabbs_np.request();
         const auto* aabbs_ptr = static_cast<const float*>(aabbs_buf.ptr);
@@ -173,7 +207,7 @@ struct PyBVH {
                 case BuildQuality::Balanced:
                 default:
                      // Pass the C-style function pointer, not the lambda
-                     wrapper->bvh->Build(aabb_callback_wrapper, prim_count);
+                     wrapper->bvh->Build(aabb_build_callback, prim_count);
                      break;
             }
         } catch (...) {
@@ -187,7 +221,6 @@ struct PyBVH {
 
         return wrapper;
     }
-
 
     // Convenience builders (with copying)
 
@@ -546,9 +579,21 @@ PYBIND11_MODULE(pytinybvh, m) {
         .def_property_readonly("quality", [](const PyBVH &self) { return self.quality; },
             "The build quality level used to construct the BVH.")
 
-        .def("intersect", [](PyBVH &self, PyRay &py_ray) -> float {
+         .def("intersect", [](PyBVH &self, PyRay &py_ray) -> float {
+
+            // need to set the thread-local pointer if this is an AABB BVH
+            if (self.has_custom_geometry) {
+                auto aabbs_np = py::cast<py::array_t<float>>(self.source_geometry_refs[0]);
+                g_aabbs_ptr = aabbs_np.data();
+            }
+
             tinybvh::Ray ray(py_ray.origin, py_ray.direction, py_ray.t);
             self.bvh->Intersect(ray);
+
+            // unset the pointer
+            if (self.has_custom_geometry) {
+                g_aabbs_ptr = nullptr;
+            }
 
             if (ray.hit.t < py_ray.t) {
                 // update python Ray with hit information
@@ -612,6 +657,13 @@ PYBIND11_MODULE(pytinybvh, m) {
             auto result_buf = result_np.request();
             auto* result_ptr = static_cast<HitRecord*>(result_buf.ptr);
 
+            // need to set the thread-local pointer if this is an AABB BVH
+            py::array_t<float> aabbs_np; // keep it in scope
+            if (self.has_custom_geometry) {
+                aabbs_np = py::cast<py::array_t<float>>(self.source_geometry_refs[0]);
+                g_aabbs_ptr = aabbs_np.data();
+            }
+
             for (size_t i = 0; i < n_rays; ++i) {
                 const size_t i3 = i * 3;
                 const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
@@ -631,7 +683,14 @@ PYBIND11_MODULE(pytinybvh, m) {
                     result_ptr[i] = {static_cast<uint32_t>(-1), INFINITY, 0.0f, 0.0f};
                 }
             }
+
+            // unset the pointer
+            if (self.has_custom_geometry) {
+                g_aabbs_ptr = nullptr;
+            }
+
             return result_np;
+
         }, py::arg("origins").noconvert(), py::arg("directions").noconvert(), py::arg("t_max") = py::none(),
            R"((
                 Performs intersection queries for a batch of rays.
@@ -648,11 +707,27 @@ PYBIND11_MODULE(pytinybvh, m) {
            ))")
 
         .def("is_occluded", [](PyBVH &self, const PyRay &py_ray) -> bool {
+
+            // need to set the thread-local pointer if this is an AABB BVH
+            if (self.has_custom_geometry) {
+                auto aabbs_np = py::cast<py::array_t<float>>(self.source_geometry_refs[0]);
+                g_aabbs_ptr = aabbs_np.data();
+            }
+
             tinybvh::Ray ray(
                 py_ray.origin,
                 py_ray.direction,
                 py_ray.t);  // The ray's t is used as the maximum distance for the occlusion check
-            return self.bvh->IsOccluded(ray);
+
+            bool result = self.bvh->IsOccluded(ray);
+
+            // unset the pointer
+            if (self.has_custom_geometry) {
+                g_aabbs_ptr = nullptr;
+            }
+
+             return result;
+
         }, py::arg("ray"),
            R"((
                 Performs an occlusion query with a single ray.
@@ -709,6 +784,12 @@ PYBIND11_MODULE(pytinybvh, m) {
 //            const auto* directions_ptr = directions_np.data();
 
 
+            // need to set the thread-local pointer if this is an AABB BVH
+            if (self.has_custom_geometry) {
+                auto aabbs_np = py::cast<py::array_t<float>>(self.source_geometry_refs[0]);
+                g_aabbs_ptr = aabbs_np.data();
+            }
+
             for (size_t i = 0; i < n_rays; ++i) {
                 const size_t i3 = i * 3;
                 const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
@@ -721,6 +802,12 @@ PYBIND11_MODULE(pytinybvh, m) {
 
                 result_ptr[i] = self.bvh->IsOccluded(ray);
             }
+
+            // unset pointer
+            if (self.has_custom_geometry) {
+                g_aabbs_ptr = nullptr;
+            }
+
             return result_np;
 
         }, py::arg("origins").noconvert(), py::arg("directions").noconvert(), py::arg("t_max") = py::none(),

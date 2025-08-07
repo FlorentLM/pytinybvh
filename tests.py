@@ -203,17 +203,21 @@ print("Indexed mesh refit successful.")
 # --- from_aabbs Test ---
 print("\nTesting from_aabbs...")
 aabbs = np.array([
-    [[-1, -1, -0.1], [1, 1, 0.1]], # AABB for first triangle
-    [[2, 2, 4.9], [4, 4, 5.1]],    # AABB for second triangle
+    [[-1, -1, -0.1], [1, 1, 0.1]], # AABB for first primitive
+    [[2, 2, 4.9], [4, 4, 5.1]],    # AABB for second primitive
 ], dtype=np.float32)
+
 bvh_aabbs = BVH.from_aabbs(aabbs)
 assert bvh_aabbs.prim_count == 2
-# Test intersection (since AABBs are represented as degenerate triangles, it should hit)
-ray_test_aabbs = Ray(origin=(0,0,-1), direction=(0.0, 0.0, 1.0))
 
-bvh_aabbs.intersect(ray_test_aabbs)
-# Note: The hit distance will be to the degenerate triangle plane, not the AABB face
-assert np.isclose(ray_test_aabbs.t, 0.9) # Hits at z = -0.1
+# Test intersection with the first AABB
+ray_test_aabbs = Ray(origin=(0,0,-1), direction=(0,0,1))
+hit_dist = bvh_aabbs.intersect(ray_test_aabbs)
+print(f"Ray aimed at AABB 0: Returned t={hit_dist:.3f}, Ray object: {ray_test_aabbs}")
+
+assert np.isclose(hit_dist, 0.9)
+assert ray_test_aabbs.prim_id == 0
+
 print("BVH from_aabbs successful.")
 
 

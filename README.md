@@ -121,7 +121,7 @@ bvh.refit()
 ```
 
 #### `BVH.from_aabbs(aabbs, quality)`
-Builds a BVH from a list of pre-defined Axis-Aligned Bounding Boxes. Useful for custom geometry, or for building a TLAS.
+Builds a BVH from a list of pre-defined Axis-Aligned Bounding Boxes. Useful for custom geometry or for building a Top-Level Acceleration Structure (TLAS).
 
 ```python
 import numpy as np
@@ -139,6 +139,8 @@ aabbs_np = np.array([
 # Note: Intersections will be against degenerate triangles representing the AABBs.
 bvh = BVH.from_aabbs(aabbs_np)
 ```
+
+**Note:** When using a BVH built from AABBs, intersection tests are performed directly against the bounding boxes. The hit record will contain the primitive ID of the AABB, but the barycentric coordinates u and v will always be 0.0.
 
 ---
 
@@ -164,7 +166,9 @@ bvh = BVH.from_triangles(triangles_np)
 ```
 
 #### `BVH.from_points(points, radius, quality)`
-Build a BVH from a point cloud by creating a small AABB around each point.
+Builds a BVH from a point cloud. This method performs a true **ray-sphere intersection** test for each primitive, providing accurate hits.
+
+It works by first creating an axis-aligned bounding box for each point to build the hierarchy, then uses a custom intersection function for precise ray-sphere tests inside the leaf nodes.
 
 ```python
 import numpy as np
@@ -174,7 +178,10 @@ points_np = np.random.rand(1000, 3).astype(np.float32)
 
 # This creates AABBs and then builds the BVH.
 bvh = BVH.from_points(points_np, radius=0.01)
+
 ```
+
+**Note:** Since the primitives are spheres, the barycentric coordinates u and v in the hit record will always be 0.0.
 
 ---
 
@@ -192,30 +199,37 @@ ray = Ray(origin=[0.5, 0.2, -5.0], direction=[0, 0, 1])
 # Intersect modifies the ray object in-place
 bvh.intersect(ray)
 
-# A miss is encoded with all the bits set to 1
-miss = np.iinfo(np.uint32).max  # that is 4294967295 in unsigned integers, or -1 in signed integers
-
-if ray.prim_id != miss: 
+if ray.prim_id != -1: 
     print(f"Hit primitive {ray.prim_id} at distance t={ray.t:.3f}")
     print(f"Barycentric coords: u={ray.u:.3f}, v={ray.v:.3f}")
 ```
 
 #### Batch of Rays
 ```python
+      
 # (N, 3) arrays for origins and directions
 origins = np.array([[0.5, 0.2, -5], [10, 10, -5]], dtype=np.float32)
 directions = np.array([[0, 0, 1], [0, 0, 1]], dtype=np.float32)
 
-# Returns a structured array with hit records
+# Returns a structured numpy array with hit records
 hits = bvh.intersect_batch(origins, directions)
 
-print(hits['t'])
-# prints:
-# [(0, 5., 0.2, 0.3)]
+# You can access columns like a dictionary
+hit_distances = hits['t']
+primitive_ids = hits['prim_id'].astype(np.int32) # Cast to signed int to see -1 for misses
 
-print(hits['prim_id'].astype(np.int32))     # cast to signed integers to see the '-1' 
+print("Batch Hit Results:")
+for i in range(len(hits)):
+    if primitive_ids[i] != -1:
+        print(f"  Ray {i} hit primitive {primitive_ids[i]} at t={hits[i]['t']:.3f}")
+    else:
+        print(f"  Ray {i} missed.")
+
 # prints:
-# [(-1, inf, 0., 0.)]
+# Batch Hit Results:
+#   Ray 0 hit primitive 0 at t=5.000
+#   Ray 1 missed.
+
 ```
 
 You can also have a look at `tests.py` to see all the use cases.
@@ -274,9 +288,9 @@ I plan to expand the Python API to include everything.
 Immediate priorities:
 
 - [x] Indexed Geometry Support
-- [ ] Top-Level Acceleration Structure (TLAS) Support
-- [x] Basic support for custom Geometry (via AABB builder)
-- [ ] Proper support for Custom Geometry
+- [x] Custom Geometry Primitives (AABBs and Spheres)
+- [ ] Top-Level Acceleration Structure (TLAS) Support for instancing
+- [ ] Support for more `tinybvh` build presets and layouts (BVH8, etc)
 
 
 ## Acknowledgements

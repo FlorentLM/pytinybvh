@@ -221,6 +221,31 @@ assert ray_test_aabbs.prim_id == 0
 print("BVH from_aabbs successful.")
 
 
+print("Testing occlusion for AABB BVH...")
+# Ray that is occluded by the first AABB (hit at t=0.9, max t=100)
+ray_occluded_aabb = Ray(origin=(0,0,-1), direction=(0,0,1), t=100.0)
+assert bvh_aabbs.is_occluded(ray_occluded_aabb)
+print("  - Occluded ray test: PASSED")
+
+# Ray that is aimed at the AABB but has t_max too short (hit at t=0.9, max t=0.5)
+ray_not_occluded_aabb = Ray(origin=(0,0,-1), direction=(0,0,1), t=0.5)
+assert not bvh_aabbs.is_occluded(ray_not_occluded_aabb)
+print("  - t_max limited ray test: PASSED")
+
+# Batch occlusion test for AABBs
+aabb_origins = np.array([
+    [0, 0, -1],     # Should be occluded
+    [0, 0, -1],     # Should NOT be occluded (t_max too short)
+    [10, 10, -1],   # Should miss
+], dtype=np.float32)
+aabb_directions = np.array([[0,0,1], [0,0,1], [0,0,1]], dtype=np.float32)
+aabb_t_max = np.array([100.0, 0.5, 100.0], dtype=np.float32)
+
+occluded_results_aabb = bvh_aabbs.is_occluded_batch(aabb_origins, aabb_directions, aabb_t_max)
+expected_occlusion_aabb = np.array([True, False, False])
+np.testing.assert_array_equal(occluded_results_aabb, expected_occlusion_aabb)
+print("  - Batch occlusion test: PASSED")
+
 # ==============================================================================
 # --- CONVENIENCE BUILDER TESTS ---
 # ==============================================================================
@@ -236,6 +261,30 @@ ray_test_points = Ray(origin=(10,10,0), direction=(0.0, 0.0, 1.0))
 bvh_points.intersect(ray_test_points)
 assert np.isclose(ray_test_points.t, 9.5) # Hits at z = 10 - 0.5
 print("BVH from_points successful.")
+
+print("Testing occlusion for sphere BVH...")
+# This ray is aimed through the center of the sphere at (10,10,10) with radius 0.5.
+# It should be occluded. The hit is at t=9.5, ray.t=100.
+ray_occluded_sphere = Ray(origin=(10,10,0), direction=(0,0,1), t=100.0)
+assert bvh_points.is_occluded(ray_occluded_sphere)
+print("  - Occluded ray test: PASSED")
+
+# This ray is aimed at the sphere but its max distance is too short.
+# The hit is at t=9.5, but ray.t=5.0, so it should not be occluded.
+ray_not_occluded_sphere = Ray(origin=(10,10,0), direction=(0,0,1), t=5.0)
+assert not bvh_points.is_occluded(ray_not_occluded_sphere)
+print("  - t_max limited ray test: PASSED")
+
+# A ray that grazes the sphere should be a hit
+# Sphere center (10,10,10), radius 0.5. Ray origin (10.4, 10, 0)
+ray_grazing_sphere = Ray(origin=(10.4, 10, 0), direction=(0,0,1), t=100.0)
+assert bvh_points.is_occluded(ray_grazing_sphere)
+print("  - Grazing ray test: PASSED")
+
+# A ray that just misses the sphere
+ray_missing_sphere = Ray(origin=(10.6, 10, 0), direction=(0,0,1), t=100.0)
+assert not bvh_points.is_occluded(ray_missing_sphere)
+print("  - Missing ray test: PASSED")
 
 # ==============================================================================
 # --- SAVE/LOAD TEST ---

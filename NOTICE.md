@@ -27,11 +27,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-## Stanford Dragon Model
-
-The `dragon.ply` file is provided by the Stanford University Computer Graphics Laboratory and is subject to their usage policy, which requires attribution.
-
-**Source:** The Stanford 3D Scanning Repository (http://graphics.stanford.edu/data/3dscanrep/)

@@ -2,12 +2,16 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Simple Python bindings for the great C++ Bounding Volume Hierarchy (BVH) library [tinybvh](https://github.com/jbikker/tinybvh) by Jacco Bikker.
+Python bindings for the great C++ Bounding Volume Hierarchy (BVH) library [tinybvh](https://github.com/jbikker/tinybvh) by Jacco Bikker.
 
-Exposes `tinybvh`'s fast BVH construction algorithms to Python, to use for CPU-side BVH generation in Python applications.
-Can be used for real-time ray tracing with PyOpenGL or Vulkan, or CPU-side stuff like collision detection, etc.
+Exposes `tinybvh`'s fast BVH construction algorithms to Python.
+For example, the BVH can be used as-is in a SSBO for real time ray-tracing with PyOpenGL or Vulkan, or for CPU-side computations like collision detection, etc.
 
 **Note:** Not all functionalities are implemented yet!
+
+<div style="text-align:center">
+<img alt="Screenshot of a test model in a Bounding Volume Hierarchy" src="img/screenshot.png" title="Screenshot" width="500"/>
+</div>
 
 ## Prerequisites
 
@@ -46,6 +50,7 @@ The C++ dependency (`tinybvh`) is included as a Git submodule.
 
 4.   **Compile and install:**
     This command will automatically download Python dependencies (if any) and compile the C++ extension module.
+
     ```bash
     uv pip install .
     ```
@@ -55,8 +60,7 @@ If the process completes without errors, the `pytinybvh` module is now installed
 5. **Use in other projects:**
     From the virtual environment of your other project, run the installation of `pytinybvh` in editable mode.
     ```bash
-   # Still with uv
-    uv pip install -e /path/to/this/repo
+    uv pip install /path/to/this/repo
     ```
 
 ## Performance & Build optimizations
@@ -246,7 +250,7 @@ from pytinybvh import Ray
 # Create a ray
 ray = Ray(origin=[0.5, 0.2, -5.0], direction=[0, 0, 1])
 
-# Intersect modifies the ray object in-place
+# Intersect modifies the ray object in-place. Useful for multiple bounces.
 bvh.intersect(ray)
 
 if ray.prim_id != -1: 
@@ -311,8 +315,12 @@ I included a simple `visualise.py` script that opens a 3D viewer.
 
 ```
 pytinybvh/
+├── assets/                 # Test models, etc
+│   └── sneks.ply
 ├── deps/                   # C++ dependencies (submodules)
 │   └── tinybvh/
+├── img/                    # Images used in this README
+│   └── screenshot.png
 ├── src/
 │   ├── pytinybvh.cpp       # C++ wrapper source
 │   └── pytinybvh.pyi       # Python stub file
@@ -324,7 +332,6 @@ pytinybvh/
 ├── tests.py                # Demo and tests script
 ├── visualise.py            # View the BVH with the geometry in 3D
 ├── LICENSE                 # MIT License
-├── dragon.ply              # Stanford dragon as a.ply file
 ├── NOTICE.md
 └── README.md
 ```
@@ -349,8 +356,9 @@ Immediate priorities:
 
 ## Test Assets
 
-The `dragon.ply` file included in this repository is a standard computer graphics test model provided for demonstration purposes.
+The `sneks` model included in this repository is an original model. Feel free to reuse it.
 
--   **Model:** The Stanford Dragon
--   **Source:** [The Stanford 3D Scanning Repository](http://graphics.stanford.edu/data/3dscanrep/)
--   **Copyright:** The data is provided by the Stanford University Computer Graphics Laboratory. In line with their usage policy, I acknowledge them as the source of this data.
+-   **Source:** [here](https://github.com/FlorentLM/pytinybvh/blob/main/assets/snek.ply)
+-   **Size:** 9.37 Mb
+-   **Vertices:** 169 678
+-   **Triangles:** 338 120

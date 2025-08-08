@@ -318,6 +318,73 @@ struct PyBVH {
         return wrapper;
     }
 
+    static std::unique_ptr<PyBVH> from_aabbs(py::array_t<float, py::array::c_style> aabbs_np, BuildQuality quality) {
+        if (aabbs_np.ndim() != 3 || aabbs_np.shape(1) != 2 || aabbs_np.shape(2) != 3) {
+            throw std::runtime_error("Input must be a 3D numpy array with shape (N, 2, 3).");
+        }
+
+        auto wrapper = std::make_unique<PyBVH>();
+        wrapper->source_geometry_refs.append(aabbs_np);
+        wrapper->quality = quality;
+        wrapper->custom_type = CustomType::AABB;
+
+        // custom intersection functions
+        wrapper->bvh->customIntersect = aabb_intersect_callback;
+        wrapper->bvh->customIsOccluded = aabb_isoccluded_callback;
+
+        if (aabbs_np.shape(0) == 0) {
+            // default wrapper is an empty BVH
+            // bvh->triCount is 0, bvh->usedNodes is 0.
+            return wrapper;
+        }
+
+        py::buffer_info aabbs_buf = aabbs_np.request();
+        const auto* aabbs_ptr = static_cast<const float*>(aabbs_buf.ptr);
+        const uint32_t prim_count = static_cast<uint32_t>(aabbs_buf.shape[0]);
+
+        // Pre-compute reciprocal extents for faster intersection tests
+        auto inv_extents_np = py::array_t<float>(py::array::ShapeContainer({(py::ssize_t)prim_count, 3}));
+        float* inv_extents_ptr = inv_extents_np.mutable_data();
+
+        for(size_t i = 0; i < prim_count; ++i) {
+            const size_t a_off = i * 6;
+            const size_t i_off = i * 3;
+            const float ex = aabbs_ptr[a_off + 3] - aabbs_ptr[a_off + 0];
+            const float ey = aabbs_ptr[a_off + 4] - aabbs_ptr[a_off + 1];
+            const float ez = aabbs_ptr[a_off + 5] - aabbs_ptr[a_off + 2];
+            inv_extents_ptr[i_off + 0] = ex > 1e-6f ? 1.0f / ex : 0.0f;
+            inv_extents_ptr[i_off + 1] = ey > 1e-6f ? 1.0f / ey : 0.0f;
+            inv_extents_ptr[i_off + 2] = ez > 1e-6f ? 1.0f / ez : 0.0f;
+        }
+        // reference to reciprocals array to keep it alive
+        wrapper->source_geometry_refs.append(inv_extents_np);
+
+        // Use the original AABBs for the build callback
+        g_aabbs_ptr = aabbs_ptr;
+
+        try {
+            // BuildQuick and BuildHQ don't support custom AABB getters, so default to Balanced
+            switch (quality) {
+                case BuildQuality::High:
+                case BuildQuality::Quick:
+                case BuildQuality::Balanced:
+                default:
+                     // Pass the C-style function pointer, not the lambda
+                     wrapper->bvh->Build(aabb_build_callback, prim_count);
+                     break;
+            }
+        } catch (...) {
+            // ensure global pointer is cleared even if an exception occurs
+            g_aabbs_ptr = nullptr;
+            throw;
+        }
+
+        // clear the pointer after the build is complete
+        g_aabbs_ptr = nullptr;
+
+        return wrapper;
+    }
+
     // Convenience builders (with copying)
 
     static std::unique_ptr<PyBVH> from_triangles(py::array_t<float, py::array::c_style | py::array::forcecast> tris_np, BuildQuality quality) {
@@ -428,74 +495,121 @@ struct PyBVH {
         return wrapper;
     }
 
-    static std::unique_ptr<PyBVH> from_aabbs(py::array_t<float, py::array::c_style | py::array::forcecast> aabbs_np, BuildQuality quality) {
-        if (aabbs_np.ndim() != 3 || aabbs_np.shape(1) != 2 || aabbs_np.shape(2) != 3) {
-            throw std::runtime_error("Input must be a 3D numpy array with shape (N, 2, 3).");
+    // Other methods
+
+    static std::unique_ptr<PyBVH> build_tlas(py::array instances_np, const py::list& blases_py) {
+
+        // validate
+        if (instances_np.ndim() != 1) {
+            throw std::runtime_error("Instances must be a 1D structured numpy array.");
+        }
+        // bit verbose but it's fine
+        py::dict fields = instances_np.dtype().attr("fields").cast<py::dict>();
+        if (!fields.contains("transform") || !fields.contains("blas_id")) {
+             throw std::runtime_error("Instance dtype must contain 'transform' and 'blas_id'.");
+        }
+
+        const py::ssize_t inst_count = instances_np.shape(0);
+        if (inst_count == 0) {
+            // Handle empty scene
+            return std::make_unique<PyBVH>();
         }
 
         auto wrapper = std::make_unique<PyBVH>();
-        wrapper->source_geometry_refs.append(aabbs_np);
-        wrapper->quality = quality;
-        wrapper->custom_type = CustomType::AABB;
+        wrapper->instances_data.resize(inst_count);
 
-        // custom intersection functions
-        wrapper->bvh->customIntersect = aabb_intersect_callback;
-        wrapper->bvh->customIsOccluded = aabb_isoccluded_callback;
-
-        if (aabbs_np.shape(0) == 0) {
-            // default wrapper is an empty BVH
-            // bvh->triCount is 0, bvh->usedNodes is 0.
-            return wrapper;
+        // Extract BLAS pointers
+        wrapper->blas_pointers.reserve(blases_py.size());
+        for (const auto& blas_obj : blases_py) {
+            wrapper->blas_pointers.push_back(blas_obj.cast<PyBVH&>().bvh.get());
         }
 
-        py::buffer_info aabbs_buf = aabbs_np.request();
-        const auto* aabbs_ptr = static_cast<const float*>(aabbs_buf.ptr);
-        const uint32_t prim_count = static_cast<uint32_t>(aabbs_buf.shape[0]);
+        for (py::ssize_t i = 0; i < inst_count; ++i) {
 
-        // Pre-compute reciprocal extents for faster intersection tests
-        auto inv_extents_np = py::array_t<float>(py::array::ShapeContainer({(py::ssize_t)prim_count, 3}));
-        float* inv_extents_ptr = inv_extents_np.mutable_data();
+            auto record = instances_np[py::int_(i)];
+            auto transform_arr = record["transform"].cast<py::array_t<float>>();
+            wrapper->instances_data[i].blasIdx = record["blas_id"].cast<uint32_t>();
 
-        for(size_t i = 0; i < prim_count; ++i) {
-            const size_t a_off = i * 6;
-            const size_t i_off = i * 3;
-            const float ex = aabbs_ptr[a_off + 3] - aabbs_ptr[a_off + 0];
-            const float ey = aabbs_ptr[a_off + 4] - aabbs_ptr[a_off + 1];
-            const float ez = aabbs_ptr[a_off + 5] - aabbs_ptr[a_off + 2];
-            inv_extents_ptr[i_off + 0] = ex > 1e-6f ? 1.0f / ex : 0.0f;
-            inv_extents_ptr[i_off + 1] = ey > 1e-6f ? 1.0f / ey : 0.0f;
-            inv_extents_ptr[i_off + 2] = ez > 1e-6f ? 1.0f / ez : 0.0f;
-        }
-        // reference to reciprocals array to keep it alive
-        wrapper->source_geometry_refs.append(inv_extents_np);
-
-        // Use the original AABBs for the build callback
-        g_aabbs_ptr = aabbs_ptr;
-
-        try {
-            // BuildQuick and BuildHQ don't support custom AABB getters, so default to Balanced
-            switch (quality) {
-                case BuildQuality::High:
-                case BuildQuality::Quick:
-                case BuildQuality::Balanced:
-                default:
-                     // Pass the C-style function pointer, not the lambda
-                     wrapper->bvh->Build(aabb_build_callback, prim_count);
-                     break;
+            // Optional support for mask
+            if (fields.contains("mask")) {
+                wrapper->instances_data[i].mask = record["mask"].cast<uint32_t>();
             }
-        } catch (...) {
-            // ensure global pointer is cleared even if an exception occurs
-            g_aabbs_ptr = nullptr;
-            throw;
+
+            // Copy the transform matrix (it's fine we only do this once)
+            std::memcpy(wrapper->instances_data[i].transform.cell, transform_arr.data(), 16 * sizeof(float));
         }
 
-        // clear the pointer after the build is complete
-        g_aabbs_ptr = nullptr;
+        wrapper->source_geometry_refs.append(instances_np); // keep instance data alive
+        wrapper->source_geometry_refs.append(blases_py);    // keep BLASes alive
+
+        wrapper->bvh->Build(
+            wrapper->instances_data.data(),
+            static_cast<uint32_t>(inst_count),
+            wrapper->blas_pointers.data(),
+            static_cast<uint32_t>(wrapper->blas_pointers.size())
+        );
 
         return wrapper;
     }
 
-    // Other methods
+    static std::unique_ptr<PyBVH> load(const py::object& filepath_obj, py::array_t<float,
+        py::array::c_style | py::array::forcecast> vertices_np, py::object indices_obj) { // py::object to accept an array or None
+
+        if (vertices_np.ndim() != 2 || vertices_np.shape(1) != 4) {
+            throw std::runtime_error("Vertex data for loading must be a 2D numpy array with shape (V, 4).");
+        }
+
+        std::string filepath = py::str(filepath_obj).cast<std::string>();
+        auto wrapper = std::make_unique<PyBVH>();
+        bool success = false;
+
+        if (indices_obj.is_none()) {
+
+            // Case: non-indexed geometry
+            wrapper->source_geometry_refs.append(vertices_np);
+
+            py::buffer_info vertices_buf = vertices_np.request();
+            auto vertices_ptr = static_cast<const tinybvh::bvhvec4*>(vertices_buf.ptr);
+            const uint32_t prim_count = static_cast<uint32_t>(vertices_buf.shape[0] / 3);
+
+            success = wrapper->bvh->Load(filepath.c_str(), vertices_ptr, prim_count);
+        } else {
+
+            // Case: indexed geometry
+            auto indices_np = py::cast<py::array_t<uint32_t, py::array::c_style | py::array::forcecast>>(indices_obj);
+            if (indices_np.ndim() != 2 || indices_np.shape(1) != 3) {
+                throw std::runtime_error("Indices must be a 2D numpy array with shape (N, 3).");
+            }
+
+            wrapper->source_geometry_refs.append(vertices_np);
+            wrapper->source_geometry_refs.append(indices_np);
+
+            py::buffer_info vertices_buf = vertices_np.request();
+            py::buffer_info indices_buf = indices_np.request();
+            auto vertices_ptr = static_cast<const tinybvh::bvhvec4*>(vertices_buf.ptr);
+            auto indices_ptr = static_cast<const uint32_t*>(indices_buf.ptr);
+            const uint32_t prim_count = static_cast<uint32_t>(indices_buf.shape[0]);
+            success = wrapper->bvh->Load(filepath.c_str(), vertices_ptr, indices_ptr, prim_count);
+        }
+
+        if (!success) {
+            throw std::runtime_error(
+                "Failed to load BVH from file. Check file integrity, version, and that "
+                "you provided the correct geometry layout (indexed vs. non-indexed)."
+            );
+        }
+
+        // Infer quality from refittable flag since it is not stored in the file
+        wrapper->quality = wrapper->bvh->refittable ? BuildQuality::Balanced : BuildQuality::High;
+
+        return wrapper;
+
+    }
+
+    void save(const py::object& filepath_obj) {
+        std::string filepath = py::str(filepath_obj).cast<std::string>();
+        bvh->Save(filepath.c_str());
+    }
 
     void refit() {
         if (!bvh || !bvh->refittable) {
@@ -506,7 +620,35 @@ struct PyBVH {
         bvh->Refit();
     }
 
-    // TODO: optimise()
+    void optimize(unsigned int iterations, bool extreme, bool stochastic) {
+        if (!bvh) return;
+
+        // Convert to BVH_Verbose
+        tinybvh::BVH_Verbose verbose_bvh;
+        // The verbose BVH needs to be allocated with enough space for splitting
+        // A full split to 1 primitive/leaf results in ~2*N nodes
+        // Let's allocate 3*N to be safe
+        verbose_bvh.bvhNode = (tinybvh::BVH_Verbose::BVHNode*)verbose_bvh.AlignedAlloc(
+            sizeof(tinybvh::BVH_Verbose::BVHNode) * bvh->triCount * 3);
+        verbose_bvh.allocatedNodes = bvh->triCount * 3;
+        verbose_bvh.ConvertFrom(*bvh);
+
+        verbose_bvh.Optimize(iterations, extreme, stochastic);
+
+        // Convert back to standard BVH
+        bvh->ConvertFrom(verbose_bvh, true /* compact */);
+
+        // After optimization, refittable is likely still true, but SBVH flags might change
+        // Update PyBVH state if necessary
+        quality = bvh->refittable ? BuildQuality::Balanced : BuildQuality::High;
+    }
+
+    void compact() {
+    if (bvh) {
+        bvh->Compact();
+    }
+}
+
 };
 
 // pybind11 wrapper for tinybvh::Ray to be used in intersection queries
@@ -617,7 +759,9 @@ PYBIND11_MODULE(pytinybvh, m) {
                 Returns:
                     BVH: A new BVH instance.
             ))",
-            py::arg("vertices").noconvert(), py::arg("quality") = BuildQuality::Balanced)
+            // noconvert() to enforce direct memory access!
+            py::arg("vertices").noconvert(),
+            py::arg("quality") = BuildQuality::Balanced)
 
         .def_static("from_indexed_mesh", &PyBVH::from_indexed_mesh,
             R"((
@@ -643,7 +787,28 @@ PYBIND11_MODULE(pytinybvh, m) {
             py::arg("indices").noconvert(),
             py::arg("quality") = BuildQuality::Balanced)
 
-        // Convenience Builders
+        .def_static("from_aabbs", &PyBVH::from_aabbs,
+            R"((
+                Builds a BVH from an array of Axis-Aligned Bounding Boxes.
+
+                This is a zero-copy operation. The BVH will hold a reference to the
+                provided numpy array's memory buffer. This is useful for building a BVH over
+                custom geometry or for creating a Top-Level Acceleration Structure (TLAS).
+
+                Args:
+                    aabbs (numpy.ndarray): A float32, C-contiguous array of shape (N, 2, 3),
+                                           where each item is a pair of [min_corner, max_corner].
+                    quality (BuildQuality): The desired quality of the BVH.
+
+                Returns:
+                    BVH: A new BVH instance.
+            ))",
+            // noconvert() to enforce direct memory access!
+            py::arg("aabbs").noconvert(),
+            py::arg("quality") = BuildQuality::Balanced)
+
+        // Convenience builders (with copying)
+
         .def_static("from_triangles", &PyBVH::from_triangles,
             R"((
                 Builds a BVH from a standard triangle array. This is a convenience method that
@@ -657,6 +822,8 @@ PYBIND11_MODULE(pytinybvh, m) {
                 Returns:
                     BVH: A new BVH instance.
             ))",
+
+            // no need for noconvert() here, we copy anyway
             py::arg("triangles"),
             py::arg("quality") = BuildQuality::Balanced)
 
@@ -679,82 +846,9 @@ PYBIND11_MODULE(pytinybvh, m) {
             py::arg("radius") = 1e-5f,
             py::arg("quality") = BuildQuality::Balanced)
 
-        .def_static("from_aabbs", &PyBVH::from_aabbs,
-            R"((
-                Builds a BVH from an array of Axis-Aligned Bounding Boxes.
+        // Other methods
 
-                This is a zero-copy operation. The BVH will hold a reference to the
-                provided numpy array's memory buffer. This is useful for building a BVH over
-                custom geometry or for creating a Top-Level Acceleration Structure (TLAS).
-
-                Args:
-                    aabbs (numpy.ndarray): A float32, C-contiguous array of shape (N, 2, 3),
-                                           where each item is a pair of [min_corner, max_corner].
-                    quality (BuildQuality): The desired quality of the BVH.
-
-                Returns:
-                    BVH: A new BVH instance.
-            ))",
-            py::arg("aabbs"),
-            py::arg("quality") = BuildQuality::Balanced)
-
-        .def_static("build_tlas", [](
-            py::array instances_np, // generic array, we check dtype manually
-            const py::list& blases_py
-        ) {
-            // validate
-            if (instances_np.ndim() != 1) {
-                throw std::runtime_error("Instances must be a 1D structured numpy array.");
-            }
-            // bit verbose but it's fine
-            py::dict fields = instances_np.dtype().attr("fields").cast<py::dict>();
-            if (!fields.contains("transform") || !fields.contains("blas_id")) {
-                 throw std::runtime_error("Instance dtype must contain 'transform' and 'blas_id'.");
-            }
-
-            const py::ssize_t inst_count = instances_np.shape(0);
-            if (inst_count == 0) {
-                // Handle empty scene
-                return std::make_unique<PyBVH>();
-            }
-
-            auto wrapper = std::make_unique<PyBVH>();
-            wrapper->instances_data.resize(inst_count);
-
-            // Extract BLAS pointers
-            wrapper->blas_pointers.reserve(blases_py.size());
-            for (const auto& blas_obj : blases_py) {
-                wrapper->blas_pointers.push_back(blas_obj.cast<PyBVH&>().bvh.get());
-            }
-
-            for (py::ssize_t i = 0; i < inst_count; ++i) {
-
-                auto record = instances_np[py::int_(i)];
-                auto transform_arr = record["transform"].cast<py::array_t<float>>();
-                wrapper->instances_data[i].blasIdx = record["blas_id"].cast<uint32_t>();
-
-                // Optional support for mask
-                if (fields.contains("mask")) {
-                    wrapper->instances_data[i].mask = record["mask"].cast<uint32_t>();
-                }
-
-                // Copy the transform matrix (it's fine we only do this once)
-                std::memcpy(wrapper->instances_data[i].transform.cell, transform_arr.data(), 16 * sizeof(float));
-            }
-
-            wrapper->source_geometry_refs.append(instances_np); // keep instance data alive
-            wrapper->source_geometry_refs.append(blases_py);    // keep BLASes alive
-
-            wrapper->bvh->Build(
-                wrapper->instances_data.data(),
-                static_cast<uint32_t>(inst_count),
-                wrapper->blas_pointers.data(),
-                static_cast<uint32_t>(wrapper->blas_pointers.size())
-            );
-
-            return wrapper;
-
-        }, py::arg("instances").noconvert(), py::arg("BLASes"),
+        .def_static("build_tlas", &PyBVH::build_tlas,
            R"((
                 Builds a Top-Level Acceleration Structure (TLAS) from a list of BVH instances.
 
@@ -766,63 +860,12 @@ PYBIND11_MODULE(pytinybvh, m) {
 
                 Returns:
                     BVH: A new BVH instance representing the TLAS.
-            ))")
+            ))",
 
-        .def_static("load", [](
-            const py::object& filepath_obj,
-            py::array_t<float, py::array::c_style | py::array::forcecast> vertices_np,
-            py::object indices_obj // py::object to accept an array or None
-        ) {
-            if (vertices_np.ndim() != 2 || vertices_np.shape(1) != 4) {
-                throw std::runtime_error("Vertex data for loading must be a 2D numpy array with shape (V, 4).");
-            }
+           py::arg("instances").noconvert(),
+           py::arg("BLASes"))
 
-            std::string filepath = py::str(filepath_obj).cast<std::string>();
-            auto wrapper = std::make_unique<PyBVH>();
-            bool success = false;
-
-            if (indices_obj.is_none()) {
-
-                // Case: non-indexed geometry
-                wrapper->source_geometry_refs.append(vertices_np);
-
-                py::buffer_info vertices_buf = vertices_np.request();
-                auto vertices_ptr = static_cast<const tinybvh::bvhvec4*>(vertices_buf.ptr);
-                const uint32_t prim_count = static_cast<uint32_t>(vertices_buf.shape[0] / 3);
-
-                success = wrapper->bvh->Load(filepath.c_str(), vertices_ptr, prim_count);
-            } else {
-
-                // Case: indexed geometry
-                auto indices_np = py::cast<py::array_t<uint32_t, py::array::c_style | py::array::forcecast>>(indices_obj);
-                if (indices_np.ndim() != 2 || indices_np.shape(1) != 3) {
-                    throw std::runtime_error("Indices must be a 2D numpy array with shape (N, 3).");
-                }
-
-                wrapper->source_geometry_refs.append(vertices_np);
-                wrapper->source_geometry_refs.append(indices_np);
-
-                py::buffer_info vertices_buf = vertices_np.request();
-                py::buffer_info indices_buf = indices_np.request();
-                auto vertices_ptr = static_cast<const tinybvh::bvhvec4*>(vertices_buf.ptr);
-                auto indices_ptr = static_cast<const uint32_t*>(indices_buf.ptr);
-                const uint32_t prim_count = static_cast<uint32_t>(indices_buf.shape[0]);
-                success = wrapper->bvh->Load(filepath.c_str(), vertices_ptr, indices_ptr, prim_count);
-            }
-
-            if (!success) {
-                throw std::runtime_error(
-                    "Failed to load BVH from file. Check file integrity, version, and that "
-                    "you provided the correct geometry layout (indexed vs. non-indexed)."
-                );
-            }
-
-            // Infer quality from refittable flag since it is not stored in the file
-            wrapper->quality = wrapper->bvh->refittable ? BuildQuality::Balanced : BuildQuality::High;
-
-            return wrapper;
-
-        }, py::arg("filepath"), py::arg("vertices").noconvert(), py::arg("indices").noconvert() = py::none(),
+        .def_static("load", &PyBVH::load,
             R"((
                 Loads a BVH from a file, re-linking it to the provided geometry.
 
@@ -838,19 +881,21 @@ PYBIND11_MODULE(pytinybvh, m) {
 
                 Returns:
                     BVH: A new BVH instance.
-            ))")
+            ))",
+            py::arg("filepath"),
+            py::arg("vertices").noconvert(),
+            py::arg("indices").noconvert() = py::none())
 
-        .def("save", [](const PyBVH& self, const py::object& filepath_obj) {
-            std::string filepath = py::str(filepath_obj).cast<std::string>();
-            self.bvh->Save(filepath.c_str());
-        }, py::arg("filepath"),
+        .def("save", &PyBVH::save,
             R"((
                 Saves the BVH to a file.
 
                 Args:
                     filepath (str or pathlib.Path): The path where the BVH file will be saved.
-            ))"
-        )
+            ))",
+            py::arg("filepath"))
+
+        // Properties
 
         .def_property_readonly("nodes", [](PyBVH &self) -> py::array {
             if (!self.bvh || self.bvh->usedNodes == 0) {
@@ -868,8 +913,8 @@ PYBIND11_MODULE(pytinybvh, m) {
             }
             return py::array_t<uint32_t>(
                 { (py::ssize_t)self.bvh->idxCount }, // shape
-                self.bvh->primIdx,    // data pointer
-                py::cast(self)        // owner
+                self.bvh->primIdx,                   // data pointer
+                py::cast(self)                       // owner
             );
         }, "The array of primitive indices, ordered for locality.")
 
@@ -1309,8 +1354,35 @@ PYBIND11_MODULE(pytinybvh, m) {
                 Note: This will fail if the BVH was built with spatial splits (with BuildQuality.High).
              ))")
 
+        .def("optimize", &PyBVH::optimize,
+             "iterations"_a = 25, "extreme"_a = false, "stochastic"_a = false,
+             R"((
+                Optimizes the BVH tree structure to improve query performance.
+
+                This is a costly operation best suited for static scenes. It works by
+                re-inserting subtrees into better locations based on the SAH cost.
+
+                Args:
+                    iterations (int): The number of optimization passes.
+                    extreme (bool): If true, a larger portion of the tree is considered
+                                    for optimization in each pass.
+                    stochastic (bool): If true, uses a randomized approach to select
+                                       nodes for re-insertion.
+             ))")
+
+        .def("compact", &PyBVH::compact,
+            R"((
+                Removes unused nodes from the BVH structure, reducing memory usage.
+
+                This is useful after building with high quality (which may create
+                spatial splits and more primitives) or after optimization, as these
+                processes can leave gaps in the node array.
+            ))")
+
         .def_property_readonly("node_count", [](const PyBVH &self){ return self.bvh->usedNodes; }, "Total number of nodes in the BVH.")
+
         .def_property_readonly("prim_count", [](const PyBVH &self){ return self.bvh->triCount; }, "Total number of primitives in the BVH.")
+
         .def_property_readonly("aabb_min", [](PyBVH &self) -> py::array {
             if (!self.bvh) return py::array_t<float>(0);
             // Create a 1D array of shape (3,) that is a view into the bvh.aabbMin data
@@ -1320,6 +1392,7 @@ PYBIND11_MODULE(pytinybvh, m) {
                 py::cast(self)                      // owner
             );
         }, "The minimum corner of the root axis-aligned bounding box.")
+
         .def_property_readonly("aabb_max", [](PyBVH &self) -> py::array {
             if (!self.bvh) return py::array_t<float>(0);
             // Create a 1D array of shape (3,) that is a view into the bvh.aabbMax data
@@ -1328,5 +1401,11 @@ PYBIND11_MODULE(pytinybvh, m) {
                 {&self.bvh->aabbMax.x},             // data pointer
                 py::cast(self)                      // owner
             );
-        }, "The maximum corner of the root axis-aligned bounding box.");
+        }, "The maximum corner of the root axis-aligned bounding box.")
+
+        .def_property_readonly("sah_cost", [](const PyBVH &self) {
+            // Return infinity for an empty BVH to avoid division by zero in SAH calculation
+            if (!self.bvh || self.bvh->triCount == 0) return INFINITY;
+            return self.bvh->SAHCost();
+        }, "Calculates the Surface Area Heuristic (SAH) cost of the BVH tree.");
 }

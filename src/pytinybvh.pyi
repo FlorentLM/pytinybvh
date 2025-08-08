@@ -327,6 +327,32 @@ class BVH:
         """
         ...
 
+    def optimize(self) -> None:
+        """
+        Optimizes the BVH tree structure to improve query performance.
+
+        This is a costly operation best suited for static scenes. It works by
+        re-inserting subtrees into better locations based on the SAH cost.
+
+        Args:
+            iterations (int): The number of optimization passes.
+            extreme (bool): If true, a larger portion of the tree is considered
+                            for optimization in each pass.
+            stochastic (bool): If true, uses a randomized approach to select
+                               nodes for re-insertion.
+        """
+        ...
+
+    def compact(self) -> None:
+        """
+        Removes unused nodes from the BVH structure, reducing memory usage.
+
+        This is useful after building with high quality (which may create
+        spatial splits and more primitives) or after optimization, as these
+        processes can leave gaps in the node array.
+        """
+        ...
+
     @property
     def nodes(self) -> np.ndarray:
         """The structured numpy array of BVH nodes."""
@@ -360,4 +386,9 @@ class BVH:
     @property
     def quality(self) -> BuildQuality:
         """The build quality level used to construct the BVH."""
+        ...
+
+    @property
+    def sah_cost(self) -> float:
+        """Calculates the Surface Area Heuristic (SAH) cost of the BVH tree."""
         ...

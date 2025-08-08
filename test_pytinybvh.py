@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 import numpy as np
 import pytest
@@ -83,7 +84,7 @@ def bvh_from_ply():
     verts_4d = np.zeros((verts_3d.shape[0], 4), dtype=np.float32)
     verts_4d[:, :3] = verts_3d
 
-    bvh = BVH.from_indexed_mesh(verts_4d, indices, quality=BuildQuality.Quick)
+    bvh = BVH.from_indexed_mesh(verts_4d, indices, quality=BuildQuality.Balanced)
     return bvh
 
 @pytest.fixture(scope="module")
@@ -350,6 +351,172 @@ class TestTLAS:
         tlas.intersect(ray)
 
         assert np.isclose(ray.t, 7.0) and ray.inst_id == 3
+
+
+class TestPostProcessing:
+    def test_optimize_improves_sah_score(self, bvh_from_ply):
+        """
+        Tests that optimizing a complex BVH reduces its SAH cost.
+        Note: BVH built with BuildQuality.Quick because it produces a
+        less optimal tree that has more room for improvement.
+        """
+        bvh = bvh_from_ply  # This BVH is from a complex mesh
+
+        # Get SAH cost before optimization
+        sah_before = bvh.sah_cost
+        assert sah_before > 0.0 and np.isfinite(sah_before)
+
+        # Optimize the BVH
+        bvh.optimize()
+
+        # Get SAH cost after optimization
+        sah_after = bvh.sah_cost
+        assert sah_after > 0.0 and np.isfinite(sah_after)
+
+        print(f"\nSAH Cost before optimization: {sah_before:.4f}")
+        print(f"SAH Cost after optimization:  {sah_after:.4f}")
+
+        # The core assertion: SAH cost should decrease.
+        assert sah_after < sah_before
+
+        # Test that the BVH is still refittable after optimization
+        # (tinybvh's reinsertion optimization does not introduce spatial splits)
+        try:
+            bvh.refit()
+        except RuntimeError:
+            pytest.fail("BVH should still be refittable after optimization.")
+
+    def test_optimize_improves_performance(self, bvh_from_ply):
+        """
+        Tests that optimizing a BVH improves real-world query performance.
+        This is the most reliable test, as the library's SAHCost metric can
+        be misleading.
+        """
+        bvh = bvh_from_ply  # Fixture now correctly uses BuildQuality.Balanced
+
+        # Generate a large number of random rays aimed at the BVH's AABB
+        num_rays = 100_000
+        aabb_min, aabb_max = bvh.aabb_min, bvh.aabb_max
+        aabb_center = (aabb_min + aabb_max) / 2.0
+        aabb_size = float(np.max(aabb_max - aabb_min))
+
+        # Generate random origins on a sphere outside the AABB
+        phi = np.random.uniform(0, np.pi, num_rays)
+        theta = np.random.uniform(0, 2 * np.pi, num_rays)
+        origins = np.zeros((num_rays, 3), dtype=np.float32)
+        origins[:, 0] = aabb_center[0] + aabb_size * np.sin(phi) * np.cos(theta)
+        origins[:, 1] = aabb_center[1] + aabb_size * np.sin(phi) * np.sin(theta)
+        origins[:, 2] = aabb_center[2] + aabb_size * np.cos(phi)
+
+        # Aim rays towards the AABB center
+        directions = aabb_center - origins
+        directions /= np.linalg.norm(directions, axis=1, keepdims=True)
+
+        # Time intersection before optimization
+        start_time_before = time.perf_counter()
+        hits_before = bvh.intersect_batch(origins, directions)
+        end_time_before = time.perf_counter()
+        time_before = end_time_before - start_time_before
+
+        # Optimize the BVH
+        bvh.optimize()
+
+        # Time intersection after optimization
+        start_time_after = time.perf_counter()
+        hits_after = bvh.intersect_batch(origins, directions)
+        end_time_after = time.perf_counter()
+        time_after = end_time_after - start_time_after
+
+        print(f"\nIntersection time before optimization: {time_before:.6f}s")
+        print(f"Intersection time after optimization:  {time_after:.6f}s")
+
+        # Verify correctness before checking performance
+        # Primitive and instance IDs must be identical
+        np.testing.assert_array_equal(hits_before['prim_id'], hits_after['prim_id'])
+        np.testing.assert_array_equal(hits_before['inst_id'], hits_after['inst_id'])
+
+        # mask for rays that hit in both cases
+        hit_mask = (hits_before['t'] != np.inf) & (hits_after['t'] != np.inf)
+
+        # Compare hit distances only for the hits, allowing for float tolerance
+        np.testing.assert_allclose(
+            hits_before['t'][hit_mask],
+            hits_after['t'][hit_mask],
+            rtol=1e-5
+        )
+
+        # The core assertion: performance should improve
+        assert time_after < time_before
+
+    def test_optimize_maintains_correctness(self, bvh_cube):
+        """Tests that the BVH produces identical intersection results after optimization"""
+
+        bvh, _, _ = bvh_cube
+
+        # Define a set of rays to test against the cube
+        origins = np.array([
+            [0, 0, -2],  # Hit -Z face
+            [0, 0, 2],   # Hit +Z face
+            [-2, 0, 0],  # Hit -X face
+            [2, 0, 0],   # Hit +X face
+            [0, -2, 0],  # Hit -Y face
+            [0, 2, 0],   # Hit +Y face
+            [5, 5, 5],   # Miss
+        ], dtype=np.float32)
+        directions = np.array([
+            [0, 0, 1],
+            [0, 0, -1],
+            [1, 0, 0],
+            [-1, 0, 0],
+            [0, 1, 0],
+            [0, -1, 0],
+            [-1, -1, -1],
+        ], dtype=np.float32)
+
+        # Get results before optimization
+        hits_before = bvh.intersect_batch(origins, directions)
+
+        # Optimize
+        bvh.optimize()
+        hits_after = bvh.intersect_batch(origins, directions)
+
+        # Compare results
+        # Primitive and instance IDs must be identical
+        np.testing.assert_array_equal(hits_before['prim_id'], hits_after['prim_id'])
+        np.testing.assert_array_equal(hits_before['inst_id'], hits_after['inst_id'])
+
+        # mask for rays that hit in both cases
+        hit_mask = (hits_before['t'] != np.inf) & (hits_after['t'] != np.inf)
+
+        # Compare hit distances only for the hits, allowing for float tolerance
+        np.testing.assert_allclose(
+            hits_before['t'][hit_mask],
+            hits_after['t'][hit_mask],
+            rtol=1e-5
+        )
+
+    def test_compact_on_compact_bvh(self, bvh_cube):
+        """
+        Tests that compact() on an already compact BVH is a no-op and doesn't
+        corrupt the data
+
+        A better test would require a build process
+        that is *guaranteed* to create a non-compact tree (a threaded build ?)
+        """
+        bvh, _, _ = bvh_cube
+        initial_nodes = bvh.nodes.copy()
+        initial_node_count = bvh.node_count
+
+        # Compacting an already compact BVH should not change it
+        bvh.compact()
+
+        assert bvh.node_count == initial_node_count
+        np.testing.assert_array_equal(bvh.nodes, initial_nodes)
+
+        # Also verify it still works
+        ray = Ray(origin=(0, 0, -2), direction=(0, 0, 1))
+        bvh.intersect(ray)
+        assert np.isclose(ray.t, 1.5)
 
 
 class TestRobustness:

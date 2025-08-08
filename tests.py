@@ -13,10 +13,12 @@ def translation_matrix(translation: np.ndarray) -> np.ndarray:
     M[:3, 3] = translation
     return M
 
+
 def scale_matrix(scale: Union[float, np.ndarray]) -> np.ndarray:
     M = np.identity(4, dtype=np.float32)
-    np.fill_diagonal(M, (*([scale]*3), 1.0))
+    np.fill_diagonal(M, (*([scale] * 3), 1.0))
     return M
+
 
 def rotation_matrix(axis: np.ndarray, angle_rad: float) -> np.ndarray:
     axis = axis / np.linalg.norm(axis)
@@ -27,22 +29,24 @@ def rotation_matrix(axis: np.ndarray, angle_rad: float) -> np.ndarray:
     xC, yC, zC = x * C, y * C, z * C
     xyC, yzC, zxC = x * yC, y * zC, z * xC
     return np.array([
-        [x*xC+c, xyC-zs, zxC+ys, 0],
-        [xyC+zs, y*yC+c, yzC-xs, 0],
-        [zxC-ys, yzC+xs, z*zC+c, 0],
+        [x * xC + c, xyC - zs, zxC + ys, 0],
+        [xyC + zs, y * yC + c, yzC - xs, 0],
+        [zxC - ys, yzC + xs, z * zC + c, 0],
         [0, 0, 0, 1]
     ], dtype=np.float32)
+
 
 @pytest.fixture(scope="module")
 def bvh_two_triangles():
     """Fixture for a simple BVH with two triangles"""
 
     triangles = np.array([
-        [[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]], # Tri 0 at z=0
-        [[2.0, 2.0, 5.0], [4.0, 2.0, 5.0], [3.0, 4.0, 5.0]],     # Tri 1 at z=5
+        [[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]],  # Tri 0 at z=0
+        [[2.0, 2.0, 5.0], [4.0, 2.0, 5.0], [3.0, 4.0, 5.0]],  # Tri 1 at z=5
     ], dtype=np.float32)
     bvh = BVH.from_triangles(triangles, quality=BuildQuality.Balanced)
     return bvh, triangles
+
 
 @pytest.fixture(scope="module")
 def tlas_scene():
@@ -73,11 +77,21 @@ def tlas_scene():
     instances = np.zeros(4, dtype=instance_dtype)
     instances[0] = (np.identity(4, dtype=np.float32), 0, 0b0001)
     instances[1] = (translation_matrix(np.array([5, 0, 0])) @ scale_matrix(2.0), 0, 0b0010)
-    instances[2] = (translation_matrix(np.array([0, 5, 0])) @ rotation_matrix(np.array([0, 1, 0]), np.pi / 2), 1, 0b0100)
+    instances[2] = (translation_matrix(np.array([0, 5, 0])) @ rotation_matrix(np.array([0, 1, 0]), np.pi / 2), 1,
+                    0b0100)
     instances[3] = (translation_matrix(np.array([0, 0, -5])), 1, 0b1000)
 
     tlas_bvh = BVH.build_tlas(instances, blases)
-    return {"tlas": tlas_bvh, "blases": blases, "instances": instances}
+
+    return {
+        "tlas": tlas_bvh,
+        "blases": blases,
+        "instances": instances,
+        "cube_verts": cube_verts,
+        "cube_indices": cube_indices,
+        "quad_verts": quad_verts,
+        "quad_indices": quad_indices,
+    }
 
 
 # ==============================================================================
@@ -112,7 +126,7 @@ class TestConstruction:
     def test_from_indexed_mesh(self):
         """Tests the zero-copy `from_indexed_mesh` builder"""
 
-        verts_3d = np.array([[0,0,10], [5,0,10], [0,5,10], [5,5,10]], dtype=np.float32)
+        verts_3d = np.array([[0, 0, 10], [5, 0, 10], [0, 5, 10], [5, 5, 10]], dtype=np.float32)
         verts_4d = np.zeros((4, 4), dtype=np.float32)
         verts_4d[:, :3] = verts_3d
         indices = np.array([[0, 1, 2], [1, 3, 2]], dtype=np.uint32)
@@ -159,7 +173,7 @@ class TestCoreFunctionality:
         """Tests that refitting the BVH correctly updates to new vertex positions"""
 
         verts_4d = np.zeros((4, 4), dtype=np.float32)
-        verts_4d[:, :3] = np.array([[0,0,10], [5,0,10], [0,5,10], [5,5,10]])
+        verts_4d[:, :3] = np.array([[0, 0, 10], [5, 0, 10], [0, 5, 10], [5, 5, 10]])
         indices = np.array([[0, 1, 2], [1, 3, 2]], dtype=np.uint32)
         bvh = BVH.from_indexed_mesh(verts_4d, indices)
 
@@ -208,12 +222,12 @@ class TestIntersection:
 
         bvh, _ = bvh_two_triangles
         origins = np.array([
-            [0.0, 0.0, -10.0],   # Ray 0: Hit tri 0 (z=0) at t=10
-            [3.0, 3.0, -10.0],   # Ray 1: Hit tri 1 (z=5) at t=15
-            [10.0, 10.0, -10.0], # Ray 2: Miss
-            [0.0, 0.0, -10.0],   # Ray 3: Aimed at tri 0, but t_max is too short
+            [0.0, 0.0, -10.0],  # Ray 0: Hit tri 0 (z=0) at t=10
+            [3.0, 3.0, -10.0],  # Ray 1: Hit tri 1 (z=5) at t=15
+            [10.0, 10.0, -10.0],  # Ray 2: Miss
+            [0.0, 0.0, -10.0],  # Ray 3: Aimed at tri 0, but t_max is too short
         ], dtype=np.float32)
-        directions = np.array([[0,0,1]]*4, dtype=np.float32)
+        directions = np.array([[0, 0, 1]] * 4, dtype=np.float32)
         t_max = np.array([100.0, 100.0, 100.0, 5.0], dtype=np.float32)
 
         hits = bvh.intersect_batch(origins, directions, t_max)
@@ -248,12 +262,12 @@ class TestOcclusion:
         bvh, _ = bvh_two_triangles
 
         origins = np.array([
-            [0.0, 0.0, -10.0],   # Ray 0: Occluded by tri 0 (t=10)
-            [3.0, 3.0, -10.0],   # Ray 1: Not occluded by tri 1 (t=15) due to t_max
-            [10.0, 10.0, -10.0], # Ray 2: Not occluded (miss)
+            [0.0, 0.0, -10.0],  # Ray 0: Occluded by tri 0 (t=10)
+            [3.0, 3.0, -10.0],  # Ray 1: Not occluded by tri 1 (t=15) due to t_max
+            [10.0, 10.0, -10.0],  # Ray 2: Not occluded (miss)
         ], dtype=np.float32)
 
-        directions = np.array([[0,0,1]]*3, dtype=np.float32)
+        directions = np.array([[0, 0, 1]] * 3, dtype=np.float32)
         t_max = np.array([100.0, 10.0, 100.0], dtype=np.float32)
 
         occlusion = bvh.is_occluded_batch(origins, directions, t_max)
@@ -305,11 +319,11 @@ class TestRobustness:
 
         assert bvh.prim_count == 0 and bvh.node_count == 0
 
-        ray = Ray((0,0,0), (0,0,1))
+        ray = Ray((0, 0, 0), (0, 0, 1))
 
         assert np.isinf(bvh.intersect(ray))
 
-        hits = bvh.intersect_batch(np.empty((0,3)), np.empty((0,3)))
+        hits = bvh.intersect_batch(np.empty((0, 3)), np.empty((0, 3)))
 
         assert len(hits) == 0
 
@@ -321,15 +335,15 @@ class TestRobustness:
         with pytest.raises(RuntimeError): BVH.from_points(np.zeros((5, 4)))
 
         # Core builders expect specific dtypes and will fail with TypeError from pybind11
-        with pytest.raises(TypeError): BVH.from_vertices(np.zeros((6, 4))) # float64
+        with pytest.raises(TypeError): BVH.from_vertices(np.zeros((6, 4)))  # float64
         with pytest.raises(TypeError):
-            BVH.from_indexed_mesh(np.zeros((4,4)), np.zeros((2,3), dtype=np.uint32)) # float64
+            BVH.from_indexed_mesh(np.zeros((4, 4)), np.zeros((2, 3), dtype=np.uint32))  # float64
 
         # Core builders should raise RuntimeError for bad shapes if dtype is correct
         with pytest.raises(RuntimeError):
-            BVH.from_vertices(np.zeros((7, 4), dtype=np.float32)) # Not multiple of 3
+            BVH.from_vertices(np.zeros((7, 4), dtype=np.float32))  # Not multiple of 3
         with pytest.raises(RuntimeError):
-            BVH.from_indexed_mesh(np.zeros((4,3), np.float32), np.zeros((2,3), np.uint32)) # Verts not (V,4)
+            BVH.from_indexed_mesh(np.zeros((4, 3), np.float32), np.zeros((2, 3), np.uint32))  # Verts not (V,4)
 
     def test_invalid_parameters(self):
         """Tests for invalid scalar parameters."""
@@ -345,8 +359,8 @@ class TestCustomGeometry:
         """Tests BVH built from AABBs, including hit UVs"""
 
         aabbs = np.array([
-            [[-1, -1, -0.1], [1, 1, 0.1]], # AABB for first primitive
-            [[2, 2, 4.9], [4, 4, 5.1]],    # AABB for second primitive
+            [[-1, -1, -0.1], [1, 1, 0.1]],  # AABB for first primitive
+            [[2, 2, 4.9], [4, 4, 5.1]],  # AABB for second primitive
         ], dtype=np.float32)
 
         bvh = BVH.from_aabbs(aabbs)
@@ -367,7 +381,7 @@ class TestCustomGeometry:
     def test_from_points_intersection_and_uvs(self):
         """Tests BVH built from points (as spheres), including hit UVs"""
 
-        points = np.array([[10,10,10]], dtype=np.float32)
+        points = np.array([[10, 10, 10]], dtype=np.float32)
         bvh = BVH.from_points(points, radius=0.5)
 
         # Hit front of sphere
@@ -386,6 +400,7 @@ class TestCustomGeometry:
 # ==============================================================================
 
 def view_test_scene():
+    """Builds and visualizes the TLAS test scene"""
     try:
         import matplotlib.pyplot as plt
         from mpl_toolkits.mplot3d import Axes3D
@@ -395,60 +410,125 @@ def view_test_scene():
         return
 
     # Setup scene
-    triangles = np.array([
-        [[-1, -1, 0], [1, -1, 0], [0, 1, 0]],
-        [[2, 2, 5], [4, 2, 5], [3, 4, 5]],
-    ], dtype=np.float32)
+    # BLAS 0: Unit cube
+    cube_verts = np.zeros((8, 4), dtype=np.float32)
+    cube_verts[:, :3] = np.array([
+        [-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5],
+        [-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5]
+    ])
+    cube_indices = np.array([
+        [0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7], [0, 4, 7], [0, 7, 3],
+        [1, 5, 6], [1, 6, 2], [0, 1, 5], [0, 5, 4], [3, 2, 6], [3, 6, 7]
+    ], dtype=np.uint32)
+    bvh_cube_blas = BVH.from_indexed_mesh(cube_verts, cube_indices)
 
-    bvh = BVH.from_triangles(triangles)
+    # BLAS 1: A 2x2 quad on the XY plane
+    quad_verts = np.zeros((4, 4), dtype=np.float32)
+    quad_verts[:, :3] = np.array([[-1, -1, 0], [1, -1, 0], [1, 1, 0], [-1, 1, 0]])
+    quad_indices = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.uint32)
+    bvh_quad_blas = BVH.from_indexed_mesh(quad_verts, quad_indices)
 
-    origins = np.array([
-        [0.1, 0.1, -10.0], [3.1, 2.9, -10.0], [4.5, 4.5, -10.0],
-        [0.2, -0.2, -10.0], [1.5, 1.5, -10.0]
-    ], dtype=np.float32)
+    blas_geometries = [
+        (cube_verts[:, :3], cube_indices),
+        (quad_verts[:, :3], quad_indices)
+    ]
+    blases = [bvh_cube_blas, bvh_quad_blas]
 
-    directions = np.array([[0,0,1]]*5, dtype=np.float32)
+    # Define Instances
+    instance_dtype = np.dtype([('transform', '<f4', (4, 4)), ('blas_id', '<u4'), ('mask', '<u4')])
+    instances = np.zeros(4, dtype=instance_dtype)
+    instances[0] = (np.identity(4, dtype=np.float32), 0, 0b0001)
+    instances[1] = (translation_matrix(np.array([5, 0, 0])) @ scale_matrix(2.0), 0, 0b0010)
+    instances[2] = (translation_matrix(np.array([0, 5, 0])) @ rotation_matrix(np.array([0, 1, 0]), np.pi / 2), 1,
+                    0b0100)
+    instances[3] = (translation_matrix(np.array([0, 0, -5])), 1, 0b1000)
 
-    t_max = np.array([100, 100, 100, 4, 100], dtype=np.float32)
-    hits = bvh.intersect_batch(origins, directions, t_max)
+    tlas = BVH.build_tlas(instances, blases)
+
+    # Define rays for visualization
+    ray_defs = [
+        {'label': "Hit Inst 0 (Cube)", 'o': [0, 0, -2], 'd': [0, 0, 1], 'mask': 0xFFFFFFFF},
+        {'label': "Hit Inst 1 (Scaled Cube)", 'o': [5, 0, -2], 'd': [0, 0, 1], 'mask': 0xFFFFFFFF},
+        {'label': "Hit Inst 2 (Rotated Quad)", 'o': [-2, 5, 0], 'd': [1, 0, 0], 'mask': 0xFFFFFFFF},
+        {'label': "Miss", 'o': [5, 5, 5], 'd': [1, 1, 1], 'mask': 0xFFFFFFFF},
+        {'label': "Masked: Hit Inst 3 (Quad)", 'o': [0, 0, 2], 'd': [0, 0, -1], 'mask': 0b1000},
+        {'label': "Unmasked: Hit Inst 0", 'o': [0, 0, 2], 'd': [0, 0, -1], 'mask': 0b0001},
+    ]
+    origins = np.array([r['o'] for r in ray_defs], dtype=np.float32)
+    directions = np.array([r['d'] for r in ray_defs], dtype=np.float32)
+    masks = np.array([r['mask'] for r in ray_defs], dtype=np.uint32)
+    t_max = np.full(len(ray_defs), 100.0, dtype=np.float32)
+
+    # Intersect rays
+    hits = tlas.intersect_batch(origins, directions, t_max, masks)
 
     # Plotting
-    fig = plt.figure(figsize=(12, 10))
+    fig = plt.figure(figsize=(14, 12))
     ax = fig.add_subplot(111, projection='3d')
-    colors = plt.cm.viridis(np.linspace(0, 1, len(origins)))
+    instance_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']  # Muted blue, orange, green, red
 
-    # Plot triangles
-    ax.add_collection3d(Poly3DCollection(triangles, alpha=0.3, facecolor='cyan', edgecolor='k'))
+    # Plot instance geometries
+    for i, inst in enumerate(instances):
+        verts, indices = blas_geometries[inst['blas_id']]
+        transform = inst['transform']
 
-    # Plot BVH nodes (root and children)
-    for i in range(min(bvh.node_count, 3)): # Plot root and its immediate children
-        node = bvh.nodes[i]
-        color = 'purple' if i == 0 else 'orange'
-        linestyle = '-' if i == 0 else '--'
-        plot_aabb(ax, node['aabb_min'], node['aabb_max'], color=color, linestyle=linestyle)
+        verts_h = np.ones((verts.shape[0], 4), dtype=np.float32)
+        verts_h[:, :3] = verts
+        transformed_verts_h = verts_h @ transform.T
+
+        tris_to_plot = transformed_verts_h[:, :3][indices]
+        ax.add_collection3d(Poly3DCollection(
+            tris_to_plot,
+            alpha=0.3,
+            facecolor=instance_colors[i],
+            edgecolor=instance_colors[i]
+        ))
+
+        # Label instances
+        centroid = np.mean(transformed_verts_h[:, :3], axis=0)
+        ax.text(centroid[0], centroid[1], centroid[2], f"Inst {i}", color=instance_colors[i])
+
+    # Plot TLAS root AABB
+    plot_aabb(ax, tlas.aabb_min, tlas.aabb_max, color='purple', linestyle='-', label='TLAS Root AABB')
+
+    # Plot instance AABBs (world space)
+    for node in tlas.nodes:
+        if node['prim_count'] > 0:  # It's a leaf node pointing to instances
+            plot_aabb(ax, node['aabb_min'], node['aabb_max'], color='gray', linestyle=':')
 
     # Plot rays
-    for i, (origin, direction, hit, t_val) in enumerate(zip(origins, directions, hits, t_max)):
-        is_hit = hit['prim_id'].astype(np.int32) != -1
+    for i, (origin, direction, hit, ray_def) in enumerate(zip(origins, directions, hits, ray_defs)):
+        is_hit = hit['inst_id'].astype(np.int32) != -1
 
         if is_hit:
             hit_point = origin + direction * hit['t']
-            ax.plot(*zip(origin, hit_point), color=colors[i], marker='o', markevery=[0])
-            ax.scatter(*hit_point, color=colors[i], s=60, edgecolor='black')
+            ax.plot(*zip(origin, hit_point), color='black', marker='o', markevery=[0],
+                    label=ray_def['label'] if i == 0 else None)
+            ax.scatter(*hit_point, color=instance_colors[hit['inst_id']], s=80, edgecolor='black', zorder=10)
+            ax.text(*hit_point, f" Hit Inst {hit['inst_id']}", color='black', zorder=11)
         else:
-            end_point = origin + direction * min(t_val, 20)
-            ax.plot(*zip(origin, end_point), color=colors[i], alpha=0.9, linestyle=':', marker='o', markevery=[0])
-            ax.scatter(*end_point, color=colors[i], alpha=0.9, marker='x', s=50)
+            end_point = origin + direction * 20  # fixed length for misses
+            ax.plot(*zip(origin, end_point), color='red', alpha=0.7, linestyle=':', marker='o', markevery=[0],
+                    label=ray_def['label'] if i == 0 else None)
+            ax.text(*end_point, " Miss", color='red', alpha=0.9)
 
-    ax.set_xlabel('X'); ax.set_ylabel('Y'); ax.set_zlabel('Z')
-    ax.set_title('BVH Visualization with Ray Intersections')
-    ax.auto_scale_xyz(*zip(bvh.aabb_min, bvh.aabb_max))
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.set_title('Visualization of TLAS Test Scene')
+
+    center = (tlas.aabb_min + tlas.aabb_max) / 2
+    size = np.max(tlas.aabb_max - tlas.aabb_min) * 1.2
+    ax.set_xlim(center[0] - size / 2, center[0] + size / 2)
+    ax.set_ylim(center[1] - size / 2, center[1] + size / 2)
+    ax.set_zlim(center[2] - size / 2, center[2] + size / 2)
 
     plt.tight_layout()
     plt.show()
 
-def plot_aabb(ax, aabb_min, aabb_max, **kwargs):
 
+def plot_aabb(ax, aabb_min, aabb_max, **kwargs):
+    """Plots a 3D bounding box"""
     points = np.array([
         [aabb_min[0], aabb_min[1], aabb_min[2]], [aabb_max[0], aabb_min[1], aabb_min[2]],
         [aabb_max[0], aabb_max[1], aabb_min[2]], [aabb_min[0], aabb_max[1], aabb_min[2]],

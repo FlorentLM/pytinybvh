@@ -234,11 +234,8 @@ struct PyBVH {
     // Core builders (zero-copy)
 
     static std::unique_ptr<PyBVH> from_vertices(py::array_t<float, py::array::c_style | py::array::forcecast> vertices_np, BuildQuality quality) {
-        if (vertices_np.ndim() != 2 || vertices_np.shape(1) != 4) {
-            throw std::runtime_error("Input must be a 2D numpy array with shape (M, 4).");
-        }
-        if (vertices_np.shape(0) % 3 != 0) {
-            throw std::runtime_error("Input vertex count must be a multiple of 3.");
+        if (vertices_np.ndim() != 2 || vertices_np.shape(1) != 4 || vertices_np.shape(0) % 3 != 0) {
+            throw std::runtime_error("Input vertices must be a 2D numpy array with shape (N*3, 4), where N is the number of triangles.");
         }
 
         auto wrapper = std::make_unique<PyBVH>();

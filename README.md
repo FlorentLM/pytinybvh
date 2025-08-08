@@ -346,7 +346,7 @@ Immediate priorities:
 
 - [x] Indexed Geometry Support
 - [x] Custom Geometry Primitives (AABBs and Spheres)
-- [ ] Top-Level Acceleration Structure (TLAS) Support for instancing
+- [x] Top-Level Acceleration Structure (TLAS) Support for instancing
 - [ ] Support for more `tinybvh` build presets and layouts (BVH8, etc)
 
 ## Remarks

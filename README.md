@@ -30,7 +30,7 @@ The C++ dependency (`tinybvh`) is included as a Git submodule.
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://FlorentLM/pytinybvh.git
+    git clone https://github.com/FlorentLM/pytinybvh.git
     cd pytinybvh
     ```
 
@@ -54,13 +54,22 @@ The C++ dependency (`tinybvh`) is included as a Git submodule.
     ```bash
     uv pip install .
     ```
+    This installs the core `pytinybvh` library. To include packages for testing and visualisation, you can install "extras":
+    ```bash
+    # Install everything needed for development (testing, visualisation)
+    uv pip install .[dev]
+    
+    # Or install specific groups
+    uv pip install .[test]
+    uv pip install .[visualise]
+    ```
 
 If the process completes without errors, the `pytinybvh` module is now installed and ready to be used in your virtual environment.
 
 5. **Use in other projects:**
     From the virtual environment of your other project, run the installation of `pytinybvh` in editable mode.
     ```bash
-    uv pip install /path/to/this/repo
+    uv pip install -e /path/to/this/repo
     ```
 
 ## Performance & Build optimizations
@@ -286,27 +295,41 @@ for i in range(len(hits)):
 
 ```
 
-You can also have a look at `tests.py` to see all the use cases.
+## Running Tests
 
+The test suite uses `pytest`.
+
+1.  **Install test dependencies:**
+    ```bash
+    # Install with the [test] extra if you haven't already
+    uv pip install .[test]
+    ```
+   
+2.  **Run the test suite:**
+    ```bash
+    pytest
+    ```
+    The tests include a visualisation of the `TLAS` test scene which can be run by executing `test_pytinybvh.py` directly (`python test_pytinybvh.py`). This requires the `visualise` dependencies.
 
 ## Running the demo viewer
 
 I included a simple `visualise.py` script that opens a 3D viewer.
 
-0. **Install dependencies:**
+1.  **Install visualisation dependencies:**
     ```bash
-    uv pip install trimesh pyvista
+    # Install with the [visualise] extra if you haven't already
+    uv pip install .[visualise]
     ```
    
-1.  **Configure the script:**
-    Open `test.py` and modify the configuration at the top:
+2.  **Configure the script:**
+    Open `visualise.py` and modify the configuration at the top:
     ```python
     TEST_SCENE_FILE = Path('dragon.ply') # File to load
     POINTS_ONLY = False                  # Set True for points, False for triangles
-    VISUALIZE_DEPTH = 7                  # Max BVH depth to display
+    VISUALISE_DEPTH = 7                  # Max BVH depth to display
     ```
 
-2.  **Run it:**
+3.  **Run it:**
     ```bash
     python visualise.py
     ```
@@ -329,7 +352,7 @@ pytinybvh/
 ├── .gitmodules             # Git submodule configuration
 ├── pyproject.toml          # Python build configuration
 ├── setup.py                # Build script for the C++ extension
-├── tests.py                # Demo and tests script
+├── test_pytinybvh.py       # Demo and tests
 ├── visualise.py            # View the BVH with the geometry in 3D
 ├── LICENSE                 # MIT License
 ├── NOTICE.md
@@ -357,7 +380,7 @@ While `intersect_batch` and `is_occluded_batch` are highly parallel for standard
 
 This is a limitation related to the underlying C++ callback mechanism. To provide the geometry data (like AABB or sphere positions) to the intersection functions during traversal, `pytinybvh` uses `thread_local` storage. This is fine for handling data for a single thread, but it prevents multiple threads from safely processing different batches of custom geometry simultaneously.
 
-The long-term solution would be for `tinybvh` to support passing a `void* userdata` pointer through its callbacks, to allwo re-entrant thread-safe functions.
+The long-term solution would be for `tinybvh` to support passing a `void* userdata` pointer through its callbacks, to allow re-entrant thread-safe functions.
 
 
 ## Acknowledgements

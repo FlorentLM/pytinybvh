@@ -224,6 +224,7 @@ struct PyBVH {
     // this prevents Python's garbage collector from freeing the memory while the C++ BVH object might still be using it
 
     std::vector<tinybvh::BLASInstance> instances_data;  // ref to keep BLAS instances
+    std::vector<tinybvh::BVHBase*> blas_pointers;
 
     BuildQuality quality = BuildQuality::Balanced;
 
@@ -718,14 +719,12 @@ PYBIND11_MODULE(pytinybvh, m) {
             }
 
             auto wrapper = std::make_unique<PyBVH>();
-
             wrapper->instances_data.resize(inst_count);
-            std::vector<tinybvh::BVHBase*> blases_cpp;
-            blases_cpp.reserve(blases_py.size());
 
             // Extract BLAS pointers
+            wrapper->blas_pointers.reserve(blases_py.size());
             for (const auto& blas_obj : blases_py) {
-                blases_cpp.push_back(blas_obj.cast<PyBVH&>().bvh.get());
+                wrapper->blas_pointers.push_back(blas_obj.cast<PyBVH&>().bvh.get());
             }
 
             for (py::ssize_t i = 0; i < inst_count; ++i) {
@@ -749,8 +748,8 @@ PYBIND11_MODULE(pytinybvh, m) {
             wrapper->bvh->Build(
                 wrapper->instances_data.data(),
                 static_cast<uint32_t>(inst_count),
-                blases_cpp.data(),
-                static_cast<uint32_t>(blases_cpp.size())
+                wrapper->blas_pointers.data(),
+                static_cast<uint32_t>(wrapper->blas_pointers.size())
             );
 
             return wrapper;

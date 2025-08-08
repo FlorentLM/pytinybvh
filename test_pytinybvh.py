@@ -342,10 +342,13 @@ class TestTLAS:
     def test_tlas_masking(self, tlas_scene):
         """Tests that ray masks correctly filter instances"""
         tlas = tlas_scene["tlas"]
+
         # Ray starts in front of instance 0, aimed toward instance 3.
         # Mask 0b1000 should ignore instance 0 and hit instance 3.
         ray = Ray(origin=(0, 0, 2), direction=(0, 0, -1), mask=0b1000)
+
         tlas.intersect(ray)
+
         assert np.isclose(ray.t, 7.0) and ray.inst_id == 3
 
 

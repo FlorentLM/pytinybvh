@@ -1,9 +1,8 @@
 from __future__ import annotations
 from pathlib import Path
 import numpy as np
-from typing import Optional, Union, List, Tuple
-from enum import Enum
-
+from typing import Optional, Union, List, Tuple, ClassVar
+from enum import IntEnum
 
 PathLike = Union[str, Path]
 """A type hint for file paths that can be a string or a pathlib.Path object."""
@@ -42,11 +41,23 @@ hit_record_dtype: np.dtype
 instance_dtype: np.dtype
 
 
-class BuildQuality(Enum):
+class BuildQuality(IntEnum):
     """Enum for selecting BVH build quality."""
-    Quick: int
-    Balanced: int
-    High: int
+
+    Quick: ClassVar[BuildQuality]
+    """Fastest build, lower quality queries."""
+    Balanced: ClassVar[BuildQuality]
+    """Balanced build time and query performance (default)."""
+    High: ClassVar[BuildQuality]
+    """Slowest build (uses spatial splits), highest quality queries."""
+
+    def __int__(self) -> int: ...
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def value(self) -> int: ...
 
 
 class Ray:

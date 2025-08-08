@@ -94,7 +94,7 @@ def view_bvh(primitives_np: np.ndarray, bvh_nodes: np.ndarray, max_depth: int = 
 
 if __name__ == "__main__":
 
-    TEST_SCENE_FILE = Path('dragon.ply')
+    TEST_SCENE_FILE = Path('assets/sneks.ply')
     POINTS_ONLY = False     # True for point clouds, False for triangle meshes
     VISUALISE_DEPTH = 7     # Viewer max depth
 

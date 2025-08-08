@@ -391,7 +391,7 @@ The long-term solution would be for `tinybvh` to support passing a `void* userda
 
 The `sneks` model included in this repository is an original model. Feel free to reuse it. :)
 
--   **Source:** [here](https://github.com/FlorentLM/pytinybvh/blob/main/assets/snek.ply)
+-   **Source:** [here](https://github.com/FlorentLM/pytinybvh/blob/main/assets/sneks.ply)
 -   **Size:** 9.37 Mb
 -   **Vertices:** 169 678
 -   **Triangles:** 338 120

@@ -26,11 +26,20 @@ bvh_node_dtype: np.dtype
 # A hint for the structured dtype of the intersect_batch return array.
 # hit_record_dtype = np.dtype([
 #     ('prim_id', '<u4'),
+#     ('inst_id', '<u4'),
 #     ('t', '<f4'),
 #     ('u', '<f4'),
 #     ('v', '<f4')
 # ])
 hit_record_dtype: np.dtype
+
+# A hint for the structured dtype of the TLAS instances array.
+# instance_dtype = np.dtype([
+#     ('transform', '<f4', (4, 4)),
+#     ('blas_id', '<u4'),
+#     ('mask', '<u4')
+# ])
+instance_dtype: np.dtype
 
 
 class BuildQuality(Enum):
@@ -45,6 +54,7 @@ class Ray:
     origin: Vec3Like
     direction: Vec3Like
     t: float
+    mask: int
 
     @property
     def u(self) -> float:
@@ -67,7 +77,12 @@ class Ray:
         """The ID of the primitive that was hit. -1 if no hit."""
         ...
 
-    def __init__(self, origin: Vec3Like, direction: Vec3Like, t: float = 1e30) -> None: ...
+    @property
+    def inst_id(self) -> int:
+        """The ID of the instance that was hit. -1 if no hit."""
+        ...
+
+    def __init__(self, origin: Vec3Like, direction: Vec3Like, t: float = 1e30, mask: int = 0xFFFF) -> None: ...
 
 
 class BVH:
@@ -165,6 +180,22 @@ class BVH:
         ...
 
     @staticmethod
+    def build_tlas(instances: np.ndarray, BLASes: List[BVH]) -> BVH:
+        """
+        Builds a Top-Level Acceleration Structure (TLAS) from a list of BVH instances.
+
+        Args:
+            instances (numpy.ndarray): A structured array with `instance_dtype` describing
+                                       each instance's transform, blas_id, and mask.
+            BLASes (List[BVH]): A list of the BVH objects to be instanced. The `blas_id`
+                                in the instances array corresponds to the index in this list.
+
+        Returns:
+            BVH: A new BVH instance representing the TLAS.
+        """
+        ...
+
+    @staticmethod
     def load(filepath: PathLike, vertices: np.ndarray, indices: Optional[np.ndarray] = None) -> BVH:
         """
         Loads a BVH from a file, re-linking it to the provided geometry.
@@ -208,7 +239,8 @@ class BVH:
         """
         ...
 
-    def intersect_batch(self, origins: np.ndarray, directions: np.ndarray, t_max: Optional[np.ndarray] = None) -> np.ndarray:
+    def intersect_batch(self, origins: np.ndarray, directions: np.ndarray,
+                        t_max: Optional[np.ndarray] = None, masks: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Performs intersection queries for a batch of rays.
 
@@ -221,11 +253,17 @@ class BVH:
             origins (numpy.ndarray): A (N, 3) float array of ray origins.
             directions (numpy.ndarray): A (N, 3) float array of ray directions.
             t_max (numpy.ndarray, optional): A (N,) float array of maximum intersection distances.
+            masks (numpy.ndarray, optional): A (N,) uint32 array of per-ray visibility mask.
+                                             For a ray to test an instance for intersection, the bitwise
+                                             AND of the ray's mask and the instance's mask must be non-zero.
+                                             If not provided, rays default to mask 0xFFFF (intersect all instances).
 
         Returns:
             numpy.ndarray: A structured array of shape (N,) with dtype
-                           [('prim_id', '<u4'), ('t', '<f4'), ('u', '<f4'), ('v', '<f4')].
-                           For misses, prim_id is -1 and t is infinity.
+                [('prim_id', '<u4'), ('inst_id', '<u4'), ('t', '<f4'), ('u', '<f4'), ('v', '<f4')].
+                For misses, prim_id and inst_id are -1 and t is infinity.
+                For TLAS hits, inst_id is the instance index and prim_id is the primitive
+                index within that instance's BLAS.
         """
         ...
 
@@ -244,7 +282,8 @@ class BVH:
         """
         ...
 
-    def is_occluded_batch(self, origins: np.ndarray, directions: np.ndarray, t_max: Optional[np.ndarray] = None) -> np.ndarray:
+    def is_occluded_batch(self, origins: np.ndarray, directions: np.ndarray,
+                          t_max: Optional[np.ndarray] = None, masks: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Performs occlusion queries for a batch of rays, parallelized for performance.
 
@@ -255,6 +294,10 @@ class BVH:
             directions (numpy.ndarray): A (N, 3) float array of ray directions.
             t_max (numpy.ndarray, optional): A (N,) float array of maximum occlusion distances.
                                              If a hit is found beyond this distance, it is ignored.
+            masks (numpy.ndarray, optional): A (N,) uint32 array of per-ray visibility mask.
+                                             For a ray to test an instance for intersection, the bitwise
+                                             AND of the ray's mask and the instance's mask must be non-zero.
+                                             If not provided, rays default to mask 0xFFFF (intersect all instances).
 
         Returns:
             numpy.ndarray: A boolean array of shape (N,) where `True` indicates occlusion.

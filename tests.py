@@ -388,6 +388,16 @@ assert np.isinf(hit_distance_miss)
 assert ray_miss.prim_id == np.iinfo(np.uint32).max # Check that the ray was not modified
 
 
+print("\n--- Barycentric check ---")
+ray_bary_check = Ray(origin=(0, 0, -1), direction=(0, 0, 1))
+bvh.intersect(ray_bary_check)
+
+print(f"Ray barycentric check: u={ray_bary_check.u:.3f}, v={ray_bary_check.v:.3f} -> Expected: (0.333, 0.333)")
+assert np.isclose(ray_bary_check.u, 0.25)
+assert np.isclose(ray_bary_check.v, 0.5)
+print("Barycentric coordinate test successful!")
+
+
 print("\n--- Testing batch ray intersect ---")
 # Prepare batch of rays with staggered origins for better visualization
 origins = np.array([

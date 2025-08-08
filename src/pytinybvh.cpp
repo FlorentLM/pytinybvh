@@ -1148,109 +1148,139 @@ PYBIND11_MODULE(pytinybvh, m) {
                                        py::array_t<float, py::array::c_style> directions_np,
                                        py::object t_max_obj,
                                        py::object masks_obj) -> py::array_t<bool>
-        {
-            // input validation
-            if (origins_np.ndim() != 2 || origins_np.shape(1) != 3) {
-                throw std::runtime_error("Origins must be a 2D numpy array with shape (N, 3).");
-            }
-            if (directions_np.ndim() != 2 || directions_np.shape(1) != 3) {
-                throw std::runtime_error("Directions must be a 2D numpy array with shape (N, 3).");
-            }
-            if (origins_np.shape(0) != directions_np.shape(0)) {
-                throw std::runtime_error("Origins and directions arrays must have the same number of rows.");
-            }
-
-            const py::ssize_t n_rays = origins_np.shape(0);
-            if (n_rays == 0) return py::array_t<bool>(0);
-
-            // check for empty BVH
-            if (self.bvh->triCount == 0) {
-                auto result_np = py::array_t<bool>(n_rays);
-                std::fill(result_np.mutable_data(), result_np.mutable_data() + n_rays, false);
-                return result_np;
-            }
-
-            auto origins_ptr = origins_np.data();
-            auto directions_ptr = directions_np.data();
-
-            const float* t_max_ptr = nullptr;
-            py::array_t<float, py::array::c_style | py::array::forcecast> t_max_np;
-            if (!t_max_obj.is_none()) {
-                t_max_np = py::cast<py::array_t<float, py::array::c_style>>(t_max_obj);
-                if (t_max_np.ndim() != 1 || t_max_np.shape(0) != n_rays) throw std::runtime_error("t_max must be a 1D array with length N.");
-                t_max_ptr = t_max_np.data();
-            }
-
-            const uint32_t* masks_ptr = nullptr;
-            py::array_t<uint32_t, py::array::c_style | py::array::forcecast> masks_np;
-            if (!masks_obj.is_none()) {
-                masks_np = py::cast<py::array_t<uint32_t, py::array::c_style>>(masks_obj);
-                if (masks_np.ndim() != 1 || masks_np.shape(0) != n_rays) {
-                    throw std::runtime_error("masks must be a 1D uint32 array with length N.");
-                }
-                masks_ptr = masks_np.data();
-            }
-
-            auto result_np = py::array_t<bool>(n_rays);
-            auto* result_ptr = result_np.mutable_data();
-
             {
-                py::gil_scoped_release release; // Release GIL for threading
-
-                // is_occluded doesn't have a 256-wide version, but we can still parallelize it per-ray
-                #ifdef _OPENMP
-                    #pragma omp parallel for schedule(dynamic)
-                #endif
-                for (py::ssize_t i = 0; i < n_rays; ++i) {
-                    // Set thread_local pointers inside the parallel loop for custom geometry
-                    if (self.custom_type == PyBVH::CustomType::AABB) {
-                        auto aabbs_np = py::cast<py::array_t<float>>(self.source_geometry_refs[0]);
-                        g_aabbs_ptr = aabbs_np.data();
-                    } else if (self.custom_type == PyBVH::CustomType::Sphere) {
-                        auto points_np = py::cast<py::array_t<float>>(self.source_geometry_refs[0]);
-                        g_points_ptr = points_np.data();
-                        g_sphere_radius = self.sphere_radius;
-                    }
-
-                    const size_t i3 = i * 3;
-                    const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
-                    const uint32_t mask_init = masks_ptr ? masks_ptr[i] : 0xFFFF; // default to all
-
-                    tinybvh::Ray ray(
-                        {origins_ptr[i3], origins_ptr[i3+1], origins_ptr[i3+2]},
-                        {directions_ptr[i3], directions_ptr[i3+1], directions_ptr[i3+2]},
-                        t_init,
-                        mask_init
-                    );
-                    result_ptr[i] = self.bvh->IsOccluded(ray);
+                // input validation
+                if (origins_np.ndim() != 2 || origins_np.shape(1) != 3) {
+                    throw std::runtime_error("Origins must be a 2D numpy array with shape (N, 3).");
                 }
-            } // GIL re-acquired
+                if (directions_np.ndim() != 2 || directions_np.shape(1) != 3) {
+                    throw std::runtime_error("Directions must be a 2D numpy array with shape (N, 3).");
+                }
+                if (origins_np.shape(0) != directions_np.shape(0)) {
+                    throw std::runtime_error("Origins and directions arrays must have the same number of rows.");
+                }
 
-            // Pointers are thread_local so they are automatically cleaned up but let's reset them on the main thread jic
-            g_aabbs_ptr = nullptr;
-            g_points_ptr = nullptr;
+                const py::ssize_t n_rays = origins_np.shape(0);
+                if (n_rays == 0) return py::array_t<bool>(0);
 
-            return result_np;
+                // check for empty BVH
+                if (self.bvh->triCount == 0) {
+                    auto result_np = py::array_t<bool>(n_rays);
+                    std::fill(result_np.mutable_data(), result_np.mutable_data() + n_rays, false);
+                    return result_np;
+                }
 
-        }, py::arg("origins"), py::arg("directions"), py::arg("t_max") = py::none(), py::arg("masks") = py::none(),
-           R"((
-                Performs occlusion queries for a batch of rays, parallelized for performance.
+                auto origins_ptr = origins_np.data();
+                auto directions_ptr = directions_np.data();
 
-                This method leverages multi-core processing (via OpenMP) for maximum throughput.
+                const float* t_max_ptr = nullptr;
+                py::array_t<float, py::array::c_style | py::array::forcecast> t_max_np;
+                if (!t_max_obj.is_none()) {
+                    t_max_np = py::cast<py::array_t<float, py::array::c_style>>(t_max_obj);
+                    if (t_max_np.ndim() != 1 || t_max_np.shape(0) != n_rays) throw std::runtime_error("t_max must be a 1D array with length N.");
+                    t_max_ptr = t_max_np.data();
+                }
 
-                Args:
-                    origins (numpy.ndarray): A (N, 3) float array of ray origins.
-                    directions (numpy.ndarray): A (N, 3) float array of ray directions.
-                    t_max (numpy.ndarray, optional): A (N,) float array of maximum occlusion distances.
-                                                     If a hit is found beyond this distance, it is ignored.
-                    masks (numpy.ndarray, optional): A (N,) uint32 array of per-ray visibility mask.
-                                                     For a ray to test an instance for intersection, the bitwise
-                                                     AND of the ray's mask and the instance's mask must be non-zero.
-                                                     If not provided, rays default to mask 0xFFFF (intersect all instances).
+                const uint32_t* masks_ptr = nullptr;
+                py::array_t<uint32_t, py::array::c_style | py::array::forcecast> masks_np;
+                if (!masks_obj.is_none()) {
+                    masks_np = py::cast<py::array_t<uint32_t, py::array::c_style>>(masks_obj);
+                    if (masks_np.ndim() != 1 || masks_np.shape(0) != n_rays) {
+                        throw std::runtime_error("masks must be a 1D uint32 array with length N.");
+                    }
+                    masks_ptr = masks_np.data();
+                }
 
-                Returns:
-                    numpy.ndarray: A boolean array of shape (N,) where `True` indicates occlusion.
-           ))")
+                auto result_np = py::array_t<bool>(n_rays);
+                auto* result_ptr = result_np.mutable_data();
+
+                // Decide which path to take before releasing the GIL.
+                bool use_parallel = (self.custom_type == PyBVH::CustomType::None);
+
+                const float* aabbs_data_ptr = nullptr;
+                const float* points_data_ptr = nullptr;
+                float sphere_rad = 0.0f;
+
+                // If using serial path, get raw C++ pointers while we still have the GIL.
+                if (!use_parallel) {
+                    if (self.custom_type == PyBVH::CustomType::AABB) {
+                        aabbs_data_ptr = py::cast<py::array_t<float>>(self.source_geometry_refs[0]).data();
+                    } else if (self.custom_type == PyBVH::CustomType::Sphere) {
+                        points_data_ptr = py::cast<py::array_t<float>>(self.source_geometry_refs[0]).data();
+                        sphere_rad = self.sphere_radius;
+                    }
+                }
+
+                {
+                    py::gil_scoped_release release; // Release GIL for C++ threading
+
+                    if (use_parallel) {
+                        // Fast path: Standard triangles, parallelized with OpenMP.
+                        #ifdef _OPENMP
+                            #pragma omp parallel for schedule(dynamic)
+                        #endif
+                        for (py::ssize_t i = 0; i < n_rays; ++i) {
+                            const size_t i3 = i * 3;
+                            const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
+                            const uint32_t mask_init = masks_ptr ? masks_ptr[i] : 0xFFFF;
+
+                            tinybvh::Ray ray(
+                                {origins_ptr[i3], origins_ptr[i3+1], origins_ptr[i3+2]},
+                                {directions_ptr[i3], directions_ptr[i3+1], directions_ptr[i3+2]},
+                                t_init,
+                                mask_init
+                            );
+                            result_ptr[i] = self.bvh->IsOccluded(ray);
+                        }
+                    } else {
+                        // Slow path: Custom geometry, processed serially to safely use thread_local pointers.
+                        g_aabbs_ptr = aabbs_data_ptr;
+                        g_points_ptr = points_data_ptr;
+                        g_sphere_radius = sphere_rad;
+
+                        for (py::ssize_t i = 0; i < n_rays; ++i) {
+                            const size_t i3 = i * 3;
+                            const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
+                            const uint32_t mask_init = masks_ptr ? masks_ptr[i] : 0xFFFF;
+
+                            tinybvh::Ray ray(
+                                {origins_ptr[i3], origins_ptr[i3+1], origins_ptr[i3+2]},
+                                {directions_ptr[i3], directions_ptr[i3+1], directions_ptr[i3+2]},
+                                t_init,
+                                mask_init
+                            );
+                            result_ptr[i] = self.bvh->IsOccluded(ray);
+                        }
+
+                        // unset pointers now that the loop is done.
+                        g_aabbs_ptr = nullptr;
+                        g_points_ptr = nullptr;
+                    }
+                } // GIL re-acquired
+
+                return result_np;
+
+            }, py::arg("origins"), py::arg("directions"), py::arg("t_max") = py::none(), py::arg("masks") = py::none(),
+               R"((
+                    Performs occlusion queries for a batch of rays, parallelized for performance.
+
+                    This method leverages multi-core processing (via OpenMP) for maximum throughput on
+                    standard triangle meshes. For custom geometry, it falls back to a serial implementation
+                    to ensure thread-safety.
+
+                    Args:
+                        origins (numpy.ndarray): A (N, 3) float array of ray origins.
+                        directions (numpy.ndarray): A (N, 3) float array of ray directions.
+                        t_max (numpy.ndarray, optional): A (N,) float array of maximum occlusion distances.
+                                                         If a hit is found beyond this distance, it is ignored.
+                        masks (numpy.ndarray, optional): A (N,) uint32 array of per-ray visibility mask.
+                                                         For a ray to test an instance for intersection, the bitwise
+                                                         AND of the ray's mask and the instance's mask must be non-zero.
+                                                         If not provided, rays default to mask 0xFFFF (intersect all instances).
+
+                    Returns:
+                        numpy.ndarray: A boolean array of shape (N,) where `True` indicates occlusion.
+               ))")
 
         .def("refit", &PyBVH::refit,
              R"((

@@ -315,6 +315,23 @@ class BVH:
         """
         ...
 
+    def intersect_sphere(self, centre: Vec3Like, radius: float) -> bool:
+        """
+        Checks if any geometry intersects with a given sphere.
+
+        This is useful for proximity queries or collision detection. It stops at the
+        first intersection found. Note: This method is not implemented for custom
+        geometry (AABBs, points) and will only work on triangle meshes.
+
+        Args:
+            center (Vec3Like): The center of the sphere.
+            radius (float): The radius of the sphere.
+
+        Returns:
+            bool: True if an intersection is found, False otherwise.
+        """
+        ...
+
     def refit(self) -> None:
         """
         Refits the BVH to the current state of the source geometry, which is much

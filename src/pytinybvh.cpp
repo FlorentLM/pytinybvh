@@ -495,6 +495,19 @@ struct PyBVH {
         return wrapper;
     }
 
+    // Interseciton methods
+
+    bool intersect_sphere(const py::object& center_obj, float radius) {
+        if (!bvh || bvh->triCount == 0) return false;
+
+        if (custom_type != PyBVH::CustomType::None) {
+            throw std::runtime_error("intersect_sphere is only supported for triangle meshes.");
+        }
+
+        tinybvh::bvhvec3 center = py_obj_to_vec3(center_obj);
+        return bvh->IntersectSphere(center, radius);
+    }
+
     // Other methods
 
     static std::unique_ptr<PyBVH> build_tlas(py::array instances_np, const py::list& blases_py) {
@@ -845,6 +858,26 @@ PYBIND11_MODULE(pytinybvh, m) {
             py::arg("points"),
             py::arg("radius") = 1e-5f,
             py::arg("quality") = BuildQuality::Balanced)
+
+        // Intersection methods
+
+        .def("intersect_sphere", &PyBVH::intersect_sphere,
+            R"((
+                Checks if any geometry intersects with a given sphere.
+
+                This is useful for proximity queries or collision detection. It stops at the
+                first intersection found. Note: This method is not implemented for custom
+                geometry (AABBs, points) and will only work on triangle meshes.
+
+                Args:
+                    center (Vec3Like): The center of the sphere.
+                    radius (float): The radius of the sphere.
+
+                Returns:
+                    bool: True if an intersection is found, False otherwise.
+            ))",
+            py::arg("center"),
+            py::arg("radius"))
 
         // Other methods
 

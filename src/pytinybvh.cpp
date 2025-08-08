@@ -533,10 +533,20 @@ PYBIND11_MODULE(pytinybvh, m) {
         float t, u, v;
     };
     PYBIND11_NUMPY_DTYPE(HitRecord, prim_id, inst_id, t, u, v);
-
+    m.attr("hit_record_dtype") = py::dtype::of<HitRecord>();
 
     PYBIND11_NUMPY_DTYPE(tinybvh::bvhvec3, x, y, z);
     PYBIND11_NUMPY_DTYPE_EX(tinybvh::BVH::BVHNode, aabbMin, "aabb_min", leftFirst, "left_first", aabbMax, "aabb_max", triCount, "prim_count");
+    m.attr("bvh_node_dtype") = py::dtype::of<tinybvh::BVH::BVHNode>();
+
+    // TLAS instance struct and its numpy dtype
+    struct TLASInstance {
+        float transform[16];
+        uint32_t blas_id;
+        uint32_t mask;
+    };
+    PYBIND11_NUMPY_DTYPE(TLASInstance, transform, blas_id, mask);
+    m.attr("instance_dtype") = py::dtype::of<TLASInstance>();
 
     py::enum_<BuildQuality>(m, "BuildQuality", "Enum for selecting BVH build quality.")
         .value("Quick", BuildQuality::Quick, "Fastest build, lower quality queries.")

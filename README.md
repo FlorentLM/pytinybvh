@@ -229,9 +229,9 @@ bvh = BVH.from_triangles(triangles_np)
 ```
 
 #### `BVH.from_points(points, radius, quality)`
-Builds a BVH from a point cloud. This method performs a true **ray-sphere intersection** test for each primitive, providing accurate hits.
+Builds a BVH from a point cloud.
 
-It works by first creating an axis-aligned bounding box for each point to build the hierarchy, then uses a custom intersection function for precise ray-sphere tests inside the leaf nodes.
+It works by first creating an axis-aligned bounding box for each point to build the hierarchy, then uses ray-sphere tests inside the leaf nodes.
 
 ```python
 import numpy as np
@@ -309,11 +309,11 @@ The test suite uses `pytest`.
     ```bash
     pytest
     ```
-    The tests include a visualisation of the `TLAS` test scene which can be run by executing `test_pytinybvh.py` directly (`python test_pytinybvh.py`). This requires the `visualise` dependencies.
+    The tests include a visualisation of the test scene which can be run by executing `test_pytinybvh.py` directly (`python test_pytinybvh.py`). This requires the `visualise` dependencies.
 
 ## Running the demo viewer
 
-I included a simple `visualise.py` script that opens a 3D viewer.
+I also included a simple `visualise.py` script that opens a 3D viewer.
 
 1.  **Install visualisation dependencies:**
     ```bash
@@ -324,7 +324,7 @@ I included a simple `visualise.py` script that opens a 3D viewer.
 2.  **Configure the script:**
     Open `visualise.py` and modify the configuration at the top:
     ```python
-    TEST_SCENE_FILE = Path('dragon.ply') # File to load
+    TEST_SCENE_FILE = Path('sneks.ply')  # File to load
     POINTS_ONLY = False                  # Set True for points, False for triangles
     VISUALISE_DEPTH = 7                  # Max BVH depth to display
     ```

@@ -21,7 +21,7 @@ Before installing, you need a few tools on your system:
     -   **Windows:** MSVC (Visual Studio 2019 or newer with the "Desktop development with C++" workload)
     -   **Linux:** GCC 10+ or Clang 11+
     -   **macOS:** Xcode with modern Clang
-2.  **Python 3.4+**
+2.  **Python 3.9+**
 3.  **Git:** Required for cloning the repository and its dependencies
 
 ## Installation

@@ -10,7 +10,7 @@ authors = [
 ]
 description = "Tiny Python bindings for tinybvh"
 readme = "README.md"
-requires-python = ">=3.4"
+requires-python = ">=3.9"
 
 dependencies = [
     "numpy>=2.0.0",

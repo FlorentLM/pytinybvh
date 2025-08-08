@@ -21,6 +21,7 @@ dependencies = [
 test = [
     "pytest",
     "matplotlib",
+    "trimesh",
 ]
 visualise = [
     "pyvista",

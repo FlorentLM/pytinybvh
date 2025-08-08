@@ -1,7 +1,9 @@
+from pathlib import Path
 import numpy as np
 import pytest
 from typing import Union
 from pytinybvh import BVH, Ray, BuildQuality
+import trimesh
 
 
 # ==============================================================================
@@ -47,6 +49,42 @@ def bvh_two_triangles():
     bvh = BVH.from_triangles(triangles, quality=BuildQuality.Balanced)
     return bvh, triangles
 
+@pytest.fixture
+def bvh_cube():
+    """Fixture for a simple BVH of a unit cube"""
+
+    cube_verts = np.zeros((8, 4), dtype=np.float32)
+    cube_verts[:, :3] = np.array([
+        [-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5],
+        [-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5]
+    ])
+    cube_indices = np.array([
+        [0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7], [0, 4, 7], [0, 7, 3],
+        [1, 5, 6], [1, 6, 2], [0, 1, 5], [0, 5, 4], [3, 2, 6], [3, 6, 7]
+    ], dtype=np.uint32)
+
+    bvh = BVH.from_indexed_mesh(cube_verts, cube_indices, quality=BuildQuality.Balanced)
+
+    return bvh, cube_verts, cube_indices
+
+@pytest.fixture
+def bvh_from_ply():
+    """Fixture that loads a complex mesh from a PLY file"""
+    ply_path = Path("assets/sneks.ply")
+
+    mesh = trimesh.load(ply_path, process=False)
+    verts_3d = np.array(mesh.vertices, dtype=np.float32)
+    indices = np.array(mesh.faces, dtype=np.uint32)
+
+    # Center and normalize
+    verts_3d -= np.mean(verts_3d, axis=0)
+    verts_3d /= np.max(np.abs(verts_3d))
+
+    verts_4d = np.zeros((verts_3d.shape[0], 4), dtype=np.float32)
+    verts_4d[:, :3] = verts_3d
+
+    bvh = BVH.from_indexed_mesh(verts_4d, indices, quality=BuildQuality.Quick)
+    return bvh
 
 @pytest.fixture(scope="module")
 def tlas_scene():

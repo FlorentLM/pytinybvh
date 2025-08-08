@@ -349,6 +349,16 @@ Immediate priorities:
 - [ ] Top-Level Acceleration Structure (TLAS) Support for instancing
 - [ ] Support for more `tinybvh` build presets and layouts (BVH8, etc)
 
+## Remarks
+
+### A Note on concurrency and custom geometry
+
+While `intersect_batch` and `is_occluded_batch` are highly parallel for standard triangle meshes, they currently operate in a single-threaded (serial) mode for BVHs created from custom geometry (`from_aabbs` and `from_points`).
+
+This is a limitation related to the underlying C++ callback mechanism. To provide the geometry data (like AABB or sphere positions) to the intersection functions during traversal, `pytinybvh` uses `thread_local` storage. This is fine for handling data for a single thread, but it prevents multiple threads from safely processing different batches of custom geometry simultaneously.
+
+The long-term solution would be for `tinybvh` to support passing a `void* userdata` pointer through its callbacks, to allwo re-entrant thread-safe functions.
+
 
 ## Acknowledgements
 
@@ -356,7 +366,7 @@ Immediate priorities:
 
 ## Test Assets
 
-The `sneks` model included in this repository is an original model. Feel free to reuse it.
+The `sneks` model included in this repository is an original model. Feel free to reuse it. :)
 
 -   **Source:** [here](https://github.com/FlorentLM/pytinybvh/blob/main/assets/snek.ply)
 -   **Size:** 9.37 Mb

@@ -397,6 +397,21 @@ class BVH:
         """
         ...
 
+    def set_opacity_maps(self, map_data: np.ndarray, N: int) -> None:
+        """
+        Sets the opacity micro-maps for alpha testing during intersection.
+
+        The BVH must be built before calling this. The intersection queries will
+        automatically use the map to discard hits on transparent parts of triangles.
+
+        Args:
+            map_data (numpy.ndarray): A 1D uint32 numpy array containing the packed
+                                      bitmasks for all triangles. The size must be
+                                      (tri_count * N * N + 31) // 32
+            N (int): The resolution of the micro-map per triangle (e.g., 8 for an 8x8 grid).
+        """
+        ...
+
     @property
     def nodes(self) -> np.ndarray:
         """The structured numpy array of BVH nodes."""

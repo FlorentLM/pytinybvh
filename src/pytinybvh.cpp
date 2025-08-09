@@ -238,8 +238,9 @@ struct PyBVH {
     py::list source_geometry_refs; // refs to the numpy arrays that contains the source data (vertices, indices)
     // this prevents Python's garbage collector from freeing the memory while the C++ BVH object might still be using it
 
-    std::vector<tinybvh::BLASInstance> instances_data;  // ref to keep BLAS instances
+    std::vector<tinybvh::BLASInstance> instances_data;
     std::vector<tinybvh::BVHBase*> blas_pointers;
+    py::array_t<uint32_t> opacity_map_ref;  // ref to keep opacity maps
 
     BuildQuality quality = BuildQuality::Balanced;
 
@@ -999,7 +1000,7 @@ struct PyBVH {
         tinybvh::BVH_Verbose verbose_bvh;
         // The verbose BVH needs to be allocated with enough space for splitting
         // A full split to 1 primitive/leaf results in ~2*N nodes
-        // Let's allocate 3*N to be safe
+        // Let's allocate 3*N to be safe and avoid a buffer overflow
         verbose_bvh.bvhNode = (tinybvh::BVH_Verbose::BVHNode*)verbose_bvh.AlignedAlloc(
             sizeof(tinybvh::BVH_Verbose::BVHNode) * bvh->triCount * 3);
         verbose_bvh.allocatedNodes = bvh->triCount * 3;
@@ -1007,19 +1008,39 @@ struct PyBVH {
 
         verbose_bvh.Optimize(iterations, extreme, stochastic);
 
-        // Convert back to standard BVH
+        // Convert back to standard BVH. This will compact it.
         bvh->ConvertFrom(verbose_bvh, true /* compact */);
 
-        // The optimization process reorders primIdx for better cache locality,
-        // so the new layout must be copied back to the main BVH
-        if (bvh->idxCount > 0) {
-            std::memcpy(bvh->primIdx, verbose_bvh.primIdx, sizeof(uint32_t) * bvh->idxCount);
+        // Manually resolve fragment indices to primitive indices
+        // After the process, bvh->primIdx contains indices into verbose_bvh.fragment
+        // so they need to be replaced with the original primitive indices from those fragments
+        if (verbose_bvh.fragment) {
+            for (uint32_t i = 0; i < bvh->idxCount; ++i) {
+                uint32_t fragment_index = bvh->primIdx[i];
+                if (fragment_index < verbose_bvh.idxCount) { // Safety check
+                    bvh->primIdx[i] = verbose_bvh.fragment[fragment_index].primIdx;
+                }
+            }
         }
 
-        // After optimization, refittable is likely still true, but SBVH flags might change
-        // Update PyBVH state if necessary
+        // Update the quality state of the Python wrapper
         quality = bvh->refittable ? BuildQuality::Balanced : BuildQuality::High;
     }
+
+    void set_opacity_maps(py::array_t<uint32_t, py::array::c_style> map_data, uint32_t N) {
+            if (map_data.ndim() != 1) {
+                throw std::runtime_error("Opacity map data must be a 1D uint32 numpy array.");
+            }
+            // tinybvh expects a specific size: N*N bits per triangle
+            // The array should contain (triCount * N * N) / 32 uint32_t values
+            const size_t expected_size = (bvh->triCount * N * N + 31) / 32;
+            if (static_cast<size_t>(map_data.size()) != expected_size) {
+                throw std::runtime_error("Opacity map data has incorrect size for the given N and primitive count.");
+            }
+
+            opacity_map_ref = map_data; // Keep reference
+            bvh->SetOpacityMicroMaps(opacity_map_ref.mutable_data(), N);
+        }
 
 };
 
@@ -1088,10 +1109,20 @@ PYBIND11_MODULE(pytinybvh, m) {
         .def_readonly("inst_id", &PyRay::inst_id, "The ID of the instance that was hit.")
 
         .def("__repr__", [](const PyRay &r) {
+            std::string origin_s = "[" + std::to_string(r.origin.x) + ", " +
+                                         std::to_string(r.origin.y) + ", " +
+                                         std::to_string(r.origin.z) + "]";
+            std::string dir_s = "[" + std::to_string(r.direction.x) + ", " +
+                                      std::to_string(r.direction.y) + ", " +
+                                      std::to_string(r.direction.z) + "]";
+
             if (r.prim_id != (uint32_t)-1) {
-                return "<pytinybvh.Ray hit primitive " + std::to_string(r.prim_id) + " at t=" + std::to_string(r.t) + ">";
+                return "<pytinybvh.Ray (origin=" + origin_s + " dir=" + dir_s +
+                       ", Hit inst " + std::to_string(r.inst_id) +
+                       " prim " + std::to_string(r.prim_id) +
+                       " at t=" + std::to_string(r.t) + ")>";
             }
-            return std::string("<pytinybvh.Ray miss>");
+            return "<pytinybvh.Ray (origin=" + origin_s + " dir=" + dir_s + ", Miss)>";
         });
 
 
@@ -1297,9 +1328,11 @@ PYBIND11_MODULE(pytinybvh, m) {
                 py::dtype dt = py::dtype::of<tinybvh::BVH::BVHNode>();
                 return py::array(dt, {0}, {});
             }
+
             return py::array_t<tinybvh::BVH::BVHNode>(
-                { (py::ssize_t)self.bvh->usedNodes }, self.bvh->bvhNode, py::cast(self)
+                self.bvh->usedNodes, self.bvh->bvhNode, py::cast(self)
             );
+
         }, "The structured numpy array of BVH nodes.")
 
         .def_property_readonly("prim_indices", [](PyBVH &self) -> py::array {
@@ -1307,9 +1340,9 @@ PYBIND11_MODULE(pytinybvh, m) {
                 return py::array_t<uint32_t>(0);
             }
             return py::array_t<uint32_t>(
-                { (py::ssize_t)self.bvh->idxCount }, // shape
-                self.bvh->primIdx,                   // data pointer
-                py::cast(self)                       // owner
+                self.bvh->idxCount,     // shape
+                self.bvh->primIdx,      // data pointer
+                py::cast(self)          // owner
             );
         }, "The array of primitive indices, ordered for locality.")
 
@@ -1438,6 +1471,21 @@ PYBIND11_MODULE(pytinybvh, m) {
             the BVH structure.
         ))")
 
+        .def("set_opacity_maps", &PyBVH::set_opacity_maps,
+        R"((
+            Sets the opacity micro-maps for alpha testing during intersection.
+
+            The BVH must be built before calling this. The intersection queries will
+            automatically use the map to discard hits on transparent parts of triangles.
+
+            Args:
+                map_data (numpy.ndarray): A 1D uint32 numpy array containing the packed
+                                          bitmasks for all triangles. The size must be
+                                          (tri_count * N * N + 31) // 32
+                N (int): The resolution of the micro-map per triangle (e.g., 8 for an 8x8 grid).
+        ))",
+        py::arg("map_data").noconvert(), py::arg("N"))
+
         // Read-only properties
 
         .def_property_readonly("node_count", [](const PyBVH &self){ return self.bvh->usedNodes; }, "Total number of nodes in the BVH.")
@@ -1447,20 +1495,22 @@ PYBIND11_MODULE(pytinybvh, m) {
         .def_property_readonly("aabb_min", [](PyBVH &self) -> py::array {
             if (!self.bvh) return py::array_t<float>(0);
             // Create a 1D array of shape (3,) that is a view into the bvh.aabbMin data
+            std::vector<py::ssize_t> shape = {3};
             return py::array_t<float>(
-                {3},                                // shape
-                {&self.bvh->aabbMin.x},             // data pointer
-                py::cast(self)                      // owner
+                shape,
+                &self.bvh->aabbMin.x,   // data pointer
+                py::cast(self)          // owner
             );
         }, "The minimum corner of the root axis-aligned bounding box.")
 
         .def_property_readonly("aabb_max", [](PyBVH &self) -> py::array {
             if (!self.bvh) return py::array_t<float>(0);
             // Create a 1D array of shape (3,) that is a view into the bvh.aabbMax data
+            std::vector<py::ssize_t> shape = {3};
             return py::array_t<float>(
-                {3},                                // shape
-                {&self.bvh->aabbMax.x},             // data pointer
-                py::cast(self)                      // owner
+                shape,
+                &self.bvh->aabbMax.x,   // data pointer
+                py::cast(self)          // owner
             );
         }, "The maximum corner of the root axis-aligned bounding box.")
 
@@ -1487,5 +1537,31 @@ PYBIND11_MODULE(pytinybvh, m) {
             Calculates the Expected Projected Overlap (EPO) cost of the BVH.
 
             Lower is better.
-        ))");
+        ))")
+
+        .def("__repr__", [](const PyBVH& self) {
+            if (!self.bvh) return std::string("<pytinybvh.BVH (uninitialized)>");
+                std::string repr = "<pytinybvh.BVH (";
+                repr += std::to_string(self.bvh->triCount) + " primitives, ";
+                repr += std::to_string(self.bvh->usedNodes) + " nodes, ";
+                if (self.bvh->isTLAS()) {
+                    repr += "Type: TLAS, ";
+                } else {
+                    repr += "Type: BLAS, ";
+                    std::string quality_str;
+                    switch(self.quality) {
+                        case BuildQuality::Quick: quality_str = "Quick"; break;
+                        case BuildQuality::Balanced: quality_str = "Balanced"; break;
+                        case BuildQuality::High: quality_str = "High"; break;
+                    }
+                    repr += "Quality: " + quality_str + ", ";
+                }
+                if (self.bvh->may_have_holes) {
+                    repr += "Status: Not compact";
+                } else {
+                    repr += "Status: Compact";
+                }
+                repr += ")>";
+                return repr;
+        });
 }

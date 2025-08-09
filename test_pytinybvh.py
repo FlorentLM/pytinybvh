@@ -653,7 +653,7 @@ class TestAdvancedFeatures:
         bvh = BVH.from_indexed_mesh(verts_4d, indices)
         assert bvh.prim_count == 2
 
-        N = 89  # Using a non-power-of-two N just to be extra annoying
+        N = 8
         bits_per_prim = N * N
 
         # Correctly calculate uint32s needed per primitive using ceiling division

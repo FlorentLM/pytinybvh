@@ -315,7 +315,7 @@ class BVH:
         """
         ...
 
-    def intersect_sphere(self, centre: Vec3Like, radius: float) -> bool:
+    def intersect_sphere(self, center: Vec3Like, radius: float) -> bool:
         """
         Checks if any geometry intersects with a given sphere.
 

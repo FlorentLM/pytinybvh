@@ -277,6 +277,22 @@ class TestIntersection:
         assert prim_ids[2] == -1 and np.isinf(hits[2]['t'])
         assert prim_ids[3] == -1 and np.isinf(hits[3]['t'])
 
+    def test_intersect_sphere(self, bvh_two_triangles):
+        """Tests the sphere intersection query for hits and misses"""
+
+        bvh, _ = bvh_two_triangles
+        # Triangle 0 is at z=0 and spans from y=-1 to 1
+
+        # Test Hit: Sphere centered at origin intersects the first triangle
+        assert bvh.intersect_sphere(center=(0, 0, 0), radius=0.5) is True
+
+        # Test Miss (far): Sphere is far away from all geometry
+        assert bvh.intersect_sphere(center=(10, 10, 10), radius=1.0) is False
+
+        # Test Miss (near): Sphere is close to the first triangle but not touching
+        # Sphere is at z=1, radius=0.5. Closest point to tri is at z=0.5, outside sphere.
+        assert bvh.intersect_sphere(center=(0, 0, 1), radius=0.5) is False
+
 
 class TestOcclusion:
     def test_single_is_occluded(self, bvh_two_triangles):
@@ -517,6 +533,66 @@ class TestPostProcessing:
         ray = Ray(origin=(0, 0, -2), direction=(0, 0, 1))
         bvh.intersect(ray)
         assert np.isclose(ray.t, 1.5)
+
+
+class TestAnalysisAndManipulation:
+    def test_analysis_properties(self, bvh_two_triangles):
+        """Tests the leaf_count and epo_cost properties"""
+        bvh, _ = bvh_two_triangles
+
+        # For this simple BVH, we expect one leaf per triangle
+        assert bvh.leaf_count == 2
+
+        sah_cost = bvh.sah_cost
+        epo_cost = bvh.epo_cost
+
+        print(f"\nSAH Cost: {sah_cost:.4f}, EPO Cost: {epo_cost:.4f}")
+
+        # Check that both metrics return valid, positive, finite numbers
+        # We do not assert their equality as they are different heuristics
+        assert sah_cost > 0.0 and np.isfinite(sah_cost)
+        assert epo_cost > 0.0 and np.isfinite(epo_cost)
+
+    def test_split_and_combine_leafs(self, bvh_cube):
+        """
+        Tests the full workflow of splitting leaves for optimization, then
+        combining them back for performance
+        """
+        bvh, _, _ = bvh_cube
+        prim_count = bvh.prim_count  # Cube has 12 triangles
+        assert prim_count == 12
+
+        # Before splitting, leaf count should be less than prim count
+        leafs_before_split = bvh.leaf_count
+        assert leafs_before_split < prim_count
+
+        # Split leaves down to one primitive each
+        bvh.split_leaves(max_prims=1)
+        assert bvh.leaf_count == prim_count
+
+        # Verify the BVH is still correct after splitting
+        ray = Ray(origin=(0, 0, -2), direction=(0, 0, 1))
+        hit_dist = bvh.intersect(ray)
+        assert np.isclose(hit_dist, 1.5)
+
+        # Combine the leaves back together where it's optimal
+        bvh.combine_leaves()
+        leafs_after_combine = bvh.leaf_count
+        assert leafs_after_combine < prim_count
+        assert leafs_after_combine >= 1
+
+        # Compact the BVH to clean up the structure
+        nodes_before_compact = bvh.node_count
+        bvh.compact()
+        # Compacting should reduce the total number of nodes used
+        assert bvh.node_count < nodes_before_compact
+        # But it should not change the number of leaves
+        assert bvh.leaf_count == leafs_after_combine
+
+        # Verify the BVH is still correct after combining and compacting
+        ray = Ray(origin=(0, 0, -2), direction=(0, 0, 1))
+        hit_dist = bvh.intersect(ray)
+        assert np.isclose(hit_dist, 1.5)
 
 
 class TestRobustness:

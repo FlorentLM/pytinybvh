@@ -994,9 +994,12 @@ struct PyBVH {
     // Advanced manipulation methods
 
     void optimize(unsigned int iterations, bool extreme, bool stochastic) {
+
+        // TODO: Why does this produce garbage SOMETIMES ?
+
         if (!bvh) return;
 
-        // Convert to BVH_Verbose
+        // Convert to BVH_Verbose format for manipulation
         tinybvh::BVH_Verbose verbose_bvh;
         // The verbose BVH needs to be allocated with enough space for splitting
         // A full split to 1 primitive/leaf results in ~2*N nodes
@@ -1006,24 +1009,13 @@ struct PyBVH {
         verbose_bvh.allocatedNodes = bvh->triCount * 3;
         verbose_bvh.ConvertFrom(*bvh);
 
+        // Optimize tree structure
         verbose_bvh.Optimize(iterations, extreme, stochastic);
 
-        // Convert back to standard BVH. This will compact it.
+        // Convert dense BVH_Verbose back to standard BVH format
         bvh->ConvertFrom(verbose_bvh, true /* compact */);
 
-        // Manually resolve fragment indices to primitive indices
-        // After the process, bvh->primIdx contains indices into verbose_bvh.fragment
-        // so they need to be replaced with the original primitive indices from those fragments
-        if (verbose_bvh.fragment) {
-            for (uint32_t i = 0; i < bvh->idxCount; ++i) {
-                uint32_t fragment_index = bvh->primIdx[i];
-                if (fragment_index < verbose_bvh.idxCount) { // Safety check
-                    bvh->primIdx[i] = verbose_bvh.fragment[fragment_index].primIdx;
-                }
-            }
-        }
-
-        // Update the quality state of the Python wrapper
+        // update quality state of the Python wrapper
         quality = bvh->refittable ? BuildQuality::Balanced : BuildQuality::High;
     }
 

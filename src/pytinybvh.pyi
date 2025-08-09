@@ -370,6 +370,33 @@ class BVH:
         """
         ...
 
+    def split_leaves(self, max_prims: int = 1) -> None:
+        """
+        Recursively splits leaf nodes until they contain at most `max_prims` primitives.
+        This modifies the BVH in-place. Typically used to prepare a BVH for optimization
+        by breaking it down into single-primitive leaves.
+
+        Warning: This may fail if the BVH does not have enough pre-allocated node memory.
+
+        Args:
+            max_prims (int): The maximum number of primitives a leaf node can contain.
+                             Defaults to 1.
+        """
+        ...
+
+    def combine_leaves(self) -> None:
+        """
+        Merges adjacent leaf nodes if doing so improves the SAH cost.
+        This modifies the BVH in-place. Typically used as a post-process after
+        optimization to create more efficient leaves.
+
+        Warning: This operation makes the internal primitive index array non-contiguous.
+
+        It is highly recommended to call `compact()` after using this method to clean up
+        the BVH structure.
+        """
+        ...
+
     @property
     def nodes(self) -> np.ndarray:
         """The structured numpy array of BVH nodes."""
@@ -383,6 +410,11 @@ class BVH:
     @property
     def node_count(self) -> int:
         """Total number of nodes in the BVH."""
+        ...
+
+    @property
+    def leaf_count(self) -> int:
+        """The total number of leaf nodes in the BVH."""
         ...
 
     @property
@@ -407,5 +439,18 @@ class BVH:
 
     @property
     def sah_cost(self) -> float:
-        """Calculates the Surface Area Heuristic (SAH) cost of the BVH tree."""
+        """
+        Calculates the Surface Area Heuristic (SAH) cost of the BVH.
+
+        Lower is better.
+        """
+        ...
+
+    @property
+    def epo_cost(self) -> float:
+        """
+        Calculates the Expected Projected Overlap (EPO) cost of the BVH.
+
+        Lower is better.
+        """
         ...

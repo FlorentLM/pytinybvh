@@ -400,7 +400,7 @@ struct PyBVH {
         return wrapper;
     }
 
-    // Convenience builders (with copying)
+    // Convenience builders
 
     static std::unique_ptr<PyBVH> from_triangles(py::array_t<float, py::array::c_style | py::array::forcecast> tris_np, BuildQuality quality) {
 
@@ -511,19 +511,6 @@ struct PyBVH {
     }
 
     // Interseciton methods
-
-    bool intersect_sphere(const py::object& center_obj, float radius) {
-        if (!bvh || bvh->triCount == 0) {
-            return false;
-        }
-
-        if (custom_type != PyBVH::CustomType::None) {
-            throw std::runtime_error("intersect_sphere is only supported for triangle meshes.");
-        }
-
-        tinybvh::bvhvec3 center = py_obj_to_vec3(center_obj);
-        return bvh->IntersectSphere(center, radius);
-    }
 
     float intersect(PyRay &py_ray) {
 
@@ -863,7 +850,29 @@ struct PyBVH {
         return result_np;
     }
 
-    // Other methods
+    bool intersect_sphere(const py::object& center_obj, float radius) {
+        if (!bvh || bvh->triCount == 0) {
+            return false;
+        }
+
+        if (custom_type != PyBVH::CustomType::None) {
+            throw std::runtime_error("intersect_sphere is only supported for triangle meshes.");
+        }
+
+        tinybvh::bvhvec3 center = py_obj_to_vec3(center_obj);
+        return bvh->IntersectSphere(center, radius);
+    }
+
+    // Refitting, TLAS
+
+    void refit() {
+        if (!bvh || !bvh->refittable) {
+            throw std::runtime_error("BVH is not refittable (it might have spatial splits, i.e. built with BuildQuality.High).");
+        }
+        // Refit needs original vertex data
+        // `bvh->verts` slice already points to it
+        bvh->Refit();
+    }
 
     static std::unique_ptr<PyBVH> build_tlas(py::array instances_np, const py::list& blases_py) {
 
@@ -919,6 +928,8 @@ struct PyBVH {
 
         return wrapper;
     }
+
+    // Load / save
 
     static std::unique_ptr<PyBVH> load(const py::object& filepath_obj, py::array_t<float,
         py::array::c_style | py::array::forcecast> vertices_np, py::object indices_obj) { // py::object to accept an array or None
@@ -979,14 +990,7 @@ struct PyBVH {
         bvh->Save(filepath.c_str());
     }
 
-    void refit() {
-        if (!bvh || !bvh->refittable) {
-            throw std::runtime_error("BVH is not refittable (it might have spatial splits, i.e. built with BuildQuality.High).");
-        }
-        // Refit needs original vertex data
-        // `bvh->verts` slice already points to it
-        bvh->Refit();
-    }
+    // Advanced manipulation methods
 
     void optimize(unsigned int iterations, bool extreme, bool stochastic) {
         if (!bvh) return;
@@ -1016,13 +1020,6 @@ struct PyBVH {
         // Update PyBVH state if necessary
         quality = bvh->refittable ? BuildQuality::Balanced : BuildQuality::High;
     }
-
-    void compact() {
-    if (bvh) {
-        bvh->Compact();
-    }
-
-}
 
 };
 
@@ -1293,7 +1290,40 @@ PYBIND11_MODULE(pytinybvh, m) {
             ))",
             py::arg("center"), py::arg("radius"))
 
-        // Other methods
+        // Getters for the main data
+
+        .def_property_readonly("nodes", [](PyBVH &self) -> py::array {
+            if (!self.bvh || self.bvh->usedNodes == 0) {
+                py::dtype dt = py::dtype::of<tinybvh::BVH::BVHNode>();
+                return py::array(dt, {0}, {});
+            }
+            return py::array_t<tinybvh::BVH::BVHNode>(
+                { (py::ssize_t)self.bvh->usedNodes }, self.bvh->bvhNode, py::cast(self)
+            );
+        }, "The structured numpy array of BVH nodes.")
+
+        .def_property_readonly("prim_indices", [](PyBVH &self) -> py::array {
+            if (!self.bvh || self.bvh->idxCount == 0) {
+                return py::array_t<uint32_t>(0);
+            }
+            return py::array_t<uint32_t>(
+                { (py::ssize_t)self.bvh->idxCount }, // shape
+                self.bvh->primIdx,                   // data pointer
+                py::cast(self)                       // owner
+            );
+        }, "The array of primitive indices, ordered for locality.")
+
+        // Refitting, TLAS
+
+        .def("refit", &PyBVH::refit,
+             R"((
+                Refits the BVH to the current state of the source geometry, which is much faster than a full rebuild.
+
+                Should be called after the underlying vertex data (numpy array used for construction)
+                has been modified.
+
+                Note: This will fail if the BVH was built with spatial splits (with BuildQuality.High).
+             ))")
 
         .def_static("build_tlas", &PyBVH::build_tlas,
            R"((
@@ -1310,6 +1340,8 @@ PYBIND11_MODULE(pytinybvh, m) {
             ))",
 
            py::arg("instances").noconvert(), py::arg("BLASes"))
+
+        // Load / save
 
         .def_static("load", &PyBVH::load,
             R"((
@@ -1339,41 +1371,7 @@ PYBIND11_MODULE(pytinybvh, m) {
             ))",
             py::arg("filepath"))
 
-        // Properties
-
-        .def_property_readonly("nodes", [](PyBVH &self) -> py::array {
-            if (!self.bvh || self.bvh->usedNodes == 0) {
-                py::dtype dt = py::dtype::of<tinybvh::BVH::BVHNode>();
-                return py::array(dt, {0}, {});
-            }
-            return py::array_t<tinybvh::BVH::BVHNode>(
-                { (py::ssize_t)self.bvh->usedNodes }, self.bvh->bvhNode, py::cast(self)
-            );
-        }, "The structured numpy array of BVH nodes.")
-
-        .def_property_readonly("prim_indices", [](PyBVH &self) -> py::array {
-            if (!self.bvh || self.bvh->idxCount == 0) {
-                return py::array_t<uint32_t>(0);
-            }
-            return py::array_t<uint32_t>(
-                { (py::ssize_t)self.bvh->idxCount }, // shape
-                self.bvh->primIdx,                   // data pointer
-                py::cast(self)                       // owner
-            );
-        }, "The array of primitive indices, ordered for locality.")
-
-        .def_property_readonly("quality", [](const PyBVH &self) { return self.quality; },
-            "The build quality level used to construct the BVH.")
-
-        .def("refit", &PyBVH::refit,
-             R"((
-                Refits the BVH to the current state of the source geometry, which is much faster than a full rebuild.
-
-                Should be called after the underlying vertex data (numpy array used for construction)
-                has been modified.
-
-                Note: This will fail if the BVH was built with spatial splits (with BuildQuality.High).
-             ))")
+        // Advanced manipulation methods
 
         .def("optimize", &PyBVH::optimize,
              "iterations"_a = 25, "extreme"_a = false, "stochastic"_a = false,
@@ -1391,14 +1389,56 @@ PYBIND11_MODULE(pytinybvh, m) {
                                        nodes for re-insertion.
              ))")
 
-        .def("compact", &PyBVH::compact,
-            R"((
-                Removes unused nodes from the BVH structure, reducing memory usage.
+        .def("compact", [](PyBVH &self) {
+            if (self.bvh) {
+                self.bvh->Compact();
+            }
+        },
+        R"((
+            Removes unused nodes from the BVH structure, reducing memory usage.
 
-                This is useful after building with high quality (which may create
-                spatial splits and more primitives) or after optimization, as these
-                processes can leave gaps in the node array.
-            ))")
+            This is useful after building with high quality (which may create
+            spatial splits and more primitives) or after optimization, as these
+            processes can leave gaps in the node array.
+        ))")
+
+        .def("split_leaves", [](PyBVH &self, uint32_t max_prims) {
+            if (!self.bvh || self.bvh->triCount == 0) throw std::runtime_error("BVH is not initialized.");
+            if (self.bvh->usedNodes + self.bvh->triCount > self.bvh->allocatedNodes) {
+                 throw std::runtime_error(
+                    "Cannot split leaves: not enough allocated node capacity. "
+                    "This is an advanced operation that can exceed initial memory allocations."
+                );
+            }
+            self.bvh->SplitLeafs(max_prims);
+        }, "max_prims"_a = 1,
+        R"((
+            Recursively splits leaf nodes until they contain at most `max_prims` primitives.
+            This modifies the BVH in-place. Typically used to prepare a BVH for optimization
+            by breaking it down into single-primitive leaves.
+
+            Warning: This may fail if the BVH does not have enough pre-allocated node memory.
+
+            Args:
+                max_prims (int): The maximum number of primitives a leaf node can contain.
+                                 Defaults to 1.
+        ))")
+
+        .def("combine_leaves", [](PyBVH &self) {
+            if (!self.bvh || self.bvh->triCount == 0) throw std::runtime_error("BVH is not initialized.");
+            self.bvh->CombineLeafs();
+        }, R"((
+            Merges adjacent leaf nodes if doing so improves the SAH cost.
+            This modifies the BVH in-place. Typically used as a post-process after
+            optimization to create more efficient leaves.
+
+            Warning: This operation makes the internal primitive index array non-contiguous.
+
+            It is highly recommended to call `compact()` after using this method to clean up
+            the BVH structure.
+        ))")
+
+        // Read-only properties
 
         .def_property_readonly("node_count", [](const PyBVH &self){ return self.bvh->usedNodes; }, "Total number of nodes in the BVH.")
 
@@ -1424,9 +1464,28 @@ PYBIND11_MODULE(pytinybvh, m) {
             );
         }, "The maximum corner of the root axis-aligned bounding box.")
 
+        .def_property_readonly("quality", [](const PyBVH &self) { return self.quality; },
+           "The build quality level used to construct the BVH.")
+
+        .def_property_readonly("leaf_count", [](const PyBVH &self) {
+            return self.bvh ? self.bvh->LeafCount() : 0;
+        }, "The total number of leaf nodes in the BVH.")
+
         .def_property_readonly("sah_cost", [](const PyBVH &self) {
             // Return infinity for an empty BVH to avoid division by zero in SAH calculation
             if (!self.bvh || self.bvh->triCount == 0) return INFINITY;
             return self.bvh->SAHCost();
-        }, "Calculates the Surface Area Heuristic (SAH) cost of the BVH tree.");
+        }, R"((
+            Calculates the Surface Area Heuristic (SAH) cost of the BVH.
+
+            Lower is better.
+        ))")
+
+        .def_property_readonly("epo_cost", [](const PyBVH &self) {
+            return self.bvh ? self.bvh->EPOCost() : 0.0f;
+        }, R"((
+            Calculates the Expected Projected Overlap (EPO) cost of the BVH.
+
+            Lower is better.
+        ))");
 }

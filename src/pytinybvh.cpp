@@ -207,7 +207,22 @@ bool sphere_isoccluded_callback(const tinybvh::Ray& ray, const unsigned int prim
     return (t > 1e-6f && t < ray.hit.t);
 }
 
+// pybind11 wrapper for tinybvh::Ray to be used in intersection queries
+struct PyRay {
+    tinybvh::bvhvec3 origin;
+    tinybvh::bvhvec3 direction;
+    float t = 1e30f;
+    float u = 0.0f, v = 0.0f;
+    uint32_t prim_id = -1;
+    uint32_t inst_id = -1;
+    uint32_t mask = 0xFFFF;
+};
 
+struct HitRecord {
+    uint32_t prim_id;
+    uint32_t inst_id;
+    float t, u, v;
+};
 
 // Enum for build quality selection
 enum class BuildQuality {
@@ -498,7 +513,9 @@ struct PyBVH {
     // Interseciton methods
 
     bool intersect_sphere(const py::object& center_obj, float radius) {
-        if (!bvh || bvh->triCount == 0) return false;
+        if (!bvh || bvh->triCount == 0) {
+            return false;
+        }
 
         if (custom_type != PyBVH::CustomType::None) {
             throw std::runtime_error("intersect_sphere is only supported for triangle meshes.");
@@ -506,6 +523,344 @@ struct PyBVH {
 
         tinybvh::bvhvec3 center = py_obj_to_vec3(center_obj);
         return bvh->IntersectSphere(center, radius);
+    }
+
+    float intersect(PyRay &py_ray) {
+
+        if (!bvh || bvh->triCount == 0) {
+            return INFINITY;
+        }
+
+        if (custom_type == PyBVH::CustomType::AABB) {
+
+            auto aabbs_np = py::cast<py::array_t<float>>(source_geometry_refs[0]);
+            auto inv_extents_np = py::cast<py::array_t<float>>(source_geometry_refs[1]);
+            g_aabbs_ptr = aabbs_np.data();
+            g_inv_extents_ptr = inv_extents_np.data();
+
+        } else if (custom_type == PyBVH::CustomType::Sphere) {
+
+            auto points_np = py::cast<py::array_t<float>>(source_geometry_refs[0]);
+            g_points_ptr = points_np.data();
+            g_sphere_radius = sphere_radius;
+        }
+
+        tinybvh::Ray ray(py_ray.origin, py_ray.direction, py_ray.t);
+        ray.mask = py_ray.mask;
+
+        bvh->Intersect(ray);
+
+        // unset pointers
+        g_aabbs_ptr = nullptr;
+        g_points_ptr = nullptr;
+        g_inv_extents_ptr = nullptr;
+
+        if (ray.hit.t < py_ray.t) {
+            // update python Ray with hit information
+            py_ray.t = ray.hit.t;
+            py_ray.u = ray.hit.u;
+            py_ray.v = ray.hit.v;
+
+            #if INST_IDX_BITS == 32
+                py_ray.prim_id = ray.hit.prim;
+                py_ray.inst_id = ray.hit.inst;
+            #else
+                // unpack combined ID
+                py_ray.inst_id = ray.hit.prim >> INST_IDX_SHFT;
+                py_ray.prim_id = ray.hit.prim & PRIM_IDX_MASK;
+            #endif
+
+            return ray.hit.t;
+        }
+        // no hit found (or no closer hit). Return infinity.
+        return INFINITY;
+    }
+
+    py::array intersect_batch(
+        py::array_t<float, py::array::c_style | py::array::forcecast> origins_np,
+        py::array_t<float, py::array::c_style | py::array::forcecast> directions_np,
+        py::object t_max_obj, py::object masks_obj)
+    {
+        // Validation
+        if (origins_np.ndim() != 2 || origins_np.shape(1) != 3) {
+            throw std::runtime_error("Origins must be a 2D numpy array with shape (N, 3).");
+        }
+        if (directions_np.ndim() != 2 || directions_np.shape(1) != 3) {
+            throw std::runtime_error("Directions must be a 2D numpy array with shape (N, 3).");
+        }
+        if (origins_np.shape(0) != directions_np.shape(0)) {
+            throw std::runtime_error("Origins and directions arrays must have the same number of rows.");
+        }
+
+        const py::ssize_t n_rays = origins_np.shape(0);
+        if (n_rays == 0) return py::array_t<HitRecord>(0);
+
+        auto result_np = py::array_t<HitRecord>(n_rays);
+        auto* result_ptr = result_np.mutable_data();
+
+        // handle empty BVH
+        if (!bvh || bvh->triCount == 0) {
+            for (py::ssize_t i = 0; i < n_rays; ++i) result_ptr[i] = {static_cast<uint32_t>(-1), static_cast<uint32_t>(-1), INFINITY, 0.0f, 0.0f};
+            return result_np;
+        }
+
+        // handle optional t_max
+        const float* t_max_ptr = nullptr; py::array_t<float> t_max_np;
+        if (!t_max_obj.is_none()) {
+            t_max_np = py::cast<py::array_t<float>>(t_max_obj);
+            if (t_max_np.size() != n_rays) throw std::runtime_error("t_max must be a 1D array with length N.");
+            t_max_ptr = t_max_np.data();
+        }
+
+        // handle optional masks
+        const uint32_t* masks_ptr = nullptr; py::array_t<uint32_t> masks_np;
+        if (!masks_obj.is_none()) {
+            masks_np = py::cast<py::array_t<uint32_t>>(masks_obj);
+            if (masks_np.size() != n_rays) throw std::runtime_error("masks must be a 1D uint32 array with length N.");
+            masks_ptr = masks_np.data();
+        }
+
+        // Prepare output and Ray vector
+        std::vector<tinybvh::Ray> rays(n_rays);
+
+        // Decide which path to take before releasing the GIL
+        bool use_parallel = (custom_type == PyBVH::CustomType::None);
+
+        const float* aabbs_data_ptr = nullptr;
+        const float* inv_extents_data_ptr = nullptr;
+        const float* points_data_ptr = nullptr;
+        float sphere_rad = 0.0f;
+
+        // If using serial path, get raw C++ pointers while we still have the GIL
+        if (!use_parallel) {
+            if (custom_type == PyBVH::CustomType::AABB) {
+                aabbs_data_ptr = py::cast<py::array_t<float>>(source_geometry_refs[0]).data();
+                inv_extents_data_ptr = py::cast<py::array_t<float>>(source_geometry_refs[1]).data();
+            } else if (custom_type == PyBVH::CustomType::Sphere) {
+                points_data_ptr = py::cast<py::array_t<float>>(source_geometry_refs[0]).data();
+                sphere_rad = sphere_radius;
+            }
+        }
+
+        {
+            py::gil_scoped_release release;     // Release GIL for C++ threading
+
+            const auto* origins_ptr = origins_np.data();
+            const auto* directions_ptr = directions_np.data();
+
+            // initialize rays in parallel (this is GIL-safe)
+            #ifdef _OPENMP
+                #pragma omp parallel for schedule(static)
+            #endif
+            for (py::ssize_t i = 0; i < n_rays; ++i) {
+                const size_t i3 = i * 3;
+                const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
+                const uint32_t mask_init = masks_ptr ? masks_ptr[i] : 0xFFFF; // default to all
+
+                rays[i] = tinybvh::Ray(
+                   {origins_ptr[i3], origins_ptr[i3+1], origins_ptr[i3+2]},
+                   {directions_ptr[i3], directions_ptr[i3+1], directions_ptr[i3+2]},
+                   t_init,
+                   mask_init
+               );
+            }
+
+            if (use_parallel) {
+                // Fast path: Standard triangles, using Intersect256Rays
+                #ifdef _OPENMP
+                    #pragma omp parallel for schedule(dynamic)
+                #endif
+                for (py::ssize_t i = 0; i < n_rays; i += 256) {
+                    const py::ssize_t end = std::min(i + 256, n_rays);
+                    const py::ssize_t count = end - i;
+                    if (count == 256) {
+                        #ifdef BVH_USEAVX
+                            bvh->Intersect256RaysSSE(&rays[i]);
+                        #else
+                            bvh->Intersect256Rays(&rays[i]);
+                        #endif
+                    } else {
+                        for (py::ssize_t j = i; j < end; ++j) bvh->Intersect(rays[j]); }
+                }
+            } else {
+                // Slow path for custom geometry (process serially to handle thread_local data)
+                g_aabbs_ptr = aabbs_data_ptr; g_inv_extents_ptr = inv_extents_data_ptr;
+                g_points_ptr = points_data_ptr; g_sphere_radius = sphere_rad;
+
+                for (py::ssize_t i = 0; i < n_rays; ++i) {
+                    bvh->Intersect(rays[i]);
+                }
+
+                // unset global pointers
+                g_aabbs_ptr = nullptr;
+                g_inv_extents_ptr = nullptr;
+                g_points_ptr = nullptr;
+            }
+        }   // GIL re-acquired here
+
+        // Copy results back to numpy
+        for (py::ssize_t i = 0; i < n_rays; ++i) {
+            const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
+            if (rays[i].hit.t < t_init) {
+                #if INST_IDX_BITS == 32
+                    result_ptr[i] = {rays[i].hit.prim, rays[i].hit.inst, rays[i].hit.t, rays[i].hit.u, rays[i].hit.v};
+                #else
+                    // if instance ID is packed in prim_id, unpack it
+                    result_ptr[i] = {rays[i].hit.prim & PRIM_IDX_MASK, rays[i].hit.prim >> INST_IDX_SHFT, rays[i].hit.t, rays[i].hit.u, rays[i].hit.v};
+                #endif
+            } else {
+                result_ptr[i] = {static_cast<uint32_t>(-1), static_cast<uint32_t>(-1), INFINITY, 0.0f, 0.0f};
+            }
+        }
+        return result_np;
+    }
+
+    bool is_occluded(const PyRay &py_ray) {
+
+        if (!bvh || bvh->triCount == 0) {
+            return false; // Nothing to occlude
+        }
+
+        if (custom_type == PyBVH::CustomType::AABB) {
+            g_aabbs_ptr = py::cast<py::array_t<float>>(source_geometry_refs[0]).data();
+
+        } else if (custom_type == PyBVH::CustomType::Sphere) {
+
+            g_points_ptr = py::cast<py::array_t<float>>(source_geometry_refs[0]).data();
+            g_sphere_radius = sphere_radius;
+        }
+
+        tinybvh::Ray ray(
+            py_ray.origin,
+            py_ray.direction,
+            py_ray.t);  // The ray's t is used as the maximum distance for the occlusion check
+
+        ray.mask = py_ray.mask;
+
+        bool result = bvh->IsOccluded(ray);
+
+        // unset pointers
+        g_aabbs_ptr = nullptr;
+        g_points_ptr = nullptr;
+
+        return result;
+    }
+
+    py::array_t<bool> is_occluded_batch(
+        py::array_t<float, py::array::c_style> origins_np,
+        py::array_t<float, py::array::c_style> directions_np,
+        py::object t_max_obj, py::object masks_obj)
+    {
+        // input validation
+        if (origins_np.ndim() != 2 || origins_np.shape(1) != 3) {
+            throw std::runtime_error("Origins must be a 2D numpy array with shape (N, 3).");
+        }
+        if (directions_np.ndim() != 2 || directions_np.shape(1) != 3) {
+            throw std::runtime_error("Directions must be a 2D numpy array with shape (N, 3).");
+        }
+        if (origins_np.shape(0) != directions_np.shape(0)) {
+            throw std::runtime_error("Origins and directions arrays must have the same number of rows.");
+        }
+
+        const py::ssize_t n_rays = origins_np.shape(0);
+        auto result_np = py::array_t<bool>(n_rays);
+
+        if (n_rays == 0) return result_np;
+        auto* result_ptr = result_np.mutable_data();
+
+        // check for empty BVH
+        if (!bvh || bvh->triCount == 0) {
+            std::fill(result_ptr, result_ptr + n_rays, false);
+            return result_np;
+        }
+
+        auto origins_ptr = origins_np.data();
+        auto directions_ptr = directions_np.data();
+
+        // handle optional t_max
+        const float* t_max_ptr = nullptr; py::array_t<float> t_max_np;
+        if (!t_max_obj.is_none()) {
+            t_max_np = py::cast<py::array_t<float>>(t_max_obj);
+            if (t_max_np.size() != n_rays) throw std::runtime_error("t_max must be a 1D array with length N.");
+            t_max_ptr = t_max_np.data();
+        }
+
+        // handle optional masks
+        const uint32_t* masks_ptr = nullptr; py::array_t<uint32_t> masks_np;
+        if (!masks_obj.is_none()) {
+            masks_np = py::cast<py::array_t<uint32_t>>(masks_obj);
+            if (masks_np.size() != n_rays) throw std::runtime_error("masks must be a 1D uint32 array with length N.");
+            masks_ptr = masks_np.data();
+        }
+
+        // Decide which path to take before releasing the GIL.
+        bool use_parallel = (custom_type == PyBVH::CustomType::None);
+
+        const float* aabbs_data_ptr = nullptr;
+        const float* points_data_ptr = nullptr;
+        float sphere_rad = 0.0f;
+
+        // If using serial path, get raw C++ pointers while we still have the GIL.
+        if (!use_parallel) {
+            if (custom_type == PyBVH::CustomType::AABB) {
+                aabbs_data_ptr = py::cast<py::array_t<float>>(source_geometry_refs[0]).data();
+            } else if (custom_type == PyBVH::CustomType::Sphere) {
+                points_data_ptr = py::cast<py::array_t<float>>(source_geometry_refs[0]).data();
+                sphere_rad = sphere_radius;
+            }
+        }
+
+        {
+            py::gil_scoped_release release; // Release GIL for C++ threading
+
+            const auto* origins_ptr = origins_np.data();
+            const auto* directions_ptr = directions_np.data();
+
+            if (use_parallel) {
+                // Fast path: Standard triangles, parallelized with OpenMP
+                #ifdef _OPENMP
+                    #pragma omp parallel for schedule(dynamic)
+                #endif
+                for (py::ssize_t i = 0; i < n_rays; ++i) {
+                    const size_t i3 = i * 3;
+                    const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
+                    const uint32_t mask_init = masks_ptr ? masks_ptr[i] : 0xFFFF;
+
+                    tinybvh::Ray ray(
+                        {origins_ptr[i3], origins_ptr[i3+1], origins_ptr[i3+2]},
+                        {directions_ptr[i3], directions_ptr[i3+1], directions_ptr[i3+2]},
+                        t_init,
+                        mask_init
+                    );
+                    result_ptr[i] = bvh->IsOccluded(ray);
+                }
+            } else {
+                // Slow path: Custom geometry, processed serially to safely use thread_local pointers.
+                g_aabbs_ptr = aabbs_data_ptr;
+                g_points_ptr = points_data_ptr;
+                g_sphere_radius = sphere_rad;
+
+                for (py::ssize_t i = 0; i < n_rays; ++i) {
+                    const size_t i3 = i * 3;
+                    const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
+                    const uint32_t mask_init = masks_ptr ? masks_ptr[i] : 0xFFFF;
+
+                    tinybvh::Ray ray(
+                        {origins_ptr[i3], origins_ptr[i3+1], origins_ptr[i3+2]},
+                        {directions_ptr[i3], directions_ptr[i3+1], directions_ptr[i3+2]},
+                        t_init,
+                        mask_init
+                    );
+                    result_ptr[i] = bvh->IsOccluded(ray);
+                }
+
+                // unset pointers now that the loop is done.
+                g_aabbs_ptr = nullptr;
+                g_points_ptr = nullptr;
+            }
+        } // GIL re-acquired
+
+        return result_np;
     }
 
     // Other methods
@@ -651,6 +1006,12 @@ struct PyBVH {
         // Convert back to standard BVH
         bvh->ConvertFrom(verbose_bvh, true /* compact */);
 
+        // The optimization process reorders primIdx for better cache locality,
+        // so the new layout must be copied back to the main BVH
+        if (bvh->idxCount > 0) {
+            std::memcpy(bvh->primIdx, verbose_bvh.primIdx, sizeof(uint32_t) * bvh->idxCount);
+        }
+
         // After optimization, refittable is likely still true, but SBVH flags might change
         // Update PyBVH state if necessary
         quality = bvh->refittable ? BuildQuality::Balanced : BuildQuality::High;
@@ -660,21 +1021,10 @@ struct PyBVH {
     if (bvh) {
         bvh->Compact();
     }
+
 }
 
 };
-
-// pybind11 wrapper for tinybvh::Ray to be used in intersection queries
-struct PyRay {
-    tinybvh::bvhvec3 origin;
-    tinybvh::bvhvec3 direction;
-    float t = 1e30f;
-    float u = 0.0f, v = 0.0f;
-    uint32_t prim_id = -1;
-    uint32_t inst_id = -1;
-    uint32_t mask = 0xFFFF;
-};
-
 
 // =====================================================================================================================
 
@@ -682,12 +1032,6 @@ struct PyRay {
 PYBIND11_MODULE(pytinybvh, m) {
     m.doc() = "Python bindings for the tinybvh library";
 
-    // HitRecord struct and its numpy dtype
-    struct HitRecord {
-        uint32_t prim_id;
-        uint32_t inst_id;
-        float t, u, v;
-    };
     PYBIND11_NUMPY_DTYPE(HitRecord, prim_id, inst_id, t, u, v);
     m.attr("hit_record_dtype") = py::dtype::of<HitRecord>();
 
@@ -757,6 +1101,7 @@ PYBIND11_MODULE(pytinybvh, m) {
     py::class_<PyBVH>(m, "BVH", "A Bounding Volume Hierarchy for fast ray intersections.")
 
         // Core Builders
+
         .def_static("from_vertices", &PyBVH::from_vertices,
             R"((
                 Builds a BVH from a flat array of vertices (N * 3, 4).
@@ -773,8 +1118,7 @@ PYBIND11_MODULE(pytinybvh, m) {
                     BVH: A new BVH instance.
             ))",
             // noconvert() to enforce direct memory access!
-            py::arg("vertices").noconvert(),
-            py::arg("quality") = BuildQuality::Balanced)
+            py::arg("vertices").noconvert(), py::arg("quality") = BuildQuality::Balanced)
 
         .def_static("from_indexed_mesh", &PyBVH::from_indexed_mesh,
             R"((
@@ -794,11 +1138,8 @@ PYBIND11_MODULE(pytinybvh, m) {
                 Returns:
                     BVH: A new BVH instance.
             ))",
-
             // noconvert() to enforce direct memory access!
-            py::arg("vertices").noconvert(),
-            py::arg("indices").noconvert(),
-            py::arg("quality") = BuildQuality::Balanced)
+            py::arg("vertices").noconvert(), py::arg("indices").noconvert(), py::arg("quality") = BuildQuality::Balanced)
 
         .def_static("from_aabbs", &PyBVH::from_aabbs,
             R"((
@@ -817,8 +1158,7 @@ PYBIND11_MODULE(pytinybvh, m) {
                     BVH: A new BVH instance.
             ))",
             // noconvert() to enforce direct memory access!
-            py::arg("aabbs").noconvert(),
-            py::arg("quality") = BuildQuality::Balanced)
+            py::arg("aabbs").noconvert(), py::arg("quality") = BuildQuality::Balanced)
 
         // Convenience builders (with copying)
 
@@ -835,10 +1175,8 @@ PYBIND11_MODULE(pytinybvh, m) {
                 Returns:
                     BVH: A new BVH instance.
             ))",
-
             // no need for noconvert() here, we copy anyway
-            py::arg("triangles"),
-            py::arg("quality") = BuildQuality::Balanced)
+            py::arg("triangles"), py::arg("quality") = BuildQuality::Balanced)
 
         .def_static("from_points", &PyBVH::from_points,
              R"((
@@ -853,13 +1191,90 @@ PYBIND11_MODULE(pytinybvh, m) {
                 Returns:
                     BVH: A new BVH instance.
             ))",
-
             // no need for noconvert() here, we copy anyway
-            py::arg("points"),
-            py::arg("radius") = 1e-5f,
-            py::arg("quality") = BuildQuality::Balanced)
+            py::arg("points"), py::arg("radius") = 1e-5f, py::arg("quality") = BuildQuality::Balanced)
 
         // Intersection methods
+
+        .def("intersect", &PyBVH::intersect,
+            R"((
+                Performs an intersection query with a single ray.
+
+                This method modifies the passed Ray object in-place if a closer hit is found.
+
+                Args:
+                    ray (Ray): The ray to test. Its `t`, `u`, `v`, and `prim_id` attributes
+                               will be updated upon a successful hit.
+
+                Returns:
+                    float: The hit distance `t` if a hit was found, otherwise `infinity`.
+            ))",
+            py::arg("ray"))
+
+        .def("intersect_batch", &PyBVH::intersect_batch,
+           R"((
+                Performs intersection queries for a batch of rays.
+
+                This method leverages both multi-core processing (via OpenMP) and SIMD instructions
+                (via tinybvh's Intersect256Rays functions) for maximum throughput on standard
+                triangle meshes. For custom geometry like AABBs or spheres, it falls back to a
+                serial implementation.
+
+                Args:
+                    origins (numpy.ndarray): A (N, 3) float array of ray origins.
+                    directions (numpy.ndarray): A (N, 3) float array of ray directions.
+                    t_max (numpy.ndarray, optional): A (N,) float array of maximum intersection distances.
+                    masks (numpy.ndarray, optional): A (N,) uint32 array of per-ray visibility mask.
+                                                     For a ray to test an instance for intersection, the bitwise
+                                                     AND of the ray's mask and the instance's mask must be non-zero.
+                                                     If not provided, rays default to mask 0xFFFF (intersect all instances).
+
+                Returns:
+                    numpy.ndarray: A structured array of shape (N,) with dtype
+                        [('prim_id', '<u4'), ('inst_id', '<u4'), ('t', '<f4'), ('u', '<f4'), ('v', '<f4')].
+                        For misses, prim_id and inst_id are -1 and t is infinity.
+                        For TLAS hits, inst_id is the instance index and prim_id is the primitive
+                        index within that instance's BLAS.
+           ))",
+           py::arg("origins"), py::arg("directions"), py::arg("t_max") = py::none(), py::arg("masks") = py::none())
+
+        .def("is_occluded", &PyBVH::is_occluded,
+           R"((
+                Performs an occlusion query with a single ray.
+
+                Checks if any geometry is hit by the ray within the distance specified by `ray.t`.
+                This is typically faster than `intersect` as it can stop at the first hit.
+
+                Args:
+                    ray (Ray): The ray to test.
+
+                Returns:
+                    bool: True if the ray is occluded, False otherwise.
+           ))",
+           py::arg("ray"))
+
+        .def("is_occluded_batch", &PyBVH::is_occluded_batch,
+           R"((
+                Performs occlusion queries for a batch of rays, parallelized for performance.
+
+                This method leverages multi-core processing (via OpenMP) for maximum throughput on
+                standard triangle meshes. For custom geometry, it falls back to a serial implementation
+                to ensure thread-safety.
+
+                Args:
+                    origins (numpy.ndarray): A (N, 3) float array of ray origins.
+                    directions (numpy.ndarray): A (N, 3) float array of ray directions.
+                    t_max (numpy.ndarray, optional): A (N,) float array of maximum occlusion distances.
+                                                     If a hit is found beyond this distance, it is ignored.
+                    masks (numpy.ndarray, optional): A (N,) uint32 array of per-ray visibility mask.
+                                                     For a ray to test an instance for intersection, the bitwise
+                                                     AND of the ray's mask and the instance's mask must be non-zero.
+                                                     If not provided, rays default to mask 0xFFFF (intersect all instances).
+
+                Returns:
+                    numpy.ndarray: A boolean array of shape (N,) where `True` indicates occlusion.
+           ))",
+           py::arg("origins"), py::arg("directions"), py::arg("t_max") = py::none(), py::arg("masks") = py::none())
 
         .def("intersect_sphere", &PyBVH::intersect_sphere,
             R"((
@@ -876,8 +1291,7 @@ PYBIND11_MODULE(pytinybvh, m) {
                 Returns:
                     bool: True if an intersection is found, False otherwise.
             ))",
-            py::arg("center"),
-            py::arg("radius"))
+            py::arg("center"), py::arg("radius"))
 
         // Other methods
 
@@ -895,8 +1309,7 @@ PYBIND11_MODULE(pytinybvh, m) {
                     BVH: A new BVH instance representing the TLAS.
             ))",
 
-           py::arg("instances").noconvert(),
-           py::arg("BLASes"))
+           py::arg("instances").noconvert(), py::arg("BLASes"))
 
         .def_static("load", &PyBVH::load,
             R"((
@@ -915,9 +1328,7 @@ PYBIND11_MODULE(pytinybvh, m) {
                 Returns:
                     BVH: A new BVH instance.
             ))",
-            py::arg("filepath"),
-            py::arg("vertices").noconvert(),
-            py::arg("indices").noconvert() = py::none())
+            py::arg("filepath"), py::arg("vertices").noconvert(), py::arg("indices").noconvert() = py::none())
 
         .def("save", &PyBVH::save,
             R"((
@@ -953,429 +1364,6 @@ PYBIND11_MODULE(pytinybvh, m) {
 
         .def_property_readonly("quality", [](const PyBVH &self) { return self.quality; },
             "The build quality level used to construct the BVH.")
-
-         .def("intersect", [](PyBVH &self, PyRay &py_ray) -> float {
-
-            if (self.bvh->triCount == 0) {
-                return INFINITY; // empty BVH, nothing to intersect
-            }
-
-            if (self.custom_type == PyBVH::CustomType::AABB) {
-
-                auto aabbs_np = py::cast<py::array_t<float>>(self.source_geometry_refs[0]);
-                auto inv_extents_np = py::cast<py::array_t<float>>(self.source_geometry_refs[1]);
-                g_aabbs_ptr = aabbs_np.data();
-                g_inv_extents_ptr = inv_extents_np.data();
-
-            } else if (self.custom_type == PyBVH::CustomType::Sphere) {
-
-                auto points_np = py::cast<py::array_t<float>>(self.source_geometry_refs[0]);
-                g_points_ptr = points_np.data();
-                g_sphere_radius = self.sphere_radius;
-            }
-
-            tinybvh::Ray ray(py_ray.origin, py_ray.direction, py_ray.t);
-            ray.mask = py_ray.mask;
-
-            self.bvh->Intersect(ray);
-
-            // unset pointers
-            g_aabbs_ptr = nullptr;
-            g_points_ptr = nullptr;
-            g_inv_extents_ptr = nullptr;
-
-            if (ray.hit.t < py_ray.t) {
-                // update python Ray with hit information
-                py_ray.t = ray.hit.t;
-                py_ray.u = ray.hit.u;
-                py_ray.v = ray.hit.v;
-                py_ray.prim_id = ray.hit.prim;
-
-                #if INST_IDX_BITS == 32
-                    py_ray.prim_id = ray.hit.prim;
-                    py_ray.inst_id = ray.hit.inst;
-                #else
-                    // unpack combined ID
-                    py_ray.inst_id = ray.hit.prim >> INST_IDX_SHFT;
-                    py_ray.prim_id = ray.hit.prim & PRIM_IDX_MASK;
-                #endif
-
-                return ray.hit.t;
-            }
-            // no hit found (or no closer hit). Return infinity.
-            return INFINITY;
-        }, py::arg("ray"),
-           R"((
-                Performs an intersection query with a single ray.
-
-                This method modifies the passed Ray object in-place if a closer hit is found.
-
-                Args:
-                    ray (Ray): The ray to test. Its `t`, `u`, `v`, and `prim_id` attributes
-                               will be updated upon a successful hit.
-
-                Returns:
-                    float: The hit distance `t` if a hit was found, otherwise `infinity`.
-           ))")
-
-        .def("intersect_batch", [](PyBVH &self,
-                           py::array_t<float, py::array::c_style | py::array::forcecast> origins_np,
-                           py::array_t<float, py::array::c_style | py::array::forcecast> directions_np,
-                           py::object t_max_obj,
-                           py::object masks_obj) -> py::array
-            {
-                // Validation
-                if (origins_np.ndim() != 2 || origins_np.shape(1) != 3) {
-                    throw std::runtime_error("Origins must be a 2D numpy array with shape (N, 3).");
-                }
-                if (directions_np.ndim() != 2 || directions_np.shape(1) != 3) {
-                    throw std::runtime_error("Directions must be a 2D numpy array with shape (N, 3).");
-                }
-                if (origins_np.shape(0) != directions_np.shape(0)) {
-                    throw std::runtime_error("Origins and directions arrays must have the same number of rows.");
-                }
-            
-                const py::ssize_t n_rays = origins_np.shape(0);
-                if (n_rays == 0) return py::array_t<HitRecord>(0);
-            
-                // handle empty BVH
-                if (self.bvh->triCount == 0) {
-                    auto result_np = py::array_t<HitRecord>(n_rays);
-                    auto* result_ptr = result_np.mutable_data();
-                    for (py::ssize_t i = 0; i < n_rays; ++i) {
-                        result_ptr[i] = {static_cast<uint32_t>(-1), static_cast<uint32_t>(-1), INFINITY, 0.0f, 0.0f};
-                    }
-                    return result_np;
-                }
-            
-                // Prepare input data pointers
-                auto origins_ptr = origins_np.data();
-                auto directions_ptr = directions_np.data();
-            
-                // handle optional t_max
-                const float* t_max_ptr = nullptr;
-                py::array_t<float, py::array::c_style | py::array::forcecast> t_max_np;
-                if (!t_max_obj.is_none()) {
-                    t_max_np = py::cast<py::array_t<float, py::array::c_style>>(t_max_obj);
-                    if (t_max_np.ndim() != 1 || t_max_np.shape(0) != n_rays) throw std::runtime_error("t_max must be a 1D array with length N.");
-                    t_max_ptr = t_max_np.data();
-                }
-            
-                // handle optional masks
-                const uint32_t* masks_ptr = nullptr;
-                py::array_t<uint32_t, py::array::c_style | py::array::forcecast> masks_np;
-                if (!masks_obj.is_none()) {
-                    masks_np = py::cast<py::array_t<uint32_t, py::array::c_style>>(masks_obj);
-                    if (masks_np.ndim() != 1 || masks_np.shape(0) != n_rays) {
-                        throw std::runtime_error("masks must be a 1D uint32 array with length N.");
-                    }
-                    masks_ptr = masks_np.data();
-                }
-            
-                // Prepare output and Ray vector ---
-                auto result_np = py::array_t<HitRecord>(n_rays);
-                auto* result_ptr = result_np.mutable_data();
-                std::vector<tinybvh::Ray> rays(n_rays);
-            
-                // Decide which path to take before releasing the GIL.
-                bool use_parallel = (self.custom_type == PyBVH::CustomType::None);
-            
-                const float* aabbs_data_ptr = nullptr;
-                const float* inv_extents_data_ptr = nullptr;
-                const float* points_data_ptr = nullptr;
-                float sphere_rad = 0.0f;
-                
-                // If using serial path, get raw C++ pointers while we still have the GIL.
-                if (!use_parallel) {
-                    if (self.custom_type == PyBVH::CustomType::AABB) {
-                        aabbs_data_ptr = py::cast<py::array_t<float>>(self.source_geometry_refs[0]).data();
-                        inv_extents_data_ptr = py::cast<py::array_t<float>>(self.source_geometry_refs[1]).data();
-                    } else if (self.custom_type == PyBVH::CustomType::Sphere) {
-                        points_data_ptr = py::cast<py::array_t<float>>(self.source_geometry_refs[0]).data();
-                        sphere_rad = self.sphere_radius;
-                    }
-                }
-            
-                {
-                    py::gil_scoped_release release;  // Release GIL for C++ threading
-            
-                    // initialize rays in parallel (this is GIL-safe)
-                    #ifdef _OPENMP
-                        #pragma omp parallel for schedule(static)
-                    #endif
-                    for (py::ssize_t i = 0; i < n_rays; ++i) {
-                        const size_t i3 = i * 3;
-                        const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
-                        const uint32_t mask_init = masks_ptr ? masks_ptr[i] : 0xFFFF; // default to all
-                        rays[i] = tinybvh::Ray(
-                            {origins_ptr[i3], origins_ptr[i3+1], origins_ptr[i3+2]},
-                            {directions_ptr[i3], directions_ptr[i3+1], directions_ptr[i3+2]},
-                            t_init,
-                            mask_init
-                        );
-                    }
-                    
-                    if (use_parallel) {
-                        // Fast path: Standard triangles, using Intersect256Rays
-                        #ifdef _OPENMP
-                            #pragma omp parallel for schedule(dynamic)
-                        #endif
-                        for (py::ssize_t i = 0; i < n_rays; i += 256) {
-                            const py::ssize_t end = std::min(i + 256, n_rays);
-                            const py::ssize_t count = end - i;
-                            if (count == 256) {
-                                #ifdef BVH_USEAVX
-                                    self.bvh->Intersect256RaysSSE(&rays[i]);
-                                #else
-                                    self.bvh->Intersect256Rays(&rays[i]);
-                                #endif
-                            } else {
-                                for (py::ssize_t j = i; j < end; ++j) self.bvh->Intersect(rays[j]);
-                            }
-                        }
-                    } else {
-                        // Slow path for custom geometry (process serially to handle thread_local data)
-                        g_aabbs_ptr = aabbs_data_ptr;
-                        g_inv_extents_ptr = inv_extents_data_ptr;
-                        g_points_ptr = points_data_ptr;
-                        g_sphere_radius = sphere_rad;
-            
-                        for (py::ssize_t i = 0; i < n_rays; ++i) {
-                            self.bvh->Intersect(rays[i]);
-                        }
-            
-                        // unset global pointers
-                        g_aabbs_ptr = nullptr;
-                        g_inv_extents_ptr = nullptr;
-                        g_points_ptr = nullptr;
-                    }
-                } // GIL re-acquired here
-            
-                // Copy results back to numpy
-                for (py::ssize_t i = 0; i < n_rays; ++i) {
-                    const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
-                    if (rays[i].hit.t < t_init) {
-                        #if INST_IDX_BITS == 32
-                            result_ptr[i] = {rays[i].hit.prim, rays[i].hit.inst, rays[i].hit.t, rays[i].hit.u, rays[i].hit.v};
-                        #else
-                            // if instance ID is packed in prim_id, unpack it
-                            uint32_t inst_id = rays[i].hit.prim >> INST_IDX_SHFT;
-                            uint32_t prim_id = rays[i].hit.prim & PRIM_IDX_MASK;
-                            result_ptr[i] = {prim_id, inst_id, rays[i].hit.t, rays[i].hit.u, rays[i].hit.v};
-                        #endif
-                    } else {
-                        result_ptr[i] = {static_cast<uint32_t>(-1), static_cast<uint32_t>(-1), INFINITY, 0.0f, 0.0f};
-                    }
-                }
-                return result_np;
-            
-            }, py::arg("origins"), py::arg("directions"), py::arg("t_max") = py::none(), py::arg("masks") = py::none(),
-               R"((
-                    Performs intersection queries for a batch of rays.
-            
-                    This method leverages both multi-core processing (via OpenMP) and SIMD instructions
-                    (via tinybvh's Intersect256Rays functions) for maximum throughput on standard
-                    triangle meshes. For custom geometry like AABBs or spheres, it falls back to a
-                    serial implementation.
-            
-                    Args:
-                        origins (numpy.ndarray): A (N, 3) float array of ray origins.
-                        directions (numpy.ndarray): A (N, 3) float array of ray directions.
-                        t_max (numpy.ndarray, optional): A (N,) float array of maximum intersection distances.
-                        masks (numpy.ndarray, optional): A (N,) uint32 array of per-ray visibility mask.
-                                                         For a ray to test an instance for intersection, the bitwise
-                                                         AND of the ray's mask and the instance's mask must be non-zero.
-                                                         If not provided, rays default to mask 0xFFFF (intersect all instances).
-            
-                    Returns:
-                        numpy.ndarray: A structured array of shape (N,) with dtype
-                            [('prim_id', '<u4'), ('inst_id', '<u4'), ('t', '<f4'), ('u', '<f4'), ('v', '<f4')].
-                            For misses, prim_id and inst_id are -1 and t is infinity.
-                            For TLAS hits, inst_id is the instance index and prim_id is the primitive
-                            index within that instance's BLAS.
-               ))")
-
-        .def("is_occluded", [](PyBVH &self, const PyRay &py_ray) -> bool {
-
-            if (self.bvh->triCount == 0) {
-                return false; // Nothing to occlude
-            }
-
-            if (self.custom_type == PyBVH::CustomType::AABB) {
-                auto aabbs_np = py::cast<py::array_t<float>>(self.source_geometry_refs[0]);
-                g_aabbs_ptr = aabbs_np.data();
-            } else if (self.custom_type == PyBVH::CustomType::Sphere) {
-                auto points_np = py::cast<py::array_t<float>>(self.source_geometry_refs[0]);
-                g_points_ptr = points_np.data();
-                g_sphere_radius = self.sphere_radius;
-            }
-
-            tinybvh::Ray ray(
-                py_ray.origin,
-                py_ray.direction,
-                py_ray.t);  // The ray's t is used as the maximum distance for the occlusion check
-
-            ray.mask = py_ray.mask;
-
-            bool result = self.bvh->IsOccluded(ray);
-
-            // unset pointers
-            g_aabbs_ptr = nullptr;
-            g_points_ptr = nullptr;
-
-             return result;
-
-        }, py::arg("ray"),
-           R"((
-                Performs an occlusion query with a single ray.
-
-                Checks if any geometry is hit by the ray within the distance specified by `ray.t`.
-                This is typically faster than `intersect` as it can stop at the first hit.
-
-                Args:
-                    ray (Ray): The ray to test.
-
-                Returns:
-                    bool: True if the ray is occluded, False otherwise.
-           ))")
-
-        .def("is_occluded_batch", [](PyBVH &self, py::array_t<float, py::array::c_style> origins_np,
-                                       py::array_t<float, py::array::c_style> directions_np,
-                                       py::object t_max_obj,
-                                       py::object masks_obj) -> py::array_t<bool>
-            {
-                // input validation
-                if (origins_np.ndim() != 2 || origins_np.shape(1) != 3) {
-                    throw std::runtime_error("Origins must be a 2D numpy array with shape (N, 3).");
-                }
-                if (directions_np.ndim() != 2 || directions_np.shape(1) != 3) {
-                    throw std::runtime_error("Directions must be a 2D numpy array with shape (N, 3).");
-                }
-                if (origins_np.shape(0) != directions_np.shape(0)) {
-                    throw std::runtime_error("Origins and directions arrays must have the same number of rows.");
-                }
-
-                const py::ssize_t n_rays = origins_np.shape(0);
-                if (n_rays == 0) return py::array_t<bool>(0);
-
-                // check for empty BVH
-                if (self.bvh->triCount == 0) {
-                    auto result_np = py::array_t<bool>(n_rays);
-                    std::fill(result_np.mutable_data(), result_np.mutable_data() + n_rays, false);
-                    return result_np;
-                }
-
-                auto origins_ptr = origins_np.data();
-                auto directions_ptr = directions_np.data();
-
-                const float* t_max_ptr = nullptr;
-                py::array_t<float, py::array::c_style | py::array::forcecast> t_max_np;
-                if (!t_max_obj.is_none()) {
-                    t_max_np = py::cast<py::array_t<float, py::array::c_style>>(t_max_obj);
-                    if (t_max_np.ndim() != 1 || t_max_np.shape(0) != n_rays) throw std::runtime_error("t_max must be a 1D array with length N.");
-                    t_max_ptr = t_max_np.data();
-                }
-
-                const uint32_t* masks_ptr = nullptr;
-                py::array_t<uint32_t, py::array::c_style | py::array::forcecast> masks_np;
-                if (!masks_obj.is_none()) {
-                    masks_np = py::cast<py::array_t<uint32_t, py::array::c_style>>(masks_obj);
-                    if (masks_np.ndim() != 1 || masks_np.shape(0) != n_rays) {
-                        throw std::runtime_error("masks must be a 1D uint32 array with length N.");
-                    }
-                    masks_ptr = masks_np.data();
-                }
-
-                auto result_np = py::array_t<bool>(n_rays);
-                auto* result_ptr = result_np.mutable_data();
-
-                // Decide which path to take before releasing the GIL.
-                bool use_parallel = (self.custom_type == PyBVH::CustomType::None);
-
-                const float* aabbs_data_ptr = nullptr;
-                const float* points_data_ptr = nullptr;
-                float sphere_rad = 0.0f;
-
-                // If using serial path, get raw C++ pointers while we still have the GIL.
-                if (!use_parallel) {
-                    if (self.custom_type == PyBVH::CustomType::AABB) {
-                        aabbs_data_ptr = py::cast<py::array_t<float>>(self.source_geometry_refs[0]).data();
-                    } else if (self.custom_type == PyBVH::CustomType::Sphere) {
-                        points_data_ptr = py::cast<py::array_t<float>>(self.source_geometry_refs[0]).data();
-                        sphere_rad = self.sphere_radius;
-                    }
-                }
-
-                {
-                    py::gil_scoped_release release; // Release GIL for C++ threading
-
-                    if (use_parallel) {
-                        // Fast path: Standard triangles, parallelized with OpenMP.
-                        #ifdef _OPENMP
-                            #pragma omp parallel for schedule(dynamic)
-                        #endif
-                        for (py::ssize_t i = 0; i < n_rays; ++i) {
-                            const size_t i3 = i * 3;
-                            const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
-                            const uint32_t mask_init = masks_ptr ? masks_ptr[i] : 0xFFFF;
-
-                            tinybvh::Ray ray(
-                                {origins_ptr[i3], origins_ptr[i3+1], origins_ptr[i3+2]},
-                                {directions_ptr[i3], directions_ptr[i3+1], directions_ptr[i3+2]},
-                                t_init,
-                                mask_init
-                            );
-                            result_ptr[i] = self.bvh->IsOccluded(ray);
-                        }
-                    } else {
-                        // Slow path: Custom geometry, processed serially to safely use thread_local pointers.
-                        g_aabbs_ptr = aabbs_data_ptr;
-                        g_points_ptr = points_data_ptr;
-                        g_sphere_radius = sphere_rad;
-
-                        for (py::ssize_t i = 0; i < n_rays; ++i) {
-                            const size_t i3 = i * 3;
-                            const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
-                            const uint32_t mask_init = masks_ptr ? masks_ptr[i] : 0xFFFF;
-
-                            tinybvh::Ray ray(
-                                {origins_ptr[i3], origins_ptr[i3+1], origins_ptr[i3+2]},
-                                {directions_ptr[i3], directions_ptr[i3+1], directions_ptr[i3+2]},
-                                t_init,
-                                mask_init
-                            );
-                            result_ptr[i] = self.bvh->IsOccluded(ray);
-                        }
-
-                        // unset pointers now that the loop is done.
-                        g_aabbs_ptr = nullptr;
-                        g_points_ptr = nullptr;
-                    }
-                } // GIL re-acquired
-
-                return result_np;
-
-            }, py::arg("origins"), py::arg("directions"), py::arg("t_max") = py::none(), py::arg("masks") = py::none(),
-               R"((
-                    Performs occlusion queries for a batch of rays, parallelized for performance.
-
-                    This method leverages multi-core processing (via OpenMP) for maximum throughput on
-                    standard triangle meshes. For custom geometry, it falls back to a serial implementation
-                    to ensure thread-safety.
-
-                    Args:
-                        origins (numpy.ndarray): A (N, 3) float array of ray origins.
-                        directions (numpy.ndarray): A (N, 3) float array of ray directions.
-                        t_max (numpy.ndarray, optional): A (N,) float array of maximum occlusion distances.
-                                                         If a hit is found beyond this distance, it is ignored.
-                        masks (numpy.ndarray, optional): A (N,) uint32 array of per-ray visibility mask.
-                                                         For a ray to test an instance for intersection, the bitwise
-                                                         AND of the ray's mask and the instance's mask must be non-zero.
-                                                         If not provided, rays default to mask 0xFFFF (intersect all instances).
-
-                    Returns:
-                        numpy.ndarray: A boolean array of shape (N,) where `True` indicates occlusion.
-               ))")
 
         .def("refit", &PyBVH::refit,
              R"((

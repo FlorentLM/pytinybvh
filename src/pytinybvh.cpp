@@ -18,6 +18,7 @@
 namespace py = pybind11;
 using namespace pybind11::literals;
 
+// -------------------------------- some internal helpers and things ---------------------------------
 
 // Helper to extract 3 floats from a Python object (list, tuple, numpy array)
 tinybvh::bvhvec3 py_obj_to_vec3(const py::object& obj) {
@@ -239,6 +240,8 @@ bool sphere_isoccluded_callback(const tinybvh::Ray& ray, const unsigned int prim
     return (t > 1e-6f && t < ray.hit.t);
 }
 
+// -------------------------------- internal structs ---------------------------------
+
 // pybind11 wrapper for tinybvh::Ray to be used in intersection queries
 struct PyRay {
     tinybvh::bvhvec3 origin;
@@ -256,12 +259,23 @@ struct HitRecord {
     float t, u, v;
 };
 
-// Enum for build quality selection
+// -------------------------------- these ones are exposed to python ---------------------------------
+
+// Enum for build quality selection exposed to Python
 enum class BuildQuality {
     Quick,
     Balanced,
     High
 };
+
+// Enum for Geometry type exposed to Python
+enum class GeometryType {
+    Triangles,
+    AABBs,
+    Spheres
+};
+
+// -------------------------------- main pytinybvh classes ---------------------------------
 
 // C++ class to wrap the tinybvh::BVH object and its associated data: this is the object held by the Python BVH class
 struct PyBVH {
@@ -1014,16 +1028,22 @@ struct PyBVH {
 
 };
 
-// =====================================================================================================================
+
+
+
+
+// =============================================== pybind11 module =====================================================
 
 
 PYBIND11_MODULE(pytinybvh, m) {
     m.doc() = "Python bindings for the tinybvh library";
 
+    // numpy dtypes for batched hit records, vec3, and BVH node
     PYBIND11_NUMPY_DTYPE(HitRecord, prim_id, inst_id, t, u, v);
     m.attr("hit_record_dtype") = py::dtype::of<HitRecord>();
 
     PYBIND11_NUMPY_DTYPE(tinybvh::bvhvec3, x, y, z);
+
     PYBIND11_NUMPY_DTYPE_EX(tinybvh::BVH::BVHNode, aabbMin, "aabb_min", leftFirst, "left_first", aabbMax, "aabb_max", triCount, "prim_count");
     m.attr("bvh_node_dtype") = py::dtype::of<tinybvh::BVH::BVHNode>();
 
@@ -1036,20 +1056,18 @@ PYBIND11_MODULE(pytinybvh, m) {
     PYBIND11_NUMPY_DTYPE(TLASInstance, transform, blas_id, mask);
     m.attr("instance_dtype") = py::dtype::of<TLASInstance>();
 
+    // Build quality and Geometry type structs
     py::enum_<BuildQuality>(m, "BuildQuality", "Enum for selecting BVH build quality.")
         .value("Quick", BuildQuality::Quick, "Fastest build, lower quality queries.")
         .value("Balanced", BuildQuality::Balanced, "Balanced build time and query performance (default).")
         .value("High", BuildQuality::High, "Slowest build (uses spatial splits), highest quality queries.");
 
-    py::class_<tinybvh::bvhvec3>(m, "vec3", "A 3D vector with float components.")
-        .def(py::init<float, float, float>(), "x"_a=0.f, "y"_a=0.f, "z"_a=0.f)
-        .def_readwrite("x", &tinybvh::bvhvec3::x, "X-component of the vector.")
-        .def_readwrite("y", &tinybvh::bvhvec3::y, "Y-component of the vector.")
-        .def_readwrite("z", &tinybvh::bvhvec3::z, "Z-component of the vector.")
-        .def("__repr__", [](const tinybvh::bvhvec3 &v) {
-            return "vec3(" + std::to_string(v.x) + ", " + std::to_string(v.y) + ", " + std::to_string(v.z) + ")";
-        });
+    py::enum_<GeometryType>(m, "GeometryType")
+        .value("Triangles", GeometryType::Triangles, "The BVH was built over a triangle mesh.")
+        .value("AABBs", GeometryType::AABBs, "The BVH was built over custom Axis-Aligned Bounding Boxes.")
+        .value("Spheres", GeometryType::Spheres, "The BVH was built over a point cloud with a radius (spheres).");
 
+    // Main Python classes
     py::class_<PyRay>(m, "Ray", "Represents a ray for intersection queries.")
 
         .def(py::init([](const py::object& origin_obj, const py::object& direction_obj, float t, uint32_t mask) {
@@ -1071,11 +1089,15 @@ PYBIND11_MODULE(pytinybvh, m) {
             "The direction vector of the ray (list, tuple, or numpy array).")
 
         .def_readwrite("t", &PyRay::t, "The maximum distance for intersection. Updated with hit distance.")
+
         .def_readwrite("mask", &PyRay::mask, "The visibility mask for the ray.")
 
         .def_readonly("u", &PyRay::u, "Barycentric u-coordinate for triangle hits, or the first texture coordinate for custom geometry like spheres and AABBs.")
+
         .def_readonly("v", &PyRay::v, "Barycentric v-coordinate for triangle hits, or the second texture coordinate for custom geometry like spheres and AABBs.")
+
         .def_readonly("prim_id", &PyRay::prim_id, "The ID of the primitive that was hit.")
+
         .def_readonly("inst_id", &PyRay::inst_id, "The ID of the instance that was hit.")
 
         .def("__repr__", [](const PyRay &r) {
@@ -1137,7 +1159,8 @@ PYBIND11_MODULE(pytinybvh, m) {
                     BVH: A new BVH instance.
             ))",
             // noconvert() to enforce direct memory access!
-            py::arg("vertices").noconvert(), py::arg("indices").noconvert(), py::arg("quality") = BuildQuality::Balanced)
+            py::arg("vertices").noconvert(), py::arg("indices").noconvert(),
+            py::arg("quality") = BuildQuality::Balanced)
 
         .def_static("from_aabbs", &PyBVH::from_aabbs,
             R"((
@@ -1511,6 +1534,11 @@ PYBIND11_MODULE(pytinybvh, m) {
                 std::string repr = "<pytinybvh.BVH (";
                 repr += std::to_string(self.bvh->triCount) + " primitives, ";
                 repr += std::to_string(self.bvh->usedNodes) + " nodes, ";
+                if (self.custom_type == PyBVH::CustomType::AABB) {
+                    repr += "Geometry: AABBs, ";
+                } else if (self.custom_type == PyBVH::CustomType::Sphere) {
+                    repr += "Geometry: Spheres, ";
+                }
                 if (self.bvh->isTLAS()) {
                     repr += "Type: TLAS, ";
                 } else {
@@ -1530,5 +1558,26 @@ PYBIND11_MODULE(pytinybvh, m) {
                 }
                 repr += ")>";
                 return repr;
-        });
+        })
+
+        .def_property_readonly("is_tlas", [](const PyBVH &self) {
+            return self.bvh ? self.bvh->isTLAS() : false;
+        }, "Returns True if the BVH is a Top-Level Acceleration Structure (TLAS).")
+
+        .def_property_readonly("is_blas", [](const PyBVH &self) {
+            return self.bvh ? self.bvh->isBLAS() : true; // an empty BVH is technically a BLAS
+        }, "Returns True if the BVH is a Bottom-Level Acceleration Structure (BLAS).")
+
+        .def_property_readonly("geometry_type", [](const PyBVH &self) {
+            switch (self.custom_type) {
+                case PyBVH::CustomType::AABB:   return GeometryType::AABBs;
+                case PyBVH::CustomType::Sphere: return GeometryType::Spheres;
+                default:                        return GeometryType::Triangles;
+            }
+        }, "The type of underlying geometry the BVH was built on.")
+
+        .def_property_readonly("is_compact", [](const PyBVH &self) {
+            // may_have_holes is true when it's *not* compact
+            return self.bvh ? !self.bvh->may_have_holes : true;
+        }, "Returns True if the BVH node and index arrays are contiguous in memory.");
 }

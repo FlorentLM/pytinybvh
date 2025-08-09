@@ -4,8 +4,11 @@ import numpy as np
 from typing import Optional, Union, List, Tuple, ClassVar
 from enum import IntEnum
 
+
 PathLike = Union[str, Path]
-"""A type hint for file paths that can be a string or a pathlib.Path object."""
+"""
+A type hint for file paths that can be a string or a pathlib.Path object.
+"""
 
 Vec3Like = Union[List[float], Tuple[float, float, float], np.ndarray]
 """
@@ -13,32 +16,41 @@ A type hint for objects that can be interpreted as a 3D vector,
 including lists, tuples, and NumPy arrays of 3 floats.
 """
 
-# A hint for the structured dtype of the BVH.nodes array.
-# bvh_node_dtype = np.dtype([
-#     ('aabb_min', ('<f4', (3,))),
-#     ('left_first', '<u4'),
-#     ('aabb_max', ('<f4', (3,))),
-#     ('prim_count', '<u4')
-# ])
 bvh_node_dtype: np.dtype
+"""
+A hint for the structured dtype of the BVH.nodes array.
 
-# A hint for the structured dtype of the intersect_batch return array.
-# hit_record_dtype = np.dtype([
-#     ('prim_id', '<u4'),
-#     ('inst_id', '<u4'),
-#     ('t', '<f4'),
-#     ('u', '<f4'),
-#     ('v', '<f4')
-# ])
+bvh_node_dtype = np.dtype([
+    ('aabb_min', ('<f4', (3,))),
+    ('left_first', '<u4'),
+    ('aabb_max', ('<f4', (3,))),
+    ('prim_count', '<u4')
+])
+"""
+
 hit_record_dtype: np.dtype
+"""
+A hint for the structured dtype of the intersect_batch return array.
 
-# A hint for the structured dtype of the TLAS instances array.
-# instance_dtype = np.dtype([
-#     ('transform', '<f4', (4, 4)),
-#     ('blas_id', '<u4'),
-#     ('mask', '<u4')
-# ])
+hit_record_dtype = np.dtype([
+    ('prim_id', '<u4'),
+    ('inst_id', '<u4'),
+    ('t', '<f4'),
+    ('u', '<f4'),
+    ('v', '<f4')
+])
+"""
+
 instance_dtype: np.dtype
+"""
+A hint for the structured dtype of the TLAS instances array.
+
+instance_dtype = np.dtype([
+    ('transform', '<f4', (4, 4)),
+    ('blas_id', '<u4'),
+    ('mask', '<u4')
+])
+"""
 
 
 class BuildQuality(IntEnum):
@@ -52,10 +64,22 @@ class BuildQuality(IntEnum):
     """Slowest build (uses spatial splits), highest quality queries."""
 
     def __int__(self) -> int: ...
-
     @property
     def name(self) -> str: ...
+    @property
+    def value(self) -> int: ...
 
+
+class GeometryType(IntEnum):
+    """Enum for the underlying geometry type of the BVH."""
+
+    Triangles: ClassVar[GeometryType]
+    AABBs: ClassVar[GeometryType]
+    Spheres: ClassVar[GeometryType]
+
+    def __int__(self) -> int: ...
+    @property
+    def name(self) -> str: ...
     @property
     def value(self) -> int: ...
 
@@ -449,6 +473,26 @@ class BVH:
     @property
     def quality(self) -> BuildQuality:
         """The build quality level used to construct the BVH."""
+        ...
+
+    @property
+    def is_tlas(self) -> bool:
+        """Returns True if the BVH is a Top-Level Acceleration Structure (TLAS)."""
+        ...
+
+    @property
+    def is_blas(self) -> bool:
+        """Returns True if the BVH is a Bottom-Level Acceleration Structure (BLAS)."""
+        ...
+
+    @property
+    def geometry_type(self) -> GeometryType:
+        """The type of underlying geometry the BVH was built on."""
+        ...
+
+    @property
+    def is_compact(self) -> bool:
+        """Returns True if the BVH node and index arrays are contiguous in memory."""
         ...
 
     @property

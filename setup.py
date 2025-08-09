@@ -1,6 +1,8 @@
 import sys
 import os
 import tempfile
+import subprocess
+import platform
 from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
 import pybind11
@@ -9,48 +11,63 @@ import pybind11
 class CppBuildExt(build_ext):
     def build_extensions(self):
 
+        # Determine compiler-specific flags
         if self.compiler.compiler_type == 'msvc':
-            compile_args = ['/std:c++20', '/O2']
+            compile_args = ['/std:c++20', '/O2', '/W3']
             link_args = []
-        else:  # assuming GCC or Clang
+        else:  # GCC or Clang
             compile_args = ['-std=c++20', '-O3', '-Wno-unused-variable']
             link_args = []
 
-        # Check for OpenMP support
+        # Platform-specific flags for OpenMP and AVX
+        current_platform = platform.system()
+        current_machine = platform.machine()
+
         if self._has_openmp_support():
             print("Compiler supports OpenMP. Building with parallelization enabled.")
-            if self.compiler.compiler_type == 'msvc':
+            if current_platform == "Windows":
                 compile_args.append('/openmp')
-            else:
+
+            elif current_platform == "Darwin":
+                compile_args.extend(['-Xpreprocessor', '-fopenmp'])
+                link_args.append('-lomp')  # Link against Homebrew's libomp
+
+            else:  # Linux
                 compile_args.append('-fopenmp')
                 link_args.append('-fopenmp')
         else:
             print("Compiler does not support OpenMP. Building in serial mode.")
 
-        use_avx2 = os.environ.get('PYTINYBVH_ENABLE_AVX2', '0') == '1'
-
-        if use_avx2:
-            print("AVX2 support requested via environment variable.")
+        # AVX
+        if current_machine in ('x86_64', 'AMD64'):
             if self._has_avx2_support():
                 print("Compiler supports AVX2. Building with AVX2 optimizations.")
-                if self.compiler.compiler_type == 'msvc':
+                if current_platform == "Windows":
                     compile_args.append('/arch:AVX2')
                 else:
                     compile_args.extend(['-mavx2', '-mfma'])
-            else:
-                print("WARNING: AVX2 support was requested, but the compiler does not support it. Building without AVX2.")
-        elif self._has_avx_support():
-            print("Compiler supports AVX. Building with AVX optimizations (for Intersect256RaysSSE).")
-            if self.compiler.compiler_type == 'msvc':
-                compile_args.append('/arch:AVX')
-            else:
-                compile_args.append('-mavx')
+            elif self._has_avx_support():
+                print("Compiler supports AVX. Building with AVX optimizations.")
+                if current_platform == "Windows":
+                    compile_args.append('/arch:AVX')
+                else:
+                    compile_args.append('-mavx')
         else:
-            print("Building without AVX/AVX2 optimizations.")
+            print(f"Machine is '{current_machine}', skipping AVX checks.")
 
         for ext in self.extensions:
-            ext.extra_compile_args = compile_args
-            ext.extra_link_args = link_args
+            ext.extra_compile_args.extend(compile_args)
+            ext.extra_link_args.extend(link_args)
+
+            # Add Homebrew libomp paths if on macOS
+            if current_platform == "Darwin":
+                try:
+                    brew_prefix = subprocess.check_output(['brew', '--prefix', 'libomp'], text=True).strip()
+                    ext.include_dirs.append(os.path.join(brew_prefix, 'include'))
+                    ext.library_dirs.append(os.path.join(brew_prefix, 'lib'))
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    # This case is handled by _has_openmp_support, but we can pass here
+                    pass
 
         super().build_extensions()
 
@@ -63,7 +80,15 @@ class CppBuildExt(build_ext):
         obj_path = src_path.replace('.cpp', '.obj' if sys.platform == 'win32' else '.o')
 
         try:
-            self.compiler.compile([src_path], extra_postargs=compile_args)
+            lib_dirs = []
+            if platform.system() == "Darwin":
+                try:
+                    brew_prefix = subprocess.check_output(['brew', '--prefix', 'libomp'], text=True).strip()
+                    lib_dirs.append(os.path.join(brew_prefix, 'lib'))
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    pass
+
+            self.compiler.compile([src_path], extra_postargs=compile_args, library_dirs=lib_dirs)
             return True
         except Exception:
             return False
@@ -83,10 +108,14 @@ class CppBuildExt(build_ext):
             return 0;
         }
         """
-        return self._compile_test_program(
-            cpp_code,
-            ['/openmp'] if self.compiler.compiler_type == 'msvc' else ['-fopenmp']
-        )
+        if self.compiler.compiler_type == 'msvc':
+            test_flags = ['/openmp']
+        elif platform.system() == "Darwin":
+            test_flags = ['-Xpreprocessor', '-fopenmp']
+        else:  # Linux GCC/Clang
+            test_flags = ['-fopenmp']
+
+        return self._compile_test_program(cpp_code, test_flags)
 
     def _has_avx_support(self):
         """Check if the compiler supports AVX"""

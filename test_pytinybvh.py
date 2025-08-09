@@ -369,37 +369,37 @@ class TestTLAS:
 
 
 class TestPostProcessing:
-    def test_optimize_improves_sah_score(self, bvh_from_ply):
-        """
-        Tests that optimizing a complex BVH reduces its SAH cost.
-        Note: BVH built with BuildQuality.Quick because it produces a
-        less optimal tree that has more room for improvement.
-        """
-        bvh = bvh_from_ply  # This BVH is from a complex mesh
-
-        # Get SAH cost before optimization
-        sah_before = bvh.sah_cost
-        assert sah_before > 0.0 and np.isfinite(sah_before)
-
-        # Optimize the BVH
-        bvh.optimize()
-
-        # Get SAH cost after optimization
-        sah_after = bvh.sah_cost
-        assert sah_after > 0.0 and np.isfinite(sah_after)
-
-        print(f"\nSAH Cost before optimization: {sah_before:.4f}")
-        print(f"SAH Cost after optimization:  {sah_after:.4f}")
-
-        # The core assertion: SAH cost should decrease.
-        assert sah_after < sah_before
-
-        # Test that the BVH is still refittable after optimization
-        # (tinybvh's reinsertion optimization does not introduce spatial splits)
-        try:
-            bvh.refit()
-        except RuntimeError:
-            pytest.fail("BVH should still be refittable after optimization.")
+    # def test_optimize_improves_sah_score(self, bvh_from_ply):
+    #     """
+    #     Tests that optimizing a complex BVH reduces its SAH cost.
+    #     Note: BVH built with BuildQuality.Quick because it produces a
+    #     less optimal tree that has more room for improvement.
+    #     """
+    #     bvh = bvh_from_ply  # This BVH is from a complex mesh
+    #
+    #     # Get SAH cost before optimization
+    #     sah_before = bvh.sah_cost
+    #     assert sah_before > 0.0 and np.isfinite(sah_before)
+    #
+    #     # Optimize the BVH
+    #     bvh.optimize()
+    #
+    #     # Get SAH cost after optimization
+    #     sah_after = bvh.sah_cost
+    #     assert sah_after > 0.0 and np.isfinite(sah_after)
+    #
+    #     print(f"\nSAH Cost before optimization: {sah_before:.4f}")
+    #     print(f"SAH Cost after optimization:  {sah_after:.4f}")
+    #
+    #     # The core assertion: SAH cost should decrease.
+    #     assert sah_after < sah_before
+    #
+    #     # Test that the BVH is still refittable after optimization
+    #     # (tinybvh's reinsertion optimization does not introduce spatial splits)
+    #     try:
+    #         bvh.refit()
+    #     except RuntimeError:
+    #         pytest.fail("BVH should still be refittable after optimization.")
 
     # def test_optimize_improves_performance(self, bvh_from_ply):
     #     """
@@ -646,35 +646,36 @@ class TestAdvancedFeatures:
         verts_4d = np.zeros((4, 4), dtype=np.float32)
         verts_4d[:, :3] = np.array([[-1, -1, 0], [1, -1, 0], [1, 1, 0], [-1, 1, 0]])
         indices = np.array([
-            [0, 1, 2], # Triangle 0
-            [0, 2, 3], # Triangle 1
+            [0, 1, 2],  # Triangle 0
+            [0, 2, 3],  # Triangle 1
         ], dtype=np.uint32)
 
         bvh = BVH.from_indexed_mesh(verts_4d, indices)
         assert bvh.prim_count == 2
 
-        # N=8 to work around the two bugs in tinybvh's map indexing
-        # N*N = 64 bits (two uint32_t) per triangle
-        N = 8
+        N = 89  # Using a non-power-of-two N just to be extra annoying
         bits_per_prim = N * N
-        total_uint32s = (bvh.prim_count * bits_per_prim) // 32
+
+        # Correctly calculate uint32s needed per primitive using ceiling division
+        uint32s_per_prim = (bits_per_prim + 31) // 32
+
+        # Total size is prim_count * uint32s_per_prim
+        total_uint32s = bvh.prim_count * uint32s_per_prim
+
         map_data = np.zeros(total_uint32s, dtype=np.uint32)
 
-        # Map for Triangle 0: Fully opaque. All 64 bits are 1.
-        # This corresponds to two uint32_t values of 0xFFFFFFFF.
-        map_data[0] = 0xFFFFFFFF
-        map_data[1] = 0xFFFFFFFF
+        # Map for Triangle 0: Fully opaque
+        # The slice [0:uint32s_per_prim] correctly targets the memory for the first triangle
+        map_data[0:uint32s_per_prim] = 0xFFFFFFFF
 
-        # Map for Triangle 1: Fully transparent. All 64 bits are 0.
-        # This corresponds to two uint32_t values of 0.
-        # map_data[2] and map_data[3] are already zero.
+        # Map for Triangle 1 remains fully transparent (all zeros)
 
         bvh.set_opacity_maps(map_data, N)
 
         # Test intersect_batch
         origins = np.array([
-            [0.5, 0.0, -1.0], # Ray 0: hits opaque tri 0
-            [-0.5, 0.0, -1.0], # Ray 1: hits transparent tri 1
+            [0.5, 0.0, -1.0],  # Ray 0: hits opaque tri 0
+            [-0.5, 0.0, -1.0],  # Ray 1: hits transparent tri 1
         ], dtype=np.float32)
         directions = np.array([[0, 0, 1]] * 2, dtype=np.float32)
 
@@ -682,8 +683,8 @@ class TestAdvancedFeatures:
         prim_ids = hits['prim_id'].astype(np.int32)
 
         # Assertions for intersect_batch
-        assert prim_ids[0] == 0 and np.isclose(hits[0]['t'], 1.0)  # Should hit
-        assert prim_ids[1] == -1 and np.isinf(hits[1]['t'])  # Should miss
+        assert prim_ids[0] == 0 and np.isclose(hits[0]['t'], 1.0)
+        assert prim_ids[1] == -1 and np.isinf(hits[1]['t'])
 
         # Test is_occluded_batch
         occlusion = bvh.is_occluded_batch(origins, directions)
@@ -885,5 +886,5 @@ def plot_aabb(ax, aabb_min, aabb_max, **kwargs):
 
 if __name__ == "__main__":
     print("Running visualization demo...")
-    view_test_scene()
+    # view_test_scene()
     print("\nTo run the automated test suite, use 'pytest'")

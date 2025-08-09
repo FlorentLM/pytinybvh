@@ -374,14 +374,10 @@ Immediate priorities:
 
 ## Remarks
 
-### A Note on concurrency and custom geometry
+### A Note on performance and concurrency (Update!)
 
-While `intersect_batch` and `is_occluded_batch` are highly parallel for standard triangle meshes, they currently operate in a single-threaded (serial) mode for BVHs created from custom geometry (`from_aabbs` and `from_points`).
-
-This is a limitation related to the underlying C++ callback mechanism. To provide the geometry data (like AABB or sphere positions) to the intersection functions during traversal, `pytinybvh` uses `thread_local` storage. This is fine for handling data for a single thread, but it prevents multiple threads from safely processing different batches of custom geometry simultaneously.
-
-The long-term solution would be for `tinybvh` to support passing a `void* userdata` pointer through its callbacks, to allow re-entrant thread-safe functions.
-
+-   **Multi-Core processing:** The batch intersection methods (`intersect_batch` and `is_occluded_batch`) are now fully parallelized for _all_ supported geometry types: triangles, custom AABBs, and custom spheres.
+-   **SIMD optimizations:** This is still only for standard triangle meshes, but such case `intersect_batch` gains an additional speedup by using AVX SIMD instructions to process rays in large packets, if your CPU and build configuration support it.
 
 ## Acknowledgements
 

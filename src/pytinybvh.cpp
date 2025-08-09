@@ -38,28 +38,52 @@ tinybvh::bvhvec3 py_obj_to_vec3(const py::object& obj) {
     throw std::runtime_error("Input must be a list, tuple, or numpy array of 3 floats.");
 }
 
+// Context struct to hold pointers to geometry data for custom callbacks
+struct CustomGeometryContext {
+    // For AABBs
+    const float* aabbs_ptr = nullptr;
+    const float* inv_extents_ptr = nullptr;
 
-// thread_local pointer to pass the AABB data to the C-style callbacks
-thread_local const float* g_aabbs_ptr = nullptr;
-thread_local const float* g_points_ptr = nullptr;
-thread_local float g_sphere_radius = 0.0f;
-thread_local const float* g_inv_extents_ptr = nullptr;
+    // For Spheres
+    const float* points_ptr = nullptr;
+    float sphere_radius = 0.0f;
+};
+
+// This thread_local pointer is only for the duration of the BVH build process for custom geometry
+thread_local const float* g_build_aabbs_ptr = nullptr;
+
+// RAII helper to safely set and clear a thread_local pointer during a scoped operation
+class TlocalPointerGuard {
+public:
+    TlocalPointerGuard(const float** tlocal_ptr, const float* data_ptr)
+        : ptr_to_tlocal(tlocal_ptr) {
+        *ptr_to_tlocal = data_ptr;
+    }
+
+    ~TlocalPointerGuard() {
+        *ptr_to_tlocal = nullptr;
+    }
+
+private:
+    const float** ptr_to_tlocal;
+};
 
 // C-style callback for building from AABBs
 void aabb_build_callback(const unsigned int i, tinybvh::bvhvec3& bmin, tinybvh::bvhvec3& bmax) {
-    if (!g_aabbs_ptr) throw std::runtime_error("Internal error: AABB data pointer is null in build callback.");
+    if (!g_build_aabbs_ptr) throw std::runtime_error("Internal error: AABB data pointer is null in build callback.");
     const size_t offset = i * 6; // 2 vectors * 3 floats
-    bmin.x = g_aabbs_ptr[offset + 0]; bmin.y = g_aabbs_ptr[offset + 1]; bmin.z = g_aabbs_ptr[offset + 2];
-    bmax.x = g_aabbs_ptr[offset + 3]; bmax.y = g_aabbs_ptr[offset + 4]; bmax.z = g_aabbs_ptr[offset + 5];
+    bmin.x = g_build_aabbs_ptr[offset + 0]; bmin.y = g_build_aabbs_ptr[offset + 1]; bmin.z = g_build_aabbs_ptr[offset + 2];
+    bmax.x = g_build_aabbs_ptr[offset + 3]; bmax.y = g_build_aabbs_ptr[offset + 4]; bmax.z = g_build_aabbs_ptr[offset + 5];
 }
 
 // C-style callback for intersecting AABBs
 bool aabb_intersect_callback(tinybvh::Ray& ray, const unsigned int prim_id) {
-    if (!g_aabbs_ptr) throw std::runtime_error("Internal error: AABB data pointer is null in intersect callback.");
+    if (!ray.hit.auxData) throw std::runtime_error("Internal error: Ray context is null in AABB intersect callback.");
+    auto* context = static_cast<const CustomGeometryContext*>(ray.hit.auxData);
 
     const size_t offset = prim_id * 6;
-    const tinybvh::bvhvec3 bmin = {g_aabbs_ptr[offset], g_aabbs_ptr[offset + 1], g_aabbs_ptr[offset + 2]};
-    const tinybvh::bvhvec3 bmax = {g_aabbs_ptr[offset + 3], g_aabbs_ptr[offset + 4], g_aabbs_ptr[offset + 5]};
+    const tinybvh::bvhvec3 bmin = {context->aabbs_ptr[offset], context->aabbs_ptr[offset + 1], context->aabbs_ptr[offset + 2]};
+    const tinybvh::bvhvec3 bmax = {context->aabbs_ptr[offset + 3], context->aabbs_ptr[offset + 4], context->aabbs_ptr[offset + 5]};
 
     float t = tinybvh::tinybvh_intersect_aabb(ray, bmin, bmax);
 
@@ -70,9 +94,9 @@ bool aabb_intersect_callback(tinybvh::Ray& ray, const unsigned int prim_id) {
         // Calculate UV coordinates on the hit face
         const tinybvh::bvhvec3 hit_point = ray.O + ray.D * t;
 
-        // Use pre-computed reciprocal extent
+        // Use pre-computed reciprocal extent from the context
         const size_t inv_offset = prim_id * 3;
-        const tinybvh::bvhvec3 inv_extent = {g_inv_extents_ptr[inv_offset], g_inv_extents_ptr[inv_offset + 1], g_inv_extents_ptr[inv_offset + 2]};
+        const tinybvh::bvhvec3 inv_extent = {context->inv_extents_ptr[inv_offset], context->inv_extents_ptr[inv_offset + 1], context->inv_extents_ptr[inv_offset + 2]};
 
         const float dx0 = std::abs(hit_point.x - bmin.x);
         const float dx1 = std::abs(hit_point.x - bmax.x);
@@ -124,11 +148,12 @@ bool aabb_intersect_callback(tinybvh::Ray& ray, const unsigned int prim_id) {
 
 // C-style callback for occlusion testing with AABBs
 bool aabb_isoccluded_callback(const tinybvh::Ray& ray, const unsigned int prim_id) {
-    if (!g_aabbs_ptr) throw std::runtime_error("Internal error: AABB data pointer is null in occlusion callback.");
+    if (!ray.hit.auxData) throw std::runtime_error("Internal error: Ray context is null in AABB occlusion callback.");
+    auto* context = static_cast<const CustomGeometryContext*>(ray.hit.auxData);
 
     const size_t offset = prim_id * 6;
-    const tinybvh::bvhvec3 bmin = {g_aabbs_ptr[offset], g_aabbs_ptr[offset + 1], g_aabbs_ptr[offset + 2]};
-    const tinybvh::bvhvec3 bmax = {g_aabbs_ptr[offset + 3], g_aabbs_ptr[offset + 4], g_aabbs_ptr[offset + 5]};
+    const tinybvh::bvhvec3 bmin = {context->aabbs_ptr[offset], context->aabbs_ptr[offset + 1], context->aabbs_ptr[offset + 2]};
+    const tinybvh::bvhvec3 bmax = {context->aabbs_ptr[offset + 3], context->aabbs_ptr[offset + 4], context->aabbs_ptr[offset + 5]};
 
     // slab test
     float tx1 = (bmin.x - ray.O.x) * ray.rD.x, tx2 = (bmax.x - ray.O.x) * ray.rD.x;
@@ -148,7 +173,9 @@ bool aabb_isoccluded_callback(const tinybvh::Ray& ray, const unsigned int prim_i
 
 // C-style callback for ray-sphere intersection
 bool sphere_intersect_callback(tinybvh::Ray& ray, const unsigned int prim_id) {
-    if (!g_points_ptr) throw std::runtime_error("Internal error: Sphere data pointer is null.");
+    if (!ray.hit.auxData) throw std::runtime_error("Internal error: Ray context is null in sphere intersect callback.");
+
+    auto* context = static_cast<const CustomGeometryContext*>(ray.hit.auxData);
 
     // Pre-computed reciprocals
     constexpr float PI = 3.1415926535f;
@@ -157,13 +184,14 @@ bool sphere_intersect_callback(tinybvh::Ray& ray, const unsigned int prim_id) {
 
     // Get sphere center
     const size_t offset = prim_id * 3;
-    const tinybvh::bvhvec3 center = {g_points_ptr[offset], g_points_ptr[offset + 1], g_points_ptr[offset + 2]};
+    const tinybvh::bvhvec3 center = {context->points_ptr[offset], context->points_ptr[offset + 1], context->points_ptr[offset + 2]};
+    const float radius_sq = context->sphere_radius * context->sphere_radius;
 
     // Ray-sphere intersection
     const tinybvh::bvhvec3 oc = ray.O - center;
     const float a = tinybvh_dot(ray.D, ray.D);
     const float b = 2.0f * tinybvh_dot(oc, ray.D);
-    const float c = tinybvh_dot(oc, oc) - g_sphere_radius * g_sphere_radius;
+    const float c = tinybvh_dot(oc, oc) - radius_sq;
     const float discriminant = b * b - 4 * a * c;
 
     if (discriminant < 0) {
@@ -190,15 +218,19 @@ bool sphere_intersect_callback(tinybvh::Ray& ray, const unsigned int prim_id) {
 
 // C-style callback for occlusion testing with spheres
 bool sphere_isoccluded_callback(const tinybvh::Ray& ray, const unsigned int prim_id) {
-    if (!g_points_ptr) throw std::runtime_error("Internal error: Sphere data pointer is null.");
+    if (!ray.hit.auxData) throw std::runtime_error("Internal error: Ray context is null in sphere occlusion callback.");
 
+    auto* context = static_cast<const CustomGeometryContext*>(ray.hit.auxData);
+
+    // Get sphere center
     const size_t offset = prim_id * 3;
-    const tinybvh::bvhvec3 center = {g_points_ptr[offset], g_points_ptr[offset + 1], g_points_ptr[offset + 2]};
+    const tinybvh::bvhvec3 center = {context->points_ptr[offset], context->points_ptr[offset + 1], context->points_ptr[offset + 2]};
+    const float radius_sq = context->sphere_radius * context->sphere_radius;
 
     const tinybvh::bvhvec3 oc = ray.O - center;
     const float a = tinybvh::tinybvh_dot(ray.D, ray.D);
     const float b = 2.0f * tinybvh::tinybvh_dot(oc, ray.D);
-    const float c = tinybvh::tinybvh_dot(oc, oc) - g_sphere_radius * g_sphere_radius;
+    const float c = tinybvh::tinybvh_dot(oc, oc) - radius_sq;
     const float discriminant = b * b - 4 * a * c;
 
     if (discriminant < 0) return false;
@@ -375,30 +407,17 @@ struct PyBVH {
         // reference to reciprocals array to keep it alive
         wrapper->source_geometry_refs.append(inv_extents_np);
 
-        // Use the original AABBs for the build callback
-        g_aabbs_ptr = aabbs_ptr;
+        // the RAII guard manages the thread_local pointer for the build
+        TlocalPointerGuard build_guard(&g_build_aabbs_ptr, aabbs_ptr);
 
-        try {
-            // BuildQuick and BuildHQ don't support custom AABB getters, so default to Balanced
-            switch (quality) {
-                case BuildQuality::High:
-                case BuildQuality::Quick:
-                case BuildQuality::Balanced:
-                default:
-                     // Pass the C-style function pointer, not the lambda
-                     wrapper->bvh->Build(aabb_build_callback, prim_count);
-                     break;
-            }
-        } catch (...) {
-            // ensure global pointer is cleared even if an exception occurs
-            g_aabbs_ptr = nullptr;
-            throw;
-        }
+        // Build is now safe
 
-        // clear the pointer after the build is complete
-        g_aabbs_ptr = nullptr;
+        // BuildQuick and BuildHQ don't support custom AABB getters, so default to Balanced quality
+        wrapper->bvh->Build(aabb_build_callback, prim_count);
 
         return wrapper;
+
+        // `build_guard` goes out of scope, g_build_aabbs_ptr is set back to nullptr
     }
 
     // Convenience builders
@@ -499,14 +518,10 @@ struct PyBVH {
              aabbs_ptr[a_off + 5] = points_ptr[p_off + 2] + radius;
         }
 
-        g_aabbs_ptr = aabbs_ptr; // use the AABB ptr for the build
-        try {
-            wrapper->bvh->Build(aabb_build_callback, static_cast<uint32_t>(num_points));
-        } catch (...) {
-            g_aabbs_ptr = nullptr;
-            throw;
-        }
-        g_aabbs_ptr = nullptr;
+        // Even though this is for spheres, the build process uses AABBs
+        TlocalPointerGuard build_guard(&g_build_aabbs_ptr, aabbs_ptr);
+
+        wrapper->bvh->Build(aabb_build_callback, static_cast<uint32_t>(num_points));
 
         return wrapper;
     }
@@ -519,29 +534,22 @@ struct PyBVH {
             return INFINITY;
         }
 
-        if (custom_type == PyBVH::CustomType::AABB) {
-
-            auto aabbs_np = py::cast<py::array_t<float>>(source_geometry_refs[0]);
-            auto inv_extents_np = py::cast<py::array_t<float>>(source_geometry_refs[1]);
-            g_aabbs_ptr = aabbs_np.data();
-            g_inv_extents_ptr = inv_extents_np.data();
-
-        } else if (custom_type == PyBVH::CustomType::Sphere) {
-
-            auto points_np = py::cast<py::array_t<float>>(source_geometry_refs[0]);
-            g_points_ptr = points_np.data();
-            g_sphere_radius = sphere_radius;
-        }
-
         tinybvh::Ray ray(py_ray.origin, py_ray.direction, py_ray.t);
         ray.mask = py_ray.mask;
 
-        bvh->Intersect(ray);
+        // Create and populate context locally for this single call
+        CustomGeometryContext context;
+        if (custom_type == CustomType::AABB) {
+            context.aabbs_ptr = py::cast<py::array_t<float>>(source_geometry_refs[0]).data();
+            context.inv_extents_ptr = py::cast<py::array_t<float>>(source_geometry_refs[1]).data();
+            ray.hit.auxData = &context;
+        } else if (custom_type == CustomType::Sphere) {
+            context.points_ptr = py::cast<py::array_t<float>>(source_geometry_refs[0]).data();
+            context.sphere_radius = sphere_radius;
+            ray.hit.auxData = &context;
+        }
 
-        // unset pointers
-        g_aabbs_ptr = nullptr;
-        g_points_ptr = nullptr;
-        g_inv_extents_ptr = nullptr;
+        bvh->Intersect(ray);
 
         if (ray.hit.t < py_ray.t) {
             // update python Ray with hit information
@@ -611,78 +619,77 @@ struct PyBVH {
         // Prepare output and Ray vector
         std::vector<tinybvh::Ray> rays(n_rays);
 
-        // Decide which path to take before releasing the GIL
-        bool use_parallel = (custom_type == PyBVH::CustomType::None);
+        // This single context object' lifetime covers the entire function call
+        CustomGeometryContext context;
 
-        const float* aabbs_data_ptr = nullptr;
-        const float* inv_extents_data_ptr = nullptr;
-        const float* points_data_ptr = nullptr;
-        float sphere_rad = 0.0f;
-
-        // If using serial path, get raw C++ pointers while we still have the GIL
-        if (!use_parallel) {
-            if (custom_type == PyBVH::CustomType::AABB) {
-                aabbs_data_ptr = py::cast<py::array_t<float>>(source_geometry_refs[0]).data();
-                inv_extents_data_ptr = py::cast<py::array_t<float>>(source_geometry_refs[1]).data();
-            } else if (custom_type == PyBVH::CustomType::Sphere) {
-                points_data_ptr = py::cast<py::array_t<float>>(source_geometry_refs[0]).data();
-                sphere_rad = sphere_radius;
-            }
+        // Populate the context *before* releasing the GIL, as accessing numpy arrays is a Python API call
+        if (custom_type == CustomType::AABB) {
+            context.aabbs_ptr = py::cast<py::array_t<float>>(source_geometry_refs[0]).data();
+            context.inv_extents_ptr = py::cast<py::array_t<float>>(source_geometry_refs[1]).data();
+        } else if (custom_type == CustomType::Sphere) {
+            context.points_ptr = py::cast<py::array_t<float>>(source_geometry_refs[0]).data();
+            context.sphere_radius = sphere_radius;
         }
 
         {
-            py::gil_scoped_release release;     // Release GIL for C++ threading
+            py::gil_scoped_release release; // Release GIL for C++ threading
 
             const auto* origins_ptr = origins_np.data();
             const auto* directions_ptr = directions_np.data();
 
-            // initialize rays in parallel (this is GIL-safe)
+            // Initialize all rays first. This is thread-safe so dan be done in parallel.
             #ifdef _OPENMP
                 #pragma omp parallel for schedule(static)
             #endif
             for (py::ssize_t i = 0; i < n_rays; ++i) {
                 const size_t i3 = i * 3;
                 const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
-                const uint32_t mask_init = masks_ptr ? masks_ptr[i] : 0xFFFF; // default to all
-
+                const uint32_t mask_init = masks_ptr ? masks_ptr[i] : 0xFFFF;
                 rays[i] = tinybvh::Ray(
                    {origins_ptr[i3], origins_ptr[i3+1], origins_ptr[i3+2]},
                    {directions_ptr[i3], directions_ptr[i3+1], directions_ptr[i3+2]},
                    t_init,
                    mask_init
                );
+               // Attach context if using custom geometry
+               if (custom_type != CustomType::None) {
+                   rays[i].hit.auxData = &context;
+               }
             }
 
-            if (use_parallel) {
-                // Fast path: Standard triangles, using Intersect256Rays
+            if (custom_type == CustomType::None) {
+                // Fast path: Standard triangles. Use packet intersection.
                 #ifdef _OPENMP
+                    // Process rays in chunks of 256 in parallel
+                    // dynamic schedule is good here as some chunks may be faster than others
                     #pragma omp parallel for schedule(dynamic)
                 #endif
                 for (py::ssize_t i = 0; i < n_rays; i += 256) {
                     const py::ssize_t end = std::min(i + 256, n_rays);
                     const py::ssize_t count = end - i;
+
                     if (count == 256) {
+                        // full packet, use optimized function
                         #ifdef BVH_USEAVX
                             bvh->Intersect256RaysSSE(&rays[i]);
                         #else
                             bvh->Intersect256Rays(&rays[i]);
                         #endif
                     } else {
-                        for (py::ssize_t j = i; j < end; ++j) bvh->Intersect(rays[j]); }
+                        // last, partial packet. Process rays individually.
+                        for (py::ssize_t j = i; j < end; ++j) {
+                            bvh->Intersect(rays[j]);
+                        }
+                    }
                 }
             } else {
-                // Slow path for custom geometry (process serially to handle thread_local data)
-                g_aabbs_ptr = aabbs_data_ptr; g_inv_extents_ptr = inv_extents_data_ptr;
-                g_points_ptr = points_data_ptr; g_sphere_radius = sphere_rad;
-
+                // Parallel path: Custom geometry. Use single-ray intersection in parallel.
+                #ifdef _OPENMP
+                    #pragma omp parallel for schedule(dynamic)
+                #endif
                 for (py::ssize_t i = 0; i < n_rays; ++i) {
                     bvh->Intersect(rays[i]);
                 }
-
-                // unset global pointers
-                g_aabbs_ptr = nullptr;
-                g_inv_extents_ptr = nullptr;
-                g_points_ptr = nullptr;
             }
         }   // GIL re-acquired here
 
@@ -709,15 +716,6 @@ struct PyBVH {
             return false; // Nothing to occlude
         }
 
-        if (custom_type == PyBVH::CustomType::AABB) {
-            g_aabbs_ptr = py::cast<py::array_t<float>>(source_geometry_refs[0]).data();
-
-        } else if (custom_type == PyBVH::CustomType::Sphere) {
-
-            g_points_ptr = py::cast<py::array_t<float>>(source_geometry_refs[0]).data();
-            g_sphere_radius = sphere_radius;
-        }
-
         tinybvh::Ray ray(
             py_ray.origin,
             py_ray.direction,
@@ -725,11 +723,19 @@ struct PyBVH {
 
         ray.mask = py_ray.mask;
 
-        bool result = bvh->IsOccluded(ray);
+        // Create and populate context locally for this single call
+        CustomGeometryContext context;
+        if (custom_type == CustomType::AABB) {
+            context.aabbs_ptr = py::cast<py::array_t<float>>(source_geometry_refs[0]).data();
+            context.inv_extents_ptr = py::cast<py::array_t<float>>(source_geometry_refs[1]).data();
+            ray.hit.auxData = &context;
+        } else if (custom_type == CustomType::Sphere) {
+            context.points_ptr = py::cast<py::array_t<float>>(source_geometry_refs[0]).data();
+            context.sphere_radius = sphere_radius;
+            ray.hit.auxData = &context;
+        }
 
-        // unset pointers
-        g_aabbs_ptr = nullptr;
-        g_points_ptr = nullptr;
+        bool result = bvh->IsOccluded(ray);
 
         return result;
     }
@@ -781,70 +787,42 @@ struct PyBVH {
             masks_ptr = masks_np.data();
         }
 
-        // Decide which path to take before releasing the GIL.
-        bool use_parallel = (custom_type == PyBVH::CustomType::None);
-
-        const float* aabbs_data_ptr = nullptr;
-        const float* points_data_ptr = nullptr;
-        float sphere_rad = 0.0f;
-
-        // If using serial path, get raw C++ pointers while we still have the GIL.
-        if (!use_parallel) {
-            if (custom_type == PyBVH::CustomType::AABB) {
-                aabbs_data_ptr = py::cast<py::array_t<float>>(source_geometry_refs[0]).data();
-            } else if (custom_type == PyBVH::CustomType::Sphere) {
-                points_data_ptr = py::cast<py::array_t<float>>(source_geometry_refs[0]).data();
-                sphere_rad = sphere_radius;
-            }
+        // Create the context for custom geometry
+        CustomGeometryContext context;
+        if (custom_type == CustomType::AABB) {
+            context.aabbs_ptr = py::cast<py::array_t<float>>(source_geometry_refs[0]).data();
+        } else if (custom_type == CustomType::Sphere) {
+            context.points_ptr = py::cast<py::array_t<float>>(source_geometry_refs[0]).data();
+            context.sphere_radius = sphere_radius;
         }
 
         {
             py::gil_scoped_release release; // Release GIL for C++ threading
 
+
             const auto* origins_ptr = origins_np.data();
             const auto* directions_ptr = directions_np.data();
 
-            if (use_parallel) {
-                // Fast path: Standard triangles, parallelized with OpenMP
-                #ifdef _OPENMP
-                    #pragma omp parallel for schedule(dynamic)
-                #endif
-                for (py::ssize_t i = 0; i < n_rays; ++i) {
-                    const size_t i3 = i * 3;
-                    const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
-                    const uint32_t mask_init = masks_ptr ? masks_ptr[i] : 0xFFFF;
+            // A simple parallel loop is the optimal approach here for all geometry types
+            #ifdef _OPENMP
+                #pragma omp parallel for schedule(dynamic)
+            #endif
+            for (py::ssize_t i = 0; i < n_rays; ++i) {
+                const size_t i3 = i * 3;
+                const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
+                const uint32_t mask_init = masks_ptr ? masks_ptr[i] : 0xFFFF;
+                tinybvh::Ray ray(
+                    {origins_ptr[i3], origins_ptr[i3+1], origins_ptr[i3+2]},
+                    {directions_ptr[i3], directions_ptr[i3+1], directions_ptr[i3+2]},
+                    t_init,
+                    mask_init
+                );
 
-                    tinybvh::Ray ray(
-                        {origins_ptr[i3], origins_ptr[i3+1], origins_ptr[i3+2]},
-                        {directions_ptr[i3], directions_ptr[i3+1], directions_ptr[i3+2]},
-                        t_init,
-                        mask_init
-                    );
-                    result_ptr[i] = bvh->IsOccluded(ray);
-                }
-            } else {
-                // Slow path: Custom geometry, processed serially to safely use thread_local pointers.
-                g_aabbs_ptr = aabbs_data_ptr;
-                g_points_ptr = points_data_ptr;
-                g_sphere_radius = sphere_rad;
-
-                for (py::ssize_t i = 0; i < n_rays; ++i) {
-                    const size_t i3 = i * 3;
-                    const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
-                    const uint32_t mask_init = masks_ptr ? masks_ptr[i] : 0xFFFF;
-
-                    tinybvh::Ray ray(
-                        {origins_ptr[i3], origins_ptr[i3+1], origins_ptr[i3+2]},
-                        {directions_ptr[i3], directions_ptr[i3+1], directions_ptr[i3+2]},
-                        t_init,
-                        mask_init
-                    );
-                    result_ptr[i] = bvh->IsOccluded(ray);
+                if (custom_type != CustomType::None) {
+                    ray.hit.auxData = &context;
                 }
 
-                // unset pointers now that the loop is done.
-                g_aabbs_ptr = nullptr;
-                g_points_ptr = nullptr;
+                result_ptr[i] = bvh->IsOccluded(ray);
             }
         } // GIL re-acquired
 
@@ -1235,10 +1213,9 @@ PYBIND11_MODULE(pytinybvh, m) {
            R"((
                 Performs intersection queries for a batch of rays.
 
-                This method leverages both multi-core processing (via OpenMP) and SIMD instructions
-                (via tinybvh's Intersect256Rays functions) for maximum throughput on standard
-                triangle meshes. For custom geometry like AABBs or spheres, it falls back to a
-                serial implementation.
+                This method is highly parallelized using multi-core processing for all geometry types
+                (triangles, AABBs, spheres). For standard triangle meshes, it also leverages SIMD
+                instructions where available for maximum throughput.
 
                 Args:
                     origins (numpy.ndarray): A (N, 3) float array of ray origins.
@@ -1277,9 +1254,7 @@ PYBIND11_MODULE(pytinybvh, m) {
            R"((
                 Performs occlusion queries for a batch of rays, parallelized for performance.
 
-                This method leverages multi-core processing (via OpenMP) for maximum throughput on
-                standard triangle meshes. For custom geometry, it falls back to a serial implementation
-                to ensure thread-safety.
+                This method uses multi-core parallelization for all geometry types (triangles, AABBs, spheres).
 
                 Args:
                     origins (numpy.ndarray): A (N, 3) float array of ray origins.

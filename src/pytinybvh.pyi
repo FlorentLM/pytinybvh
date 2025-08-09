@@ -255,10 +255,9 @@ class BVH:
         """
         Performs intersection queries for a batch of rays.
 
-        This method leverages both multi-core processing (via OpenMP) and SIMD instructions
-        (via tinybvh's Intersect256Rays functions) for maximum throughput on standard
-        triangle meshes. For custom geometry like AABBs or spheres, it falls back to a
-        serial implementation.
+        This method is highly parallelized using multi-core processing for all geometry types
+        (triangles, AABBs, spheres). For standard triangle meshes, it also leverages SIMD
+        instructions where available for maximum throughput.
 
         Args:
             origins (numpy.ndarray): A (N, 3) float array of ray origins.
@@ -298,7 +297,7 @@ class BVH:
         """
         Performs occlusion queries for a batch of rays, parallelized for performance.
 
-        This method leverages multi-core processing (via OpenMP) for maximum throughput.
+        This method uses multi-core parallelization for all geometry types (triangles, AABBs, spheres).
 
         Args:
             origins (numpy.ndarray): A (N, 3) float array of ray origins.

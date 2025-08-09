@@ -123,8 +123,20 @@ class Ray:
 class BVH:
     """A Bounding Volume Hierarchy for fast ray intersections."""
 
+    cost_traversal: float
+    """
+    The traversal cost used in the Surface Area Heuristic (SAH)
+    calculation. This can be read or modified.
+    """
+
+    cost_intersection: float
+    """
+    The intersection cost used in the Surface Area Heuristic (SAH)
+    calculation. This can be read or modified.
+    """
+
     @staticmethod
-    def from_triangles(triangles: np.ndarray, quality: BuildQuality = ...) -> BVH:
+    def from_triangles(triangles: np.ndarray, quality: BuildQuality = ..., cost_traversal: float = ..., cost_intersection: float = ...) -> BVH:
         """
         Builds a BVH from a standard triangle array. This is a convenience method that
         copies and reformats the data into the layout required by the BVH.
@@ -133,6 +145,8 @@ class BVH:
             triangles (numpy.ndarray): A float32 array of shape (N, 3, 3) or (N, 9)
                                        representing N triangles.
             quality (BuildQuality): The desired quality of the BVH.
+            cost_traversal (float, optional): The SAH traversal cost.
+            cost_intersection (float, optional): The SAH intersection cost.
 
         Returns:
             BVH: A new BVH instance.
@@ -140,7 +154,7 @@ class BVH:
         ...
 
     @staticmethod
-    def from_points(points: np.ndarray, radius: float = 1e-05, quality: BuildQuality = ...) -> BVH:
+    def from_points(points: np.ndarray, radius: float = 1e-05, quality: BuildQuality = ..., cost_traversal: float = ..., cost_intersection: float = ...) -> BVH:
         """
         Builds a BVH from a point cloud. This is a convenience method that creates an
         axis-aligned bounding box for each point and builds the BVH from those.
@@ -149,6 +163,8 @@ class BVH:
             points (numpy.ndarray): A float32 array of shape (N, 3) representing N points.
             radius (float): The radius used to create an AABB for each point.
             quality (BuildQuality): The desired quality of the BVH.
+            cost_traversal (float, optional): The SAH traversal cost.
+            cost_intersection (float, optional): The SAH intersection cost.
 
         Returns:
             BVH: A new BVH instance.
@@ -156,7 +172,7 @@ class BVH:
         ...
 
     @staticmethod
-    def from_vertices(vertices: np.ndarray, quality: BuildQuality = ...) -> BVH:
+    def from_vertices(vertices: np.ndarray, quality: BuildQuality = ..., cost_traversal: float = ..., cost_intersection: float = ...) -> BVH:
         """
         Builds a BVH from a flat array of vertices in tinybvh's native format.
 
@@ -168,6 +184,8 @@ class BVH:
             vertices (numpy.ndarray): A float32, C-contiguous array of shape (N * 3, 4).
                                       The 4th component is for padding and is ignored.
             quality (BuildQuality): The desired quality of the BVH.
+            cost_traversal (float, optional): The SAH traversal cost.
+            cost_intersection (float, optional): The SAH intersection cost.
 
         Returns:
             BVH: A new BVH instance.
@@ -175,7 +193,7 @@ class BVH:
         ...
 
     @staticmethod
-    def from_indexed_mesh(vertices: np.ndarray, indices: np.ndarray, quality: BuildQuality = ...) -> BVH:
+    def from_indexed_mesh(vertices: np.ndarray, indices: np.ndarray, quality: BuildQuality = ..., cost_traversal: float = ..., cost_intersection: float = ...) -> BVH:
         """
         Builds a BVH from a vertex buffer and an index buffer.
 
@@ -189,6 +207,8 @@ class BVH:
             indices (numpy.ndarray): A uint32, C-contiguous array of shape (N, 3), where N is the
                                      number of triangles.
             quality (BuildQuality): The desired quality of the BVH.
+            cost_traversal (float, optional): The SAH traversal cost.
+            cost_intersection (float, optional): The SAH intersection cost.
 
         Returns:
             BVH: A new BVH instance.
@@ -196,7 +216,7 @@ class BVH:
         ...
 
     @staticmethod
-    def from_aabbs(aabbs: np.ndarray, quality: BuildQuality = ...) -> BVH:
+    def from_aabbs(aabbs: np.ndarray, quality: BuildQuality = ..., cost_traversal: float = ..., cost_intersection: float = ...) -> BVH:
         """
         Builds a BVH from an array of Axis-Aligned Bounding Boxes.
 
@@ -208,6 +228,8 @@ class BVH:
             aabbs (numpy.ndarray): A float32, C-contiguous array of shape (N, 2, 3),
                                    where each item is a pair of [min_corner, max_corner].
             quality (BuildQuality): The desired quality of the BVH.
+            cost_traversal (float, optional): The SAH traversal cost.
+            cost_intersection (float, optional): The SAH intersection cost.
 
         Returns:
             BVH: A new BVH instance.
@@ -367,7 +389,7 @@ class BVH:
         """
         ...
 
-    def optimize(self) -> None:
+    def optimize(self, iterations: int = 25, extreme: bool = False, stochastic: bool = False) -> None:
         """
         Optimizes the BVH tree structure to improve query performance.
 
@@ -375,11 +397,11 @@ class BVH:
         re-inserting subtrees into better locations based on the SAH cost.
 
         Args:
-            iterations (int): The number of optimization passes.
+            iterations (int): The number of optimization passes. Defaults to 25.
             extreme (bool): If true, a larger portion of the tree is considered
-                            for optimization in each pass.
+                            for optimization in each pass. Defaults to False.
             stochastic (bool): If true, uses a randomized approach to select
-                               nodes for re-insertion.
+                               nodes for re-insertion. Defaults to False.
         """
         ...
 

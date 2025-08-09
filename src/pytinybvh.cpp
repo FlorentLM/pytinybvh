@@ -298,7 +298,8 @@ struct PyBVH {
 
     // Core builders (zero-copy)
 
-    static std::unique_ptr<PyBVH> from_vertices(py::array_t<float, py::array::c_style> vertices_np, BuildQuality quality) {
+    static std::unique_ptr<PyBVH> from_vertices(py::array_t<float, py::array::c_style> vertices_np,
+        BuildQuality quality, float cost_traversal, float cost_intersection) {
         if (vertices_np.ndim() != 2 || vertices_np.shape(1) != 4 || vertices_np.shape(0) % 3 != 0) {
             throw std::runtime_error("Input vertices must be a 2D numpy array with shape (N*3, 4), where N is the number of triangles.");
         }
@@ -306,6 +307,8 @@ struct PyBVH {
         auto wrapper = std::make_unique<PyBVH>();
         wrapper->source_geometry_refs.append(vertices_np);   // reference to the numpy array
         wrapper->quality = quality;
+        wrapper->bvh->c_trav = cost_traversal;
+        wrapper->bvh->c_int = cost_intersection;
 
         if (vertices_np.shape(0) == 0) {
             // default wrapper is an empty BVH
@@ -336,7 +339,7 @@ struct PyBVH {
     static std::unique_ptr<PyBVH> from_indexed_mesh(
         py::array_t<float, py::array::c_style> vertices_np,
         py::array_t<uint32_t, py::array::c_style> indices_np,
-        BuildQuality quality) {
+        BuildQuality quality, float cost_traversal, float cost_intersection) {
 
         if (vertices_np.ndim() != 2 || vertices_np.shape(1) != 4) {
             throw std::runtime_error("Input vertices must be a 2D numpy array with shape (V, 4).");
@@ -349,6 +352,8 @@ struct PyBVH {
         wrapper->source_geometry_refs.append(vertices_np);  // references to vertices numpy array
         wrapper->source_geometry_refs.append(indices_np);   // and indexes numpy array
         wrapper->quality = quality;
+        wrapper->bvh->c_trav = cost_traversal;
+        wrapper->bvh->c_int = cost_intersection;
 
         if (vertices_np.shape(0) == 0  || indices_np.shape(0) == 0) {
             // default wrapper is an empty BVH
@@ -380,7 +385,8 @@ struct PyBVH {
         return wrapper;
     }
 
-    static std::unique_ptr<PyBVH> from_aabbs(py::array_t<float, py::array::c_style> aabbs_np, BuildQuality quality) {
+    static std::unique_ptr<PyBVH> from_aabbs(py::array_t<float, py::array::c_style> aabbs_np,
+        BuildQuality quality, float cost_traversal, float cost_intersection) {
         if (aabbs_np.ndim() != 3 || aabbs_np.shape(1) != 2 || aabbs_np.shape(2) != 3) {
             throw std::runtime_error("Input must be a 3D numpy array with shape (N, 2, 3).");
         }
@@ -389,6 +395,8 @@ struct PyBVH {
         wrapper->source_geometry_refs.append(aabbs_np);
         wrapper->quality = quality;
         wrapper->custom_type = CustomType::AABB;
+        wrapper->bvh->c_trav = cost_traversal;
+        wrapper->bvh->c_int = cost_intersection;
 
         // custom intersection functions
         wrapper->bvh->customIntersect = aabb_intersect_callback;
@@ -436,7 +444,8 @@ struct PyBVH {
 
     // Convenience builders
 
-    static std::unique_ptr<PyBVH> from_triangles(py::array_t<float, py::array::c_style | py::array::forcecast> tris_np, BuildQuality quality) {
+    static std::unique_ptr<PyBVH> from_triangles(py::array_t<float, py::array::c_style | py::array::forcecast> tris_np,
+        BuildQuality quality, float cost_traversal, float cost_intersection) {
 
         bool shape_ok = (tris_np.ndim() == 2 && tris_np.shape(1) == 9) ||
                         (tris_np.ndim() == 3 && tris_np.shape(1) == 3 && tris_np.shape(2) == 3);
@@ -449,6 +458,8 @@ struct PyBVH {
         // this must be done inside this function so vertices_np stays alive
         auto wrapper = std::make_unique<PyBVH>();
         wrapper->quality = quality;
+        wrapper->bvh->c_trav = cost_traversal;
+        wrapper->bvh->c_int = cost_intersection;
 
         if (num_tris == 0) {
             // default wrapper is an empty BVH
@@ -494,7 +505,9 @@ struct PyBVH {
         return wrapper;
     }
 
-    static std::unique_ptr<PyBVH> from_points(py::array_t<float, py::array::c_style | py::array::forcecast> points_np, float radius, BuildQuality quality) {
+    static std::unique_ptr<PyBVH> from_points(py::array_t<float, py::array::c_style | py::array::forcecast> points_np,
+        float radius, BuildQuality quality, float cost_traversal, float cost_intersection) {
+
         if (points_np.ndim() != 2 || points_np.shape(1) != 3) {
             throw std::runtime_error("Input must be a 2D numpy array with shape (N, 3).");
         }
@@ -509,6 +522,8 @@ struct PyBVH {
         wrapper->sphere_radius = radius;
         wrapper->bvh->customIntersect = sphere_intersect_callback;
         wrapper->bvh->customIsOccluded = sphere_isoccluded_callback;
+        wrapper->bvh->c_trav = cost_traversal;
+        wrapper->bvh->c_int = cost_intersection;
 
         if (points_np.shape(0) == 0) {
             // default wrapper is an empty BVH
@@ -1138,7 +1153,8 @@ PYBIND11_MODULE(pytinybvh, m) {
                     BVH: A new BVH instance.
             ))",
             // noconvert() to enforce direct memory access!
-            py::arg("vertices").noconvert(), py::arg("quality") = BuildQuality::Balanced)
+            py::arg("vertices").noconvert(), py::arg("quality") = BuildQuality::Balanced,
+            py::arg("cost_traversal") = C_TRAV, py::arg("cost_intersection") = C_INT)
 
         .def_static("from_indexed_mesh", &PyBVH::from_indexed_mesh,
             R"((
@@ -1160,7 +1176,8 @@ PYBIND11_MODULE(pytinybvh, m) {
             ))",
             // noconvert() to enforce direct memory access!
             py::arg("vertices").noconvert(), py::arg("indices").noconvert(),
-            py::arg("quality") = BuildQuality::Balanced)
+            py::arg("quality") = BuildQuality::Balanced,
+            py::arg("cost_traversal") = C_TRAV, py::arg("cost_intersection") = C_INT)
 
         .def_static("from_aabbs", &PyBVH::from_aabbs,
             R"((
@@ -1179,7 +1196,8 @@ PYBIND11_MODULE(pytinybvh, m) {
                     BVH: A new BVH instance.
             ))",
             // noconvert() to enforce direct memory access!
-            py::arg("aabbs").noconvert(), py::arg("quality") = BuildQuality::Balanced)
+            py::arg("aabbs").noconvert(), py::arg("quality") = BuildQuality::Balanced,
+            py::arg("cost_traversal") = C_TRAV, py::arg("cost_intersection") = C_INT)
 
         // Convenience builders (with copying)
 
@@ -1197,7 +1215,8 @@ PYBIND11_MODULE(pytinybvh, m) {
                     BVH: A new BVH instance.
             ))",
             // no need for noconvert() here, we copy anyway
-            py::arg("triangles"), py::arg("quality") = BuildQuality::Balanced)
+            py::arg("triangles"), py::arg("quality") = BuildQuality::Balanced,
+            py::arg("cost_traversal") = C_TRAV, py::arg("cost_intersection") = C_INT)
 
         .def_static("from_points", &PyBVH::from_points,
              R"((
@@ -1213,7 +1232,8 @@ PYBIND11_MODULE(pytinybvh, m) {
                     BVH: A new BVH instance.
             ))",
             // no need for noconvert() here, we copy anyway
-            py::arg("points"), py::arg("radius") = 1e-5f, py::arg("quality") = BuildQuality::Balanced)
+            py::arg("points"), py::arg("radius") = 1e-5f, py::arg("quality") = BuildQuality::Balanced,
+            py::arg("cost_traversal") = C_TRAV, py::arg("cost_intersection") = C_INT)
 
         // Intersection methods
 
@@ -1475,6 +1495,32 @@ PYBIND11_MODULE(pytinybvh, m) {
                 N (int): The resolution of the micro-map per triangle (e.g., 8 for an 8x8 grid).
         ))",
         py::arg("map_data").noconvert(), py::arg("N"))
+
+        // Read-write properties
+
+        .def_property("cost_traversal",
+            [](const PyBVH &self) {
+                if (!self.bvh) throw std::runtime_error("BVH is not initialized.");
+                return self.bvh->c_trav;
+            },
+            [](PyBVH &self, float value) {
+                if (!self.bvh) throw std::runtime_error("BVH is not initialized.");
+                if (value < 0) throw std::runtime_error("Traversal cost must be non-negative.");
+                self.bvh->c_trav = value;
+            },
+            "The traversal cost used in the Surface Area Heuristic (SAH) calculation during the build.")
+
+        .def_property("cost_intersection",
+            [](const PyBVH &self) {
+                if (!self.bvh) throw std::runtime_error("BVH is not initialized.");
+                return self.bvh->c_int;
+            },
+            [](PyBVH &self, float value) {
+                if (!self.bvh) throw std::runtime_error("BVH is not initialized.");
+                if (value < 0) throw std::runtime_error("Intersection cost must be non-negative.");
+                self.bvh->c_int = value;
+            },
+            "The intersection cost used in the Surface Area Heuristic (SAH) calculation during the build.")
 
         // Read-only properties
 

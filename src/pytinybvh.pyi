@@ -1,4 +1,5 @@
 from __future__ import annotations
+import sys
 from pathlib import Path
 import numpy as np
 from typing import Optional, Union, List, Tuple, ClassVar
@@ -80,6 +81,35 @@ class GeometryType(IntEnum):
     def __int__(self) -> int: ...
     @property
     def name(self) -> str: ...
+    @property
+    def value(self) -> int: ...
+
+
+class Layout(IntEnum):
+    """Enum for the internal memory layout of the BVH."""
+
+    Standard: ClassVar[Layout]
+    """Standard BVH layout (default)."""
+
+    SoA: ClassVar[Layout]
+    """Structure of Arrays layout, optimized for SSE/NEON traversal."""
+
+    if sys.platform in ("linux", "win32", "darwin"):
+        BVH4_CPU: ClassVar[Layout]
+        """
+        4-wide BVH layout, optimized for SSE CPU traversal.
+
+        Note:
+            This layout is only available on x86-64 architectures.
+            Attempting to access this on other platforms (e.g., ARM) will
+            result in an AttributeError.
+        """
+
+    def __int__(self) -> int: ...
+
+    @property
+    def name(self) -> str: ...
+
     @property
     def value(self) -> int: ...
 
@@ -459,12 +489,12 @@ class BVH:
 
     @property
     def nodes(self) -> np.ndarray:
-        """The structured numpy array of BVH nodes."""
+        """The structured numpy array of BVH nodes (only for standard layout)."""
         ...
 
     @property
     def prim_indices(self) -> np.ndarray:
-        """The array of primitive indices, ordered for locality."""
+        """The array of primitive indices, ordered for locality (only for standard layout)."""
         ...
 
     @property
@@ -520,17 +550,18 @@ class BVH:
     @property
     def sah_cost(self) -> float:
         """
-        Calculates the Surface Area Heuristic (SAH) cost of the BVH.
-
-        Lower is better.
+        Calculates the Surface Area Heuristic (SAH) cost of the BVH. Lower is better.
         """
         ...
 
     @property
     def epo_cost(self) -> float:
         """
-        Calculates the Expected Projected Overlap (EPO) cost of the BVH.
-
-        Lower is better.
+        Calculates the Expected Projected Overlap (EPO) cost of the BVH. Lower is better.
         """
+        ...
+
+    @property
+    def layout(self) -> Layout:
+        """The current memory layout of the BVH."""
         ...

@@ -72,7 +72,7 @@ def bvh_from_ply():
     """Fixture that loads a complex mesh from a PLY file"""
     ply_path = Path("assets/sneks.ply")
 
-    mesh = trimesh.load(ply_path, process=False)
+    mesh = trimesh.load_mesh(ply_path)
     verts_3d = np.array(mesh.vertices, dtype=np.float32)
     indices = np.array(mesh.faces, dtype=np.uint32)
 
@@ -824,7 +824,7 @@ def view_test_scene():
 
         # Label instances
         centroid = np.mean(transformed_verts_h[:, :3], axis=0)
-        ax.text(centroid[0], centroid[1], centroid[2], f"Inst {i}", color=instance_colors[i])
+        ax.text(centroid[0], centroid[1], centroid[2], s=f"Inst {i}", color=instance_colors[i])
 
     # Plot TLAS root AABB
     plot_aabb(ax, tlas.aabb_min, tlas.aabb_max, color='purple', linestyle='-', label='TLAS Root AABB')
@@ -843,12 +843,12 @@ def view_test_scene():
             ax.plot(*zip(origin, hit_point), color='black', marker='o', markevery=[0], 
                     label=ray_def['label'] if i == 0 else None)
             ax.scatter(*hit_point, color=instance_colors[hit['inst_id']], s=80, edgecolor='black', zorder=10)
-            ax.text(*hit_point, f" Hit Inst {hit['inst_id']}", color='black', zorder=11)
+            ax.text(hit_point[0], hit_point[1], f" Hit Inst {hit['inst_id']}", color='black', zorder=11)
         else:
             end_point = origin + direction * 20  # fixed length for misses
             ax.plot(*zip(origin, end_point), color='red', alpha=0.7, linestyle=':', marker='o', markevery=[0], 
                     label=ray_def['label'] if i == 0 else None)
-            ax.text(*end_point, " Miss", color='red', alpha=0.9)
+            ax.text(end_point[0], end_point[1], " Miss", color='red', alpha=0.9)
 
     ax.set_xlabel('X')
     ax.set_ylabel('Y')

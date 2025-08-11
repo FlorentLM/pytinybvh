@@ -9,6 +9,8 @@ For example, the BVH can be used as-is in a SSBO for real time ray-tracing with 
 
 **Note:** Not all functionalities are implemented yet!
 
+**Another note:** This is still under active development, so expect some breaking changes! Sorry about that
+
 <div style="text-align:center">
 <img alt="Screenshot of a test model in a Bounding Volume Hierarchy" src="img/screenshot.png" title="Screenshot" width="500"/>
 </div>
@@ -29,18 +31,21 @@ Before installing, you need a few tools on your system:
 The C++ dependency (`tinybvh`) is included as a Git submodule.
 
 1.  **Clone the repository:**
+2. 
     ```bash
     git clone https://github.com/FlorentLM/pytinybvh.git
     cd pytinybvh
     ```
 
 2.  **Initialize the C++ Submodule:**
+3. 
     ```bash
     git submodule update --init --recursive
     ```
 
 3.  **Create and activate a virtual environment:**
     I like `uv`, but `venv` works too.
+4. 
     ```bash
     # Using uv
     uv venv
@@ -253,6 +258,7 @@ bvh = BVH.from_points(points_np, radius=0.01)
 Once a BVH is built, you can perform fast intersection and occlusion queries.
 
 #### Single Ray
+
 ```python
 from pytinybvh import Ray
 
@@ -268,6 +274,7 @@ if ray.prim_id != -1:
 ```
 
 #### Batch of Rays
+
 ```python
       
 # (N, 3) arrays for origins and directions
@@ -300,12 +307,14 @@ for i in range(len(hits)):
 The test suite uses `pytest`.
 
 1.  **Install test dependencies:**
+2. 
     ```bash
     # Install with the [test] extra if you haven't already
     uv pip install .[test]
     ```
    
 2.  **Run the test suite:**
+3. 
     ```bash
     pytest
     ```
@@ -316,6 +325,7 @@ The test suite uses `pytest`.
 I also included a simple `visualise.py` script that opens a 3D viewer.
 
 1.  **Install visualisation dependencies:**
+2. 
     ```bash
     # Install with the [visualise] extra if you haven't already
     uv pip install .[visualise]
@@ -323,6 +333,7 @@ I also included a simple `visualise.py` script that opens a 3D viewer.
    
 2.  **Configure the script:**
     Open `visualise.py` and modify the configuration at the top:
+3. 
     ```python
     TEST_SCENE_FILE = Path('sneks.ply')  # File to load
     POINTS_ONLY = False                  # Set True for points, False for triangles
@@ -330,6 +341,7 @@ I also included a simple `visualise.py` script that opens a 3D viewer.
     ```
 
 3.  **Run it:**
+4. 
     ```bash
     python visualise.py
     ```
@@ -370,6 +382,7 @@ Immediate priorities:
 - [x] Indexed Geometry Support
 - [x] Custom Geometry Primitives (AABBs and Spheres)
 - [x] Top-Level Acceleration Structure (TLAS) Support for instancing
+- [ ] Fix the sometimes unreliable `optimize()` method
 - [ ] Support for more `tinybvh` build presets and layouts (BVH8, etc)
 
 ## Remarks

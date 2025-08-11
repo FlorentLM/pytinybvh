@@ -31,21 +31,21 @@ Before installing, you need a few tools on your system:
 The C++ dependency (`tinybvh`) is included as a Git submodule.
 
 1.  **Clone the repository:**
-2. 
+
     ```bash
     git clone https://github.com/FlorentLM/pytinybvh.git
     cd pytinybvh
     ```
 
 2.  **Initialize the C++ Submodule:**
-3. 
+
     ```bash
     git submodule update --init --recursive
     ```
 
 3.  **Create and activate a virtual environment:**
     I like `uv`, but `venv` works too.
-4. 
+
     ```bash
     # Using uv
     uv venv
@@ -59,7 +59,9 @@ The C++ dependency (`tinybvh`) is included as a Git submodule.
     ```bash
     uv pip install .
     ```
+    
     This installs the core `pytinybvh` library. To include packages for testing and visualisation, you can install "extras":
+    
     ```bash
     # Install everything needed for development (testing, visualisation)
     uv pip install .[dev]
@@ -73,7 +75,8 @@ If the process completes without errors, the `pytinybvh` module is now installed
 
 5. **Use in other projects:**
     From the virtual environment of your other project, run the installation of `pytinybvh` in editable mode.
-    ```bash
+    
+   ```bash
     uv pip install -e /path/to/this/repo
     ```
 
@@ -307,14 +310,14 @@ for i in range(len(hits)):
 The test suite uses `pytest`.
 
 1.  **Install test dependencies:**
-2. 
+
     ```bash
     # Install with the [test] extra if you haven't already
     uv pip install .[test]
     ```
    
 2.  **Run the test suite:**
-3. 
+
     ```bash
     pytest
     ```
@@ -325,7 +328,7 @@ The test suite uses `pytest`.
 I also included a simple `visualise.py` script that opens a 3D viewer.
 
 1.  **Install visualisation dependencies:**
-2. 
+
     ```bash
     # Install with the [visualise] extra if you haven't already
     uv pip install .[visualise]
@@ -333,7 +336,7 @@ I also included a simple `visualise.py` script that opens a 3D viewer.
    
 2.  **Configure the script:**
     Open `visualise.py` and modify the configuration at the top:
-3. 
+
     ```python
     TEST_SCENE_FILE = Path('sneks.ply')  # File to load
     POINTS_ONLY = False                  # Set True for points, False for triangles
@@ -341,7 +344,7 @@ I also included a simple `visualise.py` script that opens a 3D viewer.
     ```
 
 3.  **Run it:**
-4. 
+
     ```bash
     python visualise.py
     ```

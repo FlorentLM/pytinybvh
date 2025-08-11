@@ -40,18 +40,12 @@ class CppBuildExt(build_ext):
 
         # AVX
         if current_machine in ('x86_64', 'AMD64'):
-            if self._has_avx2_support():
-                print("Compiler supports AVX2. Building with AVX2 optimizations.")
-                if current_platform == "Windows":
-                    compile_args.append('/arch:AVX2')
-                else:
-                    compile_args.extend(['-mavx2', '-mfma'])
-            elif self._has_avx_support():
-                print("Compiler supports AVX. Building with AVX optimizations.")
-                if current_platform == "Windows":
-                    compile_args.append('/arch:AVX')
-                else:
-                    compile_args.append('-mavx')
+            if current_platform == "Windows":
+                # MSVC defines __AVX__ and __AVX2__ when this is set
+                compile_args.append('/arch:AVX2')
+            else:
+                # GCC/Clang must see AVX2 + FMA so __AVX2__ and __FMA__ are defined
+                compile_args.extend(['-mavx2', '-mfma'])
         else:
             print(f"Machine is '{current_machine}', skipping AVX checks.")
 

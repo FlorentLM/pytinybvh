@@ -5,7 +5,7 @@ import pytest
 from typing import Union
 from pytinybvh import BVH, Ray, BuildQuality, Layout, CachePolicy, capabilities
 import trimesh
-
+import warnings
 
 # ==============================================================================
 # HELPERS AND FIXTURES
@@ -435,7 +435,7 @@ class TestPostProcessing:
         print(f"Intersection time before optimization: {time_before:.6f}s")
         print(f"Intersection time after optimization:  {time_after:.6f}s")
         if time_after >= time_before:
-            pytest.warning(
+            warnings.warn(
                 f"Optimization did not improve performance in this run ({time_after:.6f}s vs {time_before:.6f}s)."
             )
 
@@ -729,7 +729,7 @@ class TestLayoutConversion:
     #     # Assert performance improvement (soft assertion)
     #     print(f"\nLayout: {layout.name}, Standard time: {time_std:.6f}s, Converted time: {time_conv:.6f}s")
     #     if time_conv >= time_std * 0.95: # allows for small fluctuations
-    #         pytest.warning(
+    #         warnings.warn(
     #             f"Layout {layout.name} did not improve performance ({time_conv:.6f}s vs {time_std:.6f}s)."
     #         )
 

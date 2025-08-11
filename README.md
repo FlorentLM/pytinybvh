@@ -110,17 +110,16 @@ On ARM platforms:
 If you need a specific ABI, set it via CFLAGS, for instance:
 
 ```bash
-CFLAGS="-mfpu=neon -mfloat-abi=hard" pip install .
+CFLAGS="-mfpu=neon -mfloat-abi=hard" uv pip install .
 ```
 
 Alernatively, you can also disable SIMD (AVX, AVX2, NEON) entirely by setting the `PYTINYBVH_NO_SIMD` environment variable:
 
 ```bash
-PYTINYBVH_NO_SIMD=1 pip install .
+PYTINYBVH_NO_SIMD=1 uv pip install .
 ```
 
 **Note:** SIMD detection happens at _build_ time, so the built wheel won't work on a machine with different CPU capabilities.
-
 
 ## Usage examples
 

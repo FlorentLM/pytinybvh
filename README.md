@@ -82,51 +82,45 @@ If the process completes without errors, the `pytinybvh` module is now installed
 
 ## Performance & Build optimizations
 
-For users building from source who want maximum performance on their specific machine, `pytinybvh` supports two key optimizations that can be enabled during installation.
+For users building from source who want maximum performance on their specific machine, `pytinybvh` supports two key optimizations offered by `tinybvh`:
 
-### 1. Parallelization with OpenMP (Enabled by default if available)
+### 1. Parallelization
 
-The batch intersection and occlusion methods (`intersect_batch`, `is_occluded_batch`) are parallelized using OpenMP to take advantage of multiple CPU cores. The setup script should automatically detect if your compiler supports OpenMP and enable it.
+The batch intersection and occlusion methods (`intersect_batch`, `is_occluded_batch`) are parallelized (using OpenMP) to take advantage of multiple CPU cores. The setup script should automatically detect if your compiler supports OpenMP and enable it.
 
 -   **GCC/Clang:** Requires `-fopenmp`.
 -   **MSVC:** Requires `/openmp`.
 
 If your compiler does not support OpenMP, `pytinybvh` will compile and run in serial (single-threaded) mode. You will see a message during installation indicating whether parallelization is enabled.
 
-### 2. AVX and AVX2 SIMD Optimizations
+### 2. SIMD acceleration
 
 `tinybvh` also includes highly optimized code paths that use AVX2 and FMA instructions for significant speedups in BVH traversal on CPU.
-#### AVX Support (Enabled by default if available)
 
-Modern CPUs (since ~2011) support AVX. This instruction set is required for `tinybvh`'s highly optimized `Intersect256RaysSSE` function, which provides a significant speedup for `intersect_batch`. The build script will **automatically detect and enable AVX support** if your compiler and system can handle it.
+On x86-64, `pytinybvh` will automatically enable the highest available SIMD target:
 
-#### AVX2 Support (Opt-in)
+- AVX2 (with FMA) if supported by your compiler/CPU target 
+- AVX if AVX2 is not available 
+- Baseline scalar code otherwise
 
-Even faster code paths are available using AVX2 and FMA instructions (found on Intel Haswell CPUs from ~2013 and newer, and AMD Zen from ~2017 and newer). However, binaries compiled with these flags _will_ crash on CPUs that do not support them. For this reason, AVX2 is an opt-in feature only.
+On ARM platforms:
 
-If you are compiling on a machine with a modern CPU (Intel Haswell or newer, AMD Zen or newer) and intend to run the code on the same or a similarly capable machine, you can enable AVX2 support with an environment variable before running the installation.
-
-**On Linux/macOS:**
+- ARM64 (aarch64): NEON/ASIMD is part of the baseline ISA and is enabled automatically, no special flags are required.
+- ARMv7 (32-bit): If supported by your toolchain/OS, the build will try to enable NEON. Some environments also require a matching float-ABI flag (e.g. `-mfloat-abi=hard` or `-mfloat-abi=softfp`).
+If you need a specific ABI, set it via CFLAGS, for instance:
 
 ```bash
-PYTINYBVH_ENABLE_AVX2=1 uv pip install .
-# or if using pip directly:
-# PYTINYBVH_ENABLE_AVX2=1 pip install .
+CFLAGS="-mfpu=neon -mfloat-abi=hard" pip install .
 ```
 
-**On Windows (Command Prompt):**
-```cmd
-set PYTINYBVH_ENABLE_AVX2=1
-uv pip install .
+Alernatively, you can also disable SIMD (AVX, AVX2, NEON) entirely by setting the `PYTINYBVH_NO_SIMD` environment variable:
+
+```bash
+PYTINYBVH_NO_SIMD=1 pip install .
 ```
 
-**On Windows (PowerShell)**
-```powershell
-$env:PYTINYBVH_ENABLE_AVX2="1"
-uv pip install .
-```
+**Note:** SIMD detection happens at _build_ time, so the built wheel won't work on a machine with different CPU capabilities.
 
-The build script will print a message confirming that AVX2 optimizations are being compiled. If you enable this option, the resulting wheel will _only_ be usable on machines that support AVX2.
 
 ## Usage examples
 
@@ -206,7 +200,6 @@ aabbs_np = np.array([
 ], dtype=np.float32)
 
 # This is a zero-copy operation.
-# Note: Intersections will be against degenerate triangles representing the AABBs.
 bvh = BVH.from_aabbs(aabbs_np)
 ```
 
@@ -423,7 +416,7 @@ Immediate priorities:
 ### A Note on performance and concurrency (Another update! v1.1.0)
 
 - **Multi-core:** Both `intersect_batch` and `is_occluded_batch` run in parallel on all geometry types (using OpenMP when available).
-- **Packet traversal:** For standard triangle BVHs (BLAS), both methods can use 256-ray packet traversal when rays share the same origin. This is controlled via `PacketMode`. For nor it is **Never** by default.
+- **Packet traversal:** For standard triangle BVHs (BLAS), both methods can use 256-ray packet traversal when rays share the same origin. This is controlled via `PacketMode`. For now it is **Never** by default.
 - **Occlusion specifics:** `is_occluded_batch` uses the packet *intersection* kernel internally (when eligible) and reduces to booleans. For TLAS builds or custom geometry (AABBs / spheres), it falls back to scalar.
 - **Alignment:** You don't need to do anything special, pytinybvh builds a 64-byte aligned internal ray buffer so SIMD loads are always safe. Since it's for a batched call, this one-time cost is negligible anyway.
 - **Shared origin:** If rays don't share the same origin, `Auto` mode falls back to scalar and emits a warning (once). You can silence it with `warn_on_incoherent=False` or force packets with `PacketMode.Force` (unsafe).

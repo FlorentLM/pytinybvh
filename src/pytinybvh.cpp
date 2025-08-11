@@ -344,6 +344,8 @@ struct PyBVH {
 
     [[nodiscard]] std::unique_ptr<PyBVH> convert_to_soa() const {
 
+        // TODO: This is for dev purposes only, this will eventually become `convert_to` and accept any Layout
+
         if (!bvh_ptr || bvh_ptr->layout != tinybvh::BVHBase::LAYOUT_BVH)
         {
             throw std::runtime_error("Layout conversion is only supported from a 'Standard' BVH.");
@@ -712,22 +714,20 @@ struct PyBVH {
 
         // Optional t_max / masks: keep arrays alive across GIL release
         const float* t_max_ptr = nullptr;
-
+        const uint32_t* masks_ptr = nullptr;
         if (!t_max_obj.is_none()) {
             auto t_max_np = py::cast<py::array_t<float>>(t_max_obj);
 
             if (t_max_np.ndim() != 1 || t_max_np.size() != n_rays)
-                throw std::runtime_error("t_max must be a 1D float array of length N.");
+                throw std::runtime_error("`t_max` must be a 1D float array of length N.");
 
             t_max_ptr = t_max_np.data();
         }
-
-        const uint32_t* masks_ptr = nullptr;
         if (!masks_obj.is_none()) {
             auto masks_np = py::cast<py::array_t<uint32_t>>(masks_obj);
 
             if (masks_np.ndim() != 1 || masks_np.size() != n_rays)
-                throw std::runtime_error("masks must be a 1D uint32 array of length N.");
+                throw std::runtime_error("`masks` must be a 1D uint32 array of length N.");
 
             masks_ptr = masks_np.data();
         }
@@ -765,70 +765,82 @@ struct PyBVH {
         const auto* origins_ptr = origins_np.data();
         const auto* directions_ptr = directions_np.data();
 
-        std::vector<tinybvh::Ray> rays(n_rays);
-        std::vector<HitRecord> out(n_rays);
+        // Quick same-origin test for packet traversal
+        bool all_same_origin = false;
+        if (n_rays >= 256 && bvh_ptr->layout == tinybvh::BVHBase::LAYOUT_BVH && custom_type == CustomType::None) {
+            const float ox0 = origins_ptr[0], oy0 = origins_ptr[1], oz0 = origins_ptr[2];
+            const float eps = 1e-6f;
+            all_same_origin = true;
+            for (py::ssize_t i = 1; i < n_rays; ++i) {
+                const size_t iS = (size_t)i * (size_t)stride;
+                if (std::fabs(origins_ptr[iS+0] - ox0) > eps ||
+                    std::fabs(origins_ptr[iS+1] - oy0) > eps ||
+                    std::fabs(origins_ptr[iS+2] - oz0) > eps) { all_same_origin = false; break; }
+            }
+            if (!all_same_origin) {
+                // warn (only when we *could* have used the packet path)
+                py::module::import("warnings").attr("warn")(
+                    "pytinybvh: falling back to scalar traversal; packet traversal assumes the 256 rays in a packet share the same origin.");
+            }
+        }
+
+        // always allocate a 64-byte aligned Ray buffer
+        tinybvh::Ray* rays = (tinybvh::Ray*)tinybvh::malloc64((size_t)n_rays * sizeof(tinybvh::Ray));
+        if (!rays) throw std::bad_alloc();
+        auto rays_guard = std::unique_ptr<tinybvh::Ray, void(*)(tinybvh::Ray*)>(
+            rays, [](tinybvh::Ray* p){ if (p) tinybvh::free64(p); });
+
+        // Initialize rays
+        #ifdef _OPENMP
+        #pragma omp parallel for schedule(static)
+        #endif
+        for (py::ssize_t i = 0; i < n_rays; ++i) {
+            const size_t iS = (size_t)i * (size_t)stride;
+            const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
+            const uint32_t mask_init = masks_ptr ? masks_ptr[i] : 0xFFFF;
+            new (&rays[i]) tinybvh::Ray(
+                { origins_ptr[iS+0],    origins_ptr[iS+1],    origins_ptr[iS+2] },
+                { directions_ptr[iS+0], directions_ptr[iS+1], directions_ptr[iS+2] },
+                t_init, mask_init
+            );
+            if (custom_type != CustomType::None) rays[i].hit.auxData = &context;
+        }
+
+        std::vector<HitRecord> out((size_t)n_rays);
 
         {
-            py::gil_scoped_release release;
+            py::gil_scoped_release release;     // release GIL to run traversal
 
-            // Initialize rays
-            #ifdef _OPENMP
-            #pragma omp parallel for schedule(static)
-            #endif
-            for (py::ssize_t i = 0; i < n_rays; ++i) {
-                const size_t iS = static_cast<size_t>(i) * static_cast<size_t>(stride);
-                const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
-                const uint32_t mask_init = masks_ptr ? masks_ptr[i] : 0xFFFF;
-                rays[i] = tinybvh::Ray(
-                    {
-                        origins_ptr[iS+0],
-                        origins_ptr[iS+1],
-                        origins_ptr[iS+2]
-                    },
-                    {
-                        directions_ptr[iS+0],
-                        directions_ptr[iS+1],
-                        directions_ptr[iS+2]
-                    },
-                    t_init,
-                    mask_init
-                );
-                if (custom_type != CustomType::None) {
-                    rays[i].hit.auxData = &context;
-                }
-            }
-
-            // Dispatch to active BVH
             dispatch_bvh_call(bvh_ptr.get(), [&](auto& bvh) {
                 using BVHType = std::decay_t<decltype(bvh)>;
 
                 if constexpr (std::is_same_v<BVHType, tinybvh::BVH>) {
-                    // Standard BVH: optionally use the 256-packet path when no custom geom
-                    if (custom_type == CustomType::None) {
+                    // Standard BVH: use packet path only when viable
+                    if (custom_type == CustomType::None && all_same_origin) {
                         #ifdef _OPENMP
                         #pragma omp parallel for schedule(dynamic)
                         #endif
                         for (py::ssize_t i = 0; i < n_rays; i += 256) {
                             const py::ssize_t end = std::min(i + 256, n_rays);
                             if (end - i == 256) {
-                                #ifdef BVH_USEAVX
-                                bvh.Intersect256RaysSSE(&rays[i]);
-                                #else
-                                bvh.Intersect256Rays(&rays[i]);
-                                #endif
+                            #ifdef BVH_USEAVX
+                                bvh.Intersect256RaysSSE(&rays[i]);  // uses aligned SIMD loads and same-origin assumption
+                            #else
+                                bvh.Intersect256Rays(&rays[i]);     // also assumes same-origin
+                            #endif
                             } else {
                                 for (py::ssize_t j = i; j < end; ++j) bvh.Intersect(rays[j]);
                             }
                         }
                     } else {
-                        // Standard BVH + custom geometry: scalar loop
+                        // Scalar fallback (works for any rays)
                         #ifdef _OPENMP
                         #pragma omp parallel for schedule(dynamic)
                         #endif
                         for (py::ssize_t i = 0; i < n_rays; ++i) bvh.Intersect(rays[i]);
                     }
                 } else {
-                    // Other layouts (SoA/AL/etc.): scalar loop
+                    // Other layouts (SoA, etc): scalar path
                     #ifdef _OPENMP
                     #pragma omp parallel for schedule(dynamic)
                     #endif
@@ -1535,7 +1547,8 @@ PYBIND11_MODULE(pytinybvh, m) {
             py::arg("points"), py::arg("radius") = 1e-5f, py::arg("quality") = BuildQuality::Balanced,
             py::arg("cost_traversal") = C_TRAV, py::arg("cost_intersection") = C_INT)
 
-        // TODO: Layout converter method
+        // TODO: Proper Layout converter method
+        .def("convert_to_soa", &PyBVH::convert_to_soa)
 
         // Intersection methods
 

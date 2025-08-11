@@ -287,12 +287,12 @@ origins = np.array([[0.5, 0.2, -5], [10, 10, -5]], dtype=np.float32)
 directions = np.array([[0, 0, 1], [0, 0, 1]], dtype=np.float32)
 
 # Returns a structured numpy array with hit records
-# By default (PacketMode.Auto), pytinybvh will use 256-ray packet traversal
-# only when safe/beneficial (rays share the same origin on a standard triangle BVH)
-hits = bvh.intersect_batch(origins, directions, packet=PacketMode.Auto)
+# By default (PacketMode.Never), pytinybvh does not use 256-ray packet traversal.
+hits = bvh.intersect_batch(origins, directions, packet=PacketMode.Never)
 
-# You can force scalar traversal (never use packets):
-# hits = bvh.intersect_batch(origins, directions, packet=PacketMode.Never)
+# PacketMode.Auto enables it only when safe/beneficial (rays share the same origin on a standard triangle BVH).
+# NOTE: It doesn't currently enforce your rays to form a frustum (they should! see note at the bottom of the README)
+# hits = bvh.intersect_batch(origins, directions, packet=PacketMode.Auto)
 
 # Or force packet traversal (this is unsafe if rays origins differ and will warn unless disabled):
 # hits = bvh.intersect_batch(origins, directions, packet=PacketMode.Force, same_origin_eps=1e-6, warn_on_incoherent=True)
@@ -423,10 +423,11 @@ Immediate priorities:
 ### A Note on performance and concurrency (Another update! v1.1.0)
 
 - **Multi-core:** Both `intersect_batch` and `is_occluded_batch` run in parallel on all geometry types (using OpenMP when available).
-- **Packet traversal:** For standard triangle BVHs (BLAS), both methods can use 256-ray packet traversal when rays share the same origin. This is controlled via `PacketMode` and is **Auto** by default.
+- **Packet traversal:** For standard triangle BVHs (BLAS), both methods can use 256-ray packet traversal when rays share the same origin. This is controlled via `PacketMode`. For nor it is **Never** by default.
 - **Occlusion specifics:** `is_occluded_batch` uses the packet *intersection* kernel internally (when eligible) and reduces to booleans. For TLAS builds or custom geometry (AABBs / spheres), it falls back to scalar.
 - **Alignment:** You don't need to do anything special, pytinybvh builds a 64-byte aligned internal ray buffer so SIMD loads are always safe. Since it's for a batched call, this one-time cost is negligible anyway.
-- **Coherence:** If rays don't share the same origin, `Auto` mode falls back to scalar and emits a warning (once). You can silence it with `warn_on_incoherent=False` or force packets with `PacketMode.Force` (unsafe).
+- **Shared origin:** If rays don't share the same origin, `Auto` mode falls back to scalar and emits a warning (once). You can silence it with `warn_on_incoherent=False` or force packets with `PacketMode.Force` (unsafe).
+- **Coherence**: Currently, `tinybvh` assumes the rays must be coherent and form a frustum! If you pass rays with a same origin but random directions... things might break :D
 
 ## Acknowledgements
 

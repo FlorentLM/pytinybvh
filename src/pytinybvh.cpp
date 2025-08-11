@@ -18,14 +18,104 @@
 namespace py = pybind11;
 using namespace pybind11::literals;
 
-// Macro to check for x86 architecture
-#if defined(__x86_64__) || defined(_M_X64)
-#define PYTINYBVH_IS_X86 1
+// ----- compile-time capabilities checks -----
+namespace tb_caps {
+static constexpr bool SSE =
+#if defined(BVH_USESSE)
+    true;
 #else
-#define PYTINYBVH_IS_X86 0
+    false;
 #endif
 
-// -------------------------------- some internal helpers and things ---------------------------------
+static constexpr bool AVX =
+#if defined(BVH_USEAVX)
+    true;
+#else
+    false;
+#endif
+
+static constexpr bool AVX2 =
+#if defined(BVH_USEAVX2)
+    true;
+#else
+    false;
+#endif
+
+static constexpr bool NEON =
+#if defined(BVH_USENEON)
+    true;
+#else
+    false;
+#endif
+
+// Traversal availability per layout (conversion is always allowed)
+static constexpr bool SoA_trav     = (AVX || NEON);
+static constexpr bool BVH4CPU_trav = (SSE && !NEON);      // header stubs SSE-only on x86
+static constexpr bool CWBVH_trav   = AVX;                 // needs AVX
+static constexpr bool BVH8CPU_trav = AVX2;                // needs AVX2 (+FMA, MSVC implies it)
+} // namespace tb_caps
+
+// ----- public Layout enum (that one mirrors the one in tinybvh) -----
+enum class Layout : uint32_t {
+    Standard        = tinybvh::BVHBase::LAYOUT_BVH,
+    SoA             = tinybvh::BVHBase::LAYOUT_BVH_SOA,
+    BVH_GPU         = tinybvh::BVHBase::LAYOUT_BVH_GPU,
+    BVH4_CPU        = tinybvh::BVHBase::LAYOUT_BVH4_CPU,
+    BVH4_GPU        = tinybvh::BVHBase::LAYOUT_BVH4_GPU,
+    CWBVH           = tinybvh::BVHBase::LAYOUT_CWBVH,
+    BVH8_CPU        = tinybvh::BVHBase::LAYOUT_BVH8_AVX2,
+    MBVH4           = 100, // custom value, tinybvh does not exopse this
+    MBVH8           = 101, // custom value, tinybvh does not exopse this
+};
+
+static inline const char* layout_to_string(Layout L) {
+    switch (L) {
+        case Layout::Standard: return "Standard";
+        case Layout::SoA: return "SoA";
+        case Layout::BVH_GPU: return "BVH (GPU)";
+        case Layout::MBVH4: return "MBVH4";
+        case Layout::MBVH8: return "MBVH8";
+        case Layout::BVH4_CPU: return "BVH4 (CPU)";
+        case Layout::BVH4_GPU: return "BVH4 (GPU)";
+        case Layout::CWBVH: return "BVH8 (CWBVH)";
+        case Layout::BVH8_CPU: return "BVH8 (CPU)";
+    }
+    return "Unknown";
+}
+
+static inline bool supports_layout(Layout L, bool for_traversal) {
+    if (!for_traversal) return true; // conversion is always fine
+
+    switch (L) {
+        case Layout::Standard:  return true;
+        case Layout::SoA:       return tb_caps::SoA_trav;
+        case Layout::MBVH4:     return false; // NOLINT(*-branch-clone) Reason: being explicit is better here
+        case Layout::MBVH8:     return false;
+        case Layout::BVH4_CPU:  return tb_caps::BVH4CPU_trav;
+        case Layout::CWBVH:     return tb_caps::CWBVH_trav;
+        case Layout::BVH8_CPU:  return tb_caps::BVH8CPU_trav;
+        case Layout::BVH_GPU:   return true; // NOLINT(*-branch-clone) Reason: being explicit is better here
+        case Layout::BVH4_GPU:  return true;
+    }
+    return false;
+}
+
+static inline std::string explain_requirement(Layout L) {
+    switch (L) {
+        case Layout::SoA:      return "SoA traversal requires AVX or NEON.";
+        case Layout::MBVH4:    return "MBVH layouts are for structural conversion, not direct traversal.";  // NOLINT(*-branch-clone) Reason: being explicit is better here
+        case Layout::MBVH8:    return "MBVH layouts are for structural conversion, not direct traversal.";
+        case Layout::BVH4_CPU: return "BVH4 (CPU) traversal requires SSE (x86).";
+        case Layout::CWBVH:    return "BVH8 (CWBVH) traversal requires AVX.";
+        case Layout::BVH8_CPU: return "BVH8 (CPU) traversal requires AVX2(+FMA).";
+        case Layout::BVH_GPU:  return "BVH (GPU) traversal is scalar. No special ISA required.";
+        case Layout::BVH4_GPU: return "BVH4 (GPU) traversal is scalar. No special ISA required.";
+        case Layout::Standard: return "Standard layout always traverses.";
+    }
+    return "Unknown layout requirements.";
+}
+
+// -------------------------------- some other internal helpers and things ---------------------------------
 
 // Helper function to convert layout enum to string
 std::string layout_to_string(tinybvh::BVHBase::BVHType layout) {
@@ -265,39 +355,14 @@ struct HitRecord {
     float t, u, v;
 };
 
-
 // -------------------------------- these ones are exposed to python ---------------------------------
 
 enum class BuildQuality { Quick, Balanced, High };
 enum class GeometryType { Triangles, AABBs, Spheres };
 enum class PacketMode { Auto, Never, Force };
+enum class CachePolicy : uint8_t { ActiveOnly, All };
 
 // -------------------------------- main pytinybvh classes ---------------------------------
-
-// Custom deleter for std::unique_ptr<BVHBase>: ensures the correct derived BVH class is deleted
-// (that's necessary because BVHBase doesn't have a virtual destructor)
-struct BVHDeleter {
-    void operator()(tinybvh::BVHBase* ptr) const {
-        if (!ptr) return;
-        // Use the layout to cast to the correct derived type before deleting
-        switch (ptr->layout) {
-            // NOLINTBEGIN(cppcoreguidelines-pro-type-static-cast-downcast)
-            case tinybvh::BVHBase::LAYOUT_BVH:
-                delete static_cast<tinybvh::BVH*>(ptr);
-                break;
-            case tinybvh::BVHBase::LAYOUT_BVH_SOA:
-                delete static_cast<tinybvh::BVH_SoA*>(ptr);
-                break;
-            case tinybvh::BVHBase::UNDEFINED:
-                delete static_cast<tinybvh::BVH*>(ptr);
-                break;
-            default:
-                assert(false && "Unknown BVH layout in deleter");
-                break;
-            // NOLINTEND(cppcoreguidelines-pro-type-static-cast-downcast)
-        }
-    }
-};
 
 // Helper to dispatch calls to the correct BVH implementation based on its layout
 // (the static_cast is safe because we check the 'layout' enum before casting)
@@ -306,25 +371,57 @@ auto dispatch_bvh_call(tinybvh::BVHBase* bvh_base, Func f) {
     if (!bvh_base) {
         throw std::runtime_error("Cannot dispatch call on a null BVH.");
     }
+    // NOLINTBEGIN(cppcoreguidelines-pro-type-static-cast-downcast)
     switch (bvh_base->layout) {
-        // NOLINTBEGIN(cppcoreguidelines-pro-type-static-cast-downcast)
         case tinybvh::BVHBase::LAYOUT_BVH:
             return f(*static_cast<tinybvh::BVH*>(bvh_base));
         case tinybvh::BVHBase::LAYOUT_BVH_SOA:
             return f(*static_cast<tinybvh::BVH_SoA*>(bvh_base));
+        case tinybvh::BVHBase::LAYOUT_BVH_GPU:
+            return f(*static_cast<tinybvh::BVH_GPU*>(bvh_base));
+        case tinybvh::BVHBase::LAYOUT_BVH4_CPU:
+            return f(*static_cast<tinybvh::BVH4_CPU*>(bvh_base));
+        case tinybvh::BVHBase::LAYOUT_BVH4_GPU:
+            return f(*static_cast<tinybvh::BVH4_GPU*>(bvh_base));
+        case tinybvh::BVHBase::LAYOUT_CWBVH:
+            return f(*static_cast<tinybvh::BVH8_CWBVH*>(bvh_base));
+        case tinybvh::BVHBase::LAYOUT_BVH8_AVX2:
+            return f(*static_cast<tinybvh::BVH8_CPU*>(bvh_base));
         case tinybvh::BVHBase::UNDEFINED:
-            return f(*static_cast<tinybvh::BVH*>(bvh_base));
+            return f(*static_cast<tinybvh::BVH*>(bvh_base)); // fallback for empty BVH
+
+        case tinybvh::BVHBase::LAYOUT_MBVH:
+             throw std::runtime_error(
+                "Operation is not supported for MBVH layouts directly. "
+                "Convert to a traversable layout like Standard, SoA, or BVH4_CPU first.");
+
         default:
             throw std::runtime_error("Operation is not supported for this BVH layout.");
-        // NOLINTEND(cppcoreguidelines-pro-type-static-cast-downcast)
     }
+    // NOLINTEND(cppcoreguidelines-pro-type-static-cast-downcast)
 }
 
 // C++ class to wrap the tinybvh::BVH object and its associated data: this is the object held by the Python BVH class
 struct PyBVH {
 
-    // Single owning pointer to the BVH data (any layout): the BVHDeleter handles deleting the derived class
-    std::unique_ptr<tinybvh::BVHBase, BVHDeleter> bvh_ptr;
+    // The canonical BVH in standard layout, always present after build
+    std::unique_ptr<tinybvh::BVH> base_;
+
+    // optional converted layouts for caching
+    std::unique_ptr<tinybvh::BVH_SoA>     soa_;
+    std::unique_ptr<tinybvh::MBVH<4>>     mbvh4_;
+    std::unique_ptr<tinybvh::MBVH<8>>     mbvh8_;
+    std::unique_ptr<tinybvh::BVH4_CPU>    bvh4_cpu_;
+    std::unique_ptr<tinybvh::BVH4_GPU>    bvh4_gpu_;
+    std::unique_ptr<tinybvh::BVH8_CWBVH>  cwbvh_;
+    std::unique_ptr<tinybvh::BVH8_CPU>    bvh8_cpu_;
+    std::unique_ptr<tinybvh::BVH_GPU>     bvh_gpu_;
+
+    // A raw pointer to the currently active BVH representation
+    // This is not an owning pointer, it points to one of the objects above
+    tinybvh::BVHBase* active_bvh_ = nullptr;
+    Layout active_layout_ = Layout::Standard;
+    CachePolicy cache_policy_ = CachePolicy::ActiveOnly;
 
     // These references must be kept alive for the lifetime of any BVH representation
     py::list source_geometry_refs;
@@ -341,44 +438,156 @@ struct PyBVH {
     // Constructor
     PyBVH() = default;
 
+    // Cache policy management
+
+    void set_cache_policy(CachePolicy p) { cache_policy_ = p; }
+
+    void clear_cached_layouts() {
+        const bool needs_m4 =
+            (active_layout_ == Layout::MBVH4) ||
+            (active_layout_ == Layout::BVH4_CPU) ||
+            (active_layout_ == Layout::BVH4_GPU);
+
+        const bool needs_m8 =
+            (active_layout_ == Layout::MBVH8) ||
+            (active_layout_ == Layout::CWBVH)  ||
+            (active_layout_ == Layout::BVH8_CPU);
+
+        if (active_layout_ != Layout::SoA)      soa_.reset();
+
+        // Only drop MBVH if nothing currently depends on it
+        if (!needs_m4)                           mbvh4_.reset();
+        if (!needs_m8)                           mbvh8_.reset();
+
+        if (active_layout_ != Layout::BVH4_CPU)  bvh4_cpu_.reset();
+        if (active_layout_ != Layout::BVH4_GPU)  bvh4_gpu_.reset();
+        if (active_layout_ != Layout::CWBVH)     cwbvh_.reset();
+        if (active_layout_ != Layout::BVH8_CPU)  bvh8_cpu_.reset();
+        if (active_layout_ != Layout::BVH_GPU)   bvh_gpu_.reset();
+    }
+
     // Converter method
 
-    [[nodiscard]] std::unique_ptr<PyBVH> convert_to_soa() const {
-
-        // TODO: This is for dev purposes only, this will eventually become `convert_to` and accept any Layout
-
-        if (!bvh_ptr || bvh_ptr->layout != tinybvh::BVHBase::LAYOUT_BVH)
-        {
-            throw std::runtime_error("Layout conversion is only supported from a 'Standard' BVH.");
+    void convert_to(Layout target, bool compact=true, bool strict=false) {
+        if (!base_) {
+            throw std::runtime_error("Cannot convert an uninitialized BVH.");
         }
-        // This static_cast is safe because the layout has just been checked
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
-        const auto* source_bvh = static_cast<const tinybvh::BVH*>(bvh_ptr.get());
+        // Always allows conversion. Enforces traversal availability only if `strict` is True
+        if (strict && !supports_layout(target, /*for_traversal=*/true)) {
+            throw std::runtime_error(
+                std::string("Conversion to ") + layout_to_string(target) + ": " +
+                explain_requirement(target));
+        }
+        switch (target) {
+            case Layout::Standard:
+                active_bvh_ = base_.get();
+                active_layout_ = Layout::Standard;
+                break;
 
-        // Create new SoA BVH and convert data
-        auto soa_bvh = std::make_unique<tinybvh::BVH_SoA>();
-        soa_bvh->ConvertFrom(*source_bvh);
+            case Layout::SoA:
+                if (!soa_) soa_ = std::make_unique<tinybvh::BVH_SoA>();
+                soa_->context = base_->context;
+                soa_->ConvertFrom(*base_, compact);
+                active_bvh_ = soa_.get();
+                active_layout_ = Layout::SoA;
+                break;
 
-        // Python wrapper for the new BVH
-        auto new_wrapper = std::make_unique<PyBVH>();
+            case Layout::BVH_GPU:
+                if (!bvh_gpu_) bvh_gpu_ = std::make_unique<tinybvh::BVH_GPU>();
+                bvh_gpu_->context = base_->context;
+                bvh_gpu_->ConvertFrom(*base_, compact);
+                active_bvh_ = bvh_gpu_.get();
+                active_layout_ = Layout::BVH_GPU;
+                break;
 
-        // Transfer ownership of the new SoA BVH to the new wrapper
-        new_wrapper->bvh_ptr.reset(soa_bvh.release());
+            case Layout::MBVH4:
+                if (!mbvh4_) {
+                    mbvh4_ = std::make_unique<tinybvh::MBVH<4>>();
+                    mbvh4_->context = base_->context;
+                    mbvh4_->ConvertFrom(*base_, compact);
+                }
+                active_bvh_ = mbvh4_.get();
+                active_layout_ = Layout::MBVH4;
+                break;
 
-        // Copy over metadata and geometry refs
-        new_wrapper->source_geometry_refs = this->source_geometry_refs;
-        new_wrapper->quality = this->quality;
-        new_wrapper->custom_type = this->custom_type;
-        new_wrapper->sphere_radius = this->sphere_radius;
-        // Note: SoA is only for BLASes so no need to copy TLAS info
+            case Layout::MBVH8:
+                if (!mbvh8_) {
+                    mbvh8_ = std::make_unique<tinybvh::MBVH<8>>();
+                    mbvh8_->context = base_->context;
+                    mbvh8_->ConvertFrom(*base_, compact);
+                }
+                active_bvh_ = mbvh8_.get();
+                active_layout_ = Layout::MBVH8;
+                break;
 
-        return new_wrapper;
+            case Layout::BVH4_CPU:
+                if (!mbvh4_) { // lazily create and cache the intermediate MBVH4
+                    mbvh4_ = std::make_unique<tinybvh::MBVH<4>>();
+                    mbvh4_->context = base_->context;
+                    mbvh4_->ConvertFrom(*base_, compact);
+                }
+                if (!bvh4_cpu_) bvh4_cpu_ = std::make_unique<tinybvh::BVH4_CPU>();
+                bvh4_cpu_->context = base_->context;
+                bvh4_cpu_->ConvertFrom(*mbvh4_);
+                active_bvh_ = bvh4_cpu_.get();
+                active_layout_ = Layout::BVH4_CPU;
+                break;
+
+            case Layout::BVH4_GPU:
+                if (!mbvh4_) { // lazily create and cache the intermediate MBVH4
+                    mbvh4_ = std::make_unique<tinybvh::MBVH<4>>();
+                    mbvh4_->context = base_->context;
+                    mbvh4_->ConvertFrom(*base_, compact);
+                }
+                if (!bvh4_gpu_) bvh4_gpu_ = std::make_unique<tinybvh::BVH4_GPU>();
+                bvh4_gpu_->context = base_->context;
+                bvh4_gpu_->ConvertFrom(*mbvh4_, compact);
+                active_bvh_ = bvh4_gpu_.get();
+                active_layout_ = Layout::BVH4_GPU;
+                break;
+
+            case Layout::CWBVH:
+                if (!mbvh8_) { // lazily create and cache the intermediate MBVH8
+                    mbvh8_ = std::make_unique<tinybvh::MBVH<8>>();
+                    mbvh8_->context = base_->context;
+                    mbvh8_->ConvertFrom(*base_, compact);
+                }
+                if (!cwbvh_) cwbvh_ = std::make_unique<tinybvh::BVH8_CWBVH>();
+                cwbvh_->context = base_->context;
+                cwbvh_->ConvertFrom(*mbvh8_, compact);
+                active_bvh_ = cwbvh_.get();
+                active_layout_ = Layout::CWBVH;
+                break;
+
+            case Layout::BVH8_CPU:
+                if (!mbvh8_) { // lazily create and cache the intermediate MBVH8
+                    mbvh8_ = std::make_unique<tinybvh::MBVH<8>>();
+                    mbvh8_->context = base_->context;
+                    mbvh8_->ConvertFrom(*base_, compact);
+                }
+                if (!bvh8_cpu_) bvh8_cpu_ = std::make_unique<tinybvh::BVH8_CPU>();
+                bvh8_cpu_->context = base_->context;
+                bvh8_cpu_->ConvertFrom(*mbvh8_);
+                active_bvh_ = bvh8_cpu_.get();
+                active_layout_ = Layout::BVH8_CPU;
+                break;
+        }
+        if (cache_policy_ == CachePolicy::ActiveOnly) {
+            clear_cached_layouts();
+        }
+    }
+
+    // Helper for builders to finalize the wrapper
+    static void finalize_build(const std::unique_ptr<PyBVH>& wrapper, std::unique_ptr<tinybvh::BVH> bvh) {
+        wrapper->base_ = std::move(bvh);
+        wrapper->active_bvh_ = wrapper->base_.get();
+        wrapper->active_layout_ = Layout::Standard;
     }
 
     // Core builders (zero-copy)
 
     static std::unique_ptr<PyBVH> from_vertices(py::array_t<float, py::array::c_style> vertices_np,
-        BuildQuality quality, float cost_traversal, float cost_intersection) {
+        BuildQuality quality, float traversal_cost, float intersection_cost) {
 
         if (vertices_np.ndim() != 2 || vertices_np.shape(1) != 4 || vertices_np.shape(0) % 3 != 0) {
             throw std::runtime_error("Input vertices must be a 2D numpy array with shape (N*3, 4), where N is the number of triangles.");
@@ -389,11 +598,11 @@ struct PyBVH {
 
         wrapper->source_geometry_refs.append(vertices_np);   // reference to the numpy array
         wrapper->quality = quality;
-        bvh->c_trav = cost_traversal;
-        bvh->c_int = cost_intersection;
+        bvh->c_trav = traversal_cost;
+        bvh->c_int = intersection_cost;
 
         if (vertices_np.shape(0) == 0) {
-            wrapper->bvh_ptr.reset(bvh.release());
+            finalize_build(wrapper, std::move(bvh));
             return wrapper;
         }
 
@@ -414,14 +623,14 @@ struct PyBVH {
                 break;
         }
 
-        wrapper->bvh_ptr.reset(bvh.release()); // transfer ownership
+        finalize_build(wrapper, std::move(bvh)); // transfer ownership
         return wrapper;
     }
 
     static std::unique_ptr<PyBVH> from_indexed_mesh(
         py::array_t<float, py::array::c_style> vertices_np,
         py::array_t<uint32_t, py::array::c_style> indices_np,
-        BuildQuality quality, float cost_traversal, float cost_intersection) {
+        BuildQuality quality, float traversal_cost, float intersection_cost) {
 
         if (vertices_np.ndim() != 2 || vertices_np.shape(1) != 4) {
             throw std::runtime_error("Input vertices must be a 2D numpy array with shape (V, 4).");
@@ -437,11 +646,11 @@ struct PyBVH {
         wrapper->source_geometry_refs.append(indices_np);   // and indexes numpy array
         wrapper->quality = quality;
 
-        bvh->c_trav = cost_traversal;
-        bvh->c_int = cost_intersection;
+        bvh->c_trav = traversal_cost;
+        bvh->c_int = intersection_cost;
 
         if (vertices_np.shape(0) == 0  || indices_np.shape(0) == 0) {
-            wrapper->bvh_ptr.reset(bvh.release());  // transfer ownership
+            finalize_build(wrapper, std::move(bvh));  // transfer ownership
             return wrapper;
         }
 
@@ -466,12 +675,12 @@ struct PyBVH {
                 break;
         }
 
-        wrapper->bvh_ptr.reset(bvh.release());  // transfer ownership
+        finalize_build(wrapper, std::move(bvh));  // transfer ownership
         return wrapper;
     }
 
     static std::unique_ptr<PyBVH> from_aabbs(py::array_t<float, py::array::c_style> aabbs_np,
-        BuildQuality quality, float cost_traversal, float cost_intersection) {
+        BuildQuality quality, float traversal_cost, float intersection_cost) {
         if (aabbs_np.ndim() != 3 || aabbs_np.shape(1) != 2 || aabbs_np.shape(2) != 3) {
             throw std::runtime_error("Input must be a 3D numpy array with shape (N, 2, 3).");
         }
@@ -483,15 +692,15 @@ struct PyBVH {
         wrapper->quality = quality;
         wrapper->custom_type = CustomType::AABB;
 
-        bvh->c_trav = cost_traversal;
-        bvh->c_int = cost_intersection;
+        bvh->c_trav = traversal_cost;
+        bvh->c_int = intersection_cost;
 
         // custom intersection functions
         bvh->customIntersect = aabb_intersect_callback;
         bvh->customIsOccluded = aabb_isoccluded_callback;
 
         if (aabbs_np.shape(0) == 0) {
-            wrapper->bvh_ptr.reset(bvh.release());  // transfer ownership
+            finalize_build(wrapper, std::move(bvh));  // transfer ownership
             return wrapper;
         }
 
@@ -524,7 +733,7 @@ struct PyBVH {
         // BuildQuick and BuildHQ don't support custom AABB getters, so default to Balanced quality
         bvh->Build(aabb_build_callback, prim_count);
 
-        wrapper->bvh_ptr.reset(bvh.release());  // transfer ownership
+        finalize_build(wrapper, std::move(bvh));  // transfer ownership
         return wrapper;
 
         // `build_guard` goes out of scope, g_build_aabbs_ptr is set back to nullptr
@@ -533,7 +742,7 @@ struct PyBVH {
     // Convenience builders
 
     static std::unique_ptr<PyBVH> from_triangles(const py::array_t<float, py::array::c_style | py::array::forcecast>& tris_np,
-        BuildQuality quality, float cost_traversal, float cost_intersection) {
+        BuildQuality quality, float traversal_cost, float intersection_cost) {
 
         bool shape_ok = (tris_np.ndim() == 2 && tris_np.shape(1) == 9) ||
                         (tris_np.ndim() == 3 && tris_np.shape(1) == 3 && tris_np.shape(2) == 3);
@@ -548,11 +757,11 @@ struct PyBVH {
 
         wrapper->quality = quality;
 
-        bvh->c_trav = cost_traversal;
-        bvh->c_int = cost_intersection;
+        bvh->c_trav = traversal_cost;
+        bvh->c_int = intersection_cost;
 
         if (num_tris == 0) {
-            wrapper->bvh_ptr.reset(bvh.release());  // transfer ownership
+            finalize_build(wrapper, std::move(bvh));  // transfer ownership
             return wrapper;
         }
 
@@ -591,12 +800,12 @@ struct PyBVH {
                 break;
         }
 
-        wrapper->bvh_ptr.reset(bvh.release());  // transfer ownership
+        finalize_build(wrapper, std::move(bvh));  // transfer ownership
         return wrapper;
     }
 
     static std::unique_ptr<PyBVH> from_points(py::array_t<float, py::array::c_style | py::array::forcecast> points_np,
-        float radius, BuildQuality quality, float cost_traversal, float cost_intersection) {
+        float radius, BuildQuality quality, float traversal_cost, float intersection_cost) {
 
         if (points_np.ndim() != 2 || points_np.shape(1) != 3) {
             throw std::runtime_error("Input must be a 2D numpy array with shape (N, 3).");
@@ -615,11 +824,11 @@ struct PyBVH {
 
         bvh->customIntersect = sphere_intersect_callback;
         bvh->customIsOccluded = sphere_isoccluded_callback;
-        bvh->c_trav = cost_traversal;
-        bvh->c_int = cost_intersection;
+        bvh->c_trav = traversal_cost;
+        bvh->c_int = intersection_cost;
 
         if (points_np.shape(0) == 0) {
-            wrapper->bvh_ptr.reset(bvh.release());  // transfer ownership
+            finalize_build(wrapper, std::move(bvh));  // transfer ownership
             return wrapper;
         }
 
@@ -644,7 +853,7 @@ struct PyBVH {
 
         bvh->Build(aabb_build_callback, static_cast<uint32_t>(num_points));
 
-        wrapper->bvh_ptr.reset(bvh.release());  // transfer ownership
+       finalize_build(wrapper, std::move(bvh));  // transfer ownership
         return wrapper;
     }
 
@@ -652,7 +861,17 @@ struct PyBVH {
 
     float intersect(PyRay &py_ray) const {
 
-        if (!bvh_ptr || bvh_ptr->triCount == 0) {
+        // Guards
+        if (!supports_layout(active_layout_, /*for_traversal=*/true)) {
+            throw std::runtime_error(
+                std::string("Intersection is not supported for ") +
+                layout_to_string(active_layout_) + " layout: " +
+                explain_requirement(active_layout_));
+        }
+        if (custom_type != CustomType::None && active_bvh_->layout != tinybvh::BVHBase::LAYOUT_BVH) {
+            throw std::runtime_error("Custom geometry (AABBs / Spheres) can only be traversed in the Standard layout.");
+        }
+        if (!active_bvh_ || active_bvh_->triCount == 0) {
             return INFINITY;
         }
 
@@ -672,7 +891,7 @@ struct PyBVH {
         }
 
         bool is_tlas = false;
-        dispatch_bvh_call(bvh_ptr.get(), [&](auto& bvh) {
+        dispatch_bvh_call(active_bvh_, [&](auto& bvh) {
             bvh.Intersect(ray);
             if constexpr (std::is_same_v<std::decay_t<decltype(bvh)>, tinybvh::BVH>) {
                 is_tlas = bvh.isTLAS();
@@ -694,14 +913,25 @@ struct PyBVH {
         return INFINITY;
     }
 
-    py::array intersect_batch(
+    [[nodiscard]] py::array intersect_batch(
         const py::array_t<float, py::array::c_style | py::array::forcecast>& origins_np,
         const py::array_t<float, py::array::c_style | py::array::forcecast>& directions_np,
         const py::object& t_max_obj, const py::object& masks_obj,
-        PacketMode packet = PacketMode::Auto,
+        PacketMode packet = PacketMode::Never,
         float same_origin_eps = 1e-6f,
-        bool warn_on_incoherent = true)
+        bool warn_on_incoherent = true) const
     {
+        // Guards
+        if (!supports_layout(active_layout_, /*for_traversal=*/true)) {
+            throw std::runtime_error(
+                std::string("Intersection is not supported for ") +
+                layout_to_string(active_layout_) + " layout: " +
+                explain_requirement(active_layout_));
+        }
+        if (custom_type != CustomType::None && active_bvh_->layout != tinybvh::BVHBase::LAYOUT_BVH) {
+            throw std::runtime_error("Custom geometry (AABBs / Spheres) can only be traversed in the Standard layout.");
+        }
+
         // Shape checks
         if (origins_np.ndim() != 2 || origins_np.shape(1) != 3)
             throw std::runtime_error("Origins must be (N, 3) float32.");
@@ -711,7 +941,14 @@ struct PyBVH {
             throw std::runtime_error("Origins and directions must have same N.");
 
         const py::ssize_t n_rays = origins_np.shape(0);
-        const py::ssize_t stride = origins_np.shape(1); // == 3 // TODO: Maybe we need 4 actually (for the other layouts)
+
+        const auto o_row = static_cast<size_t>(origins_np.strides(0)) / sizeof(float);
+        const auto o_col = static_cast<size_t>(origins_np.strides(1)) / sizeof(float); // should be 1 for (N, 3) C-contiguous
+
+        const auto d_row = static_cast<size_t>(directions_np.strides(0)) / sizeof(float);
+        const auto d_col = static_cast<size_t>(directions_np.strides(1)) / sizeof(float); // should be 1 for (N, 3) C-contiguous
+
+        // TODO: Maybe we need (N, 4) actually (for the other layouts)
 
         if (n_rays == 0)
             return py::array_t<HitRecord>(0);
@@ -752,7 +989,7 @@ struct PyBVH {
         }
 
         // Early out: empty BVH
-        if (!bvh_ptr || bvh_ptr->triCount == 0) {
+        if (!active_bvh_ || active_bvh_->triCount == 0) {
             py::array_t<HitRecord> result(n_rays);
             auto* rp = result.mutable_data();
             for (py::ssize_t i = 0; i < n_rays; ++i)
@@ -770,20 +1007,23 @@ struct PyBVH {
         const auto* directions_ptr = directions_np.data();
 
         // Decide if packets are eligible
-        const bool layout_is_std_bvh = (bvh_ptr->layout == tinybvh::BVHBase::LAYOUT_BVH);
-        bool want_packets = (packet != PacketMode::Never) &&
-                            layout_is_std_bvh &&
-                            (custom_type == CustomType::None);
+        const bool layout_is_std_bvh = (active_bvh_->layout == tinybvh::BVHBase::LAYOUT_BVH);
+        bool want_packets = (packet != PacketMode::Never)
+                 && layout_is_std_bvh   // non-standard layouts don't expose Intersect256Rays*
+                 && (custom_type == CustomType::None)
+                 && !is_tlas()          // tinybvh's Packet kernels assume BLAS traversal
+                 && (n_rays >= 256);
+        // TODO: maybe we should also enforce frustum-like rays (per tinybvh: "assumes a specific layout of the rays. Provided as ‘proof of concept’, should not be used in production code"), but that's a bit heavy to check here...
 
         // Coherence check (same origin)
-        bool same_origin = true;
         if (want_packets && n_rays > 0) {
-            const float ox0 = origins_ptr[0], oy0 = origins_ptr[1], oz0 = origins_ptr[2];
+            bool same_origin = true;
+            const float ox0 = origins_ptr[0 * o_col], oy0 = origins_ptr[1 * o_col], oz0 = origins_ptr[2 * o_col];
             for (py::ssize_t i = 1; i < n_rays; ++i) {
-                const size_t iS = static_cast<size_t>(i) * static_cast<size_t>(stride);
-                const float dx = std::fabs(origins_ptr[iS+0] - ox0);
-                const float dy = std::fabs(origins_ptr[iS+1] - oy0);
-                const float dz = std::fabs(origins_ptr[iS+2] - oz0);
+                const size_t iSo = static_cast<size_t>(i) * o_row;
+                const float dx = std::fabs(origins_ptr[iSo + 0 * o_col] - ox0);
+                const float dy = std::fabs(origins_ptr[iSo + 1 * o_col] - oy0);
+                const float dz = std::fabs(origins_ptr[iSo + 2 * o_col] - oz0);
                 if (dx > same_origin_eps || dy > same_origin_eps || dz > same_origin_eps) {
                     same_origin = false; break;
                 }
@@ -793,10 +1033,11 @@ struct PyBVH {
                     py::module::import("warnings").attr("warn")(
                         packet == PacketMode::Force ?
                         "pytinybvh: forcing packet traversal, but ray origins differ. "
-                        "Packet kernels assume a shared origin; results may be inaccurate." :
+                        "Packet kernels assume a shared origin and coherent directions; results may be inaccurate." :
 
                         "pytinybvh: ray origins differ; falling back to scalar traversal. "
-                        "Set packet=Force to override (unsafe).");
+                        "Packet traversal also requires coherent directions."
+                    );
                 }
                 if (packet == PacketMode::Auto) want_packets = false; // auto falls back
             }
@@ -805,7 +1046,7 @@ struct PyBVH {
         // 64B-aligned ray storage for packet kernels
         // Note: using this buffer even for scalar, cost is negligible
         std::unique_ptr<tinybvh::Ray, void(*)(tinybvh::Ray*)> rays(
-            static_cast<tinybvh::Ray*>(tinybvh::malloc64(size_t(n_rays) * sizeof(tinybvh::Ray), nullptr)),
+            static_cast<tinybvh::Ray*>(tinybvh::malloc64(static_cast<size_t>(n_rays) * sizeof(tinybvh::Ray), nullptr)),
             [](tinybvh::Ray* p){ tinybvh::free64(p, nullptr); }
         );
         if (!rays) throw std::bad_alloc();
@@ -820,12 +1061,13 @@ struct PyBVH {
             #pragma omp parallel for schedule(static)
             #endif
             for (py::ssize_t i = 0; i < n_rays; ++i) {
-                const size_t iS = static_cast<size_t>(i) * static_cast<size_t>(stride);
+                const size_t iSo = static_cast<size_t>(i) * o_row;
+                const size_t iSd = static_cast<size_t>(i) * d_row;
                 const float t_init   = t_max_ptr   ? t_max_ptr[i]   : 1e30f;
                 const uint32_t mask  = masks_ptr   ? masks_ptr[i]   : 0xFFFFu;
                 new (&rays.get()[i]) tinybvh::Ray(
-                    { origins_ptr[iS+0],    origins_ptr[iS+1],    origins_ptr[iS+2] },
-                    { directions_ptr[iS+0], directions_ptr[iS+1], directions_ptr[iS+2] },
+                    { origins_ptr[iSo + 0 * o_col], origins_ptr[iSo + 1 * o_col], origins_ptr[iSo + 2 * o_col] },
+                    { directions_ptr[iSd + 0 * d_col], directions_ptr[iSd + 1 * d_col], directions_ptr[iSd + 2 * d_col] },
                     t_init, mask
                 );
                 if (custom_type != CustomType::None) {
@@ -833,7 +1075,7 @@ struct PyBVH {
                 }
             }
 
-            dispatch_bvh_call(bvh_ptr.get(), [&](auto& bvh) {
+            dispatch_bvh_call(active_bvh_, [&](auto& bvh) {
                 using BVHType = std::decay_t<decltype(bvh)>;
 
                 if constexpr (std::is_same_v<BVHType, tinybvh::BVH>) {
@@ -845,7 +1087,7 @@ struct PyBVH {
                         for (py::ssize_t i = 0; i < n_rays; i += 256) {
                             const py::ssize_t end = std::min(i + 256, n_rays);
                             if (end - i == 256) {
-                            #ifdef BVH_USEAVX
+                            #ifdef BVH_USESSE
                                 bvh.Intersect256RaysSSE(&rays.get()[i]);  // uses aligned SIMD loads and same-origin assumption
                             #else
                                 bvh.Intersect256Rays(&rays.get()[i]);     // also assumes same-origin
@@ -874,7 +1116,7 @@ struct PyBVH {
 
         // Determine TLAS vs BLAS (only standard BVH exposes isTLAS())
         bool is_tlas = false;
-        dispatch_bvh_call(bvh_ptr.get(), [&](auto& bvh) {
+        dispatch_bvh_call(active_bvh_, [&](auto& bvh) {
             if constexpr (std::is_same_v<std::decay_t<decltype(bvh)>, tinybvh::BVH>)
                 is_tlas = bvh.isTLAS();
         });
@@ -892,7 +1134,7 @@ struct PyBVH {
             #endif
                 out[i] = { prim, inst, rays.get()[i].hit.t, rays.get()[i].hit.u, rays.get()[i].hit.v };
             } else {
-                out[i] = { (uint32_t)-1, (uint32_t)-1, INFINITY, 0.0f, 0.0f };
+                out[i] = { static_cast<uint32_t>(-1), static_cast<uint32_t>(-1), INFINITY, 0.0f, 0.0f };
             }
         }
 
@@ -904,7 +1146,17 @@ struct PyBVH {
 
     [[nodiscard]] bool is_occluded(const PyRay &py_ray) const {
 
-        if (!bvh_ptr || bvh_ptr->triCount == 0) {
+        // Guards
+        if (!supports_layout(active_layout_, /*for_traversal=*/true)) {
+            throw std::runtime_error(
+                std::string("Intersection is not supported for ") +
+                layout_to_string(active_layout_) + " layout: " +
+                explain_requirement(active_layout_));
+        }
+        if (custom_type != CustomType::None && active_bvh_->layout != tinybvh::BVHBase::LAYOUT_BVH) {
+            throw std::runtime_error("Custom geometry (AABBs / Spheres) can only be traversed in the Standard layout.");
+        }
+        if (!active_bvh_ || active_bvh_->triCount == 0) {
             return false; // nothing to occlude
         }
 
@@ -927,19 +1179,29 @@ struct PyBVH {
             ray.hit.auxData = &context;
         }
 
-        return dispatch_bvh_call(bvh_ptr.get(), [&](auto& bvh) {
+        return dispatch_bvh_call(active_bvh_, [&](auto& bvh) {
             return bvh.IsOccluded(ray);
         });
     }
 
-    py::array_t<bool> is_occluded_batch(
+    [[nodiscard]] py::array_t<bool> is_occluded_batch(
         const py::array_t<float, py::array::c_style | py::array::forcecast>& origins_np,
         const py::array_t<float, py::array::c_style | py::array::forcecast>& directions_np,
         const py::object& t_max_obj, const py::object& masks_obj,
-        PacketMode packet = PacketMode::Auto,
+        PacketMode packet = PacketMode::Never,
         float same_origin_eps = 1e-6f,
-        bool warn_on_incoherent = true)
+        bool warn_on_incoherent = true) const
     {
+        // Guards
+        if (!supports_layout(active_layout_, /*for_traversal=*/true)) {
+            throw std::runtime_error(
+                std::string("Intersection is not supported for ") +
+                layout_to_string(active_layout_) + " layout: " +
+                explain_requirement(active_layout_));
+        }
+        if (custom_type != CustomType::None && active_bvh_->layout != tinybvh::BVHBase::LAYOUT_BVH) {
+            throw std::runtime_error("Custom geometry (AABBs / Spheres) can only be traversed in the Standard layout.");
+        }
         // Shape checks
         if (origins_np.ndim() != 2 || origins_np.shape(1) != 3)
             throw std::runtime_error("Origins must be (N, 3) float32.");
@@ -949,7 +1211,14 @@ struct PyBVH {
             throw std::runtime_error("Origins and directions must have same N.");
 
         const py::ssize_t n_rays = origins_np.shape(0);
-        const py::ssize_t stride  = origins_np.shape(1); // 3   // TODO: Maybe 4 is needed for other layouts
+
+        const auto o_row = static_cast<size_t>(origins_np.strides(0)) / sizeof(float);
+        const auto o_col = static_cast<size_t>(origins_np.strides(1)) / sizeof(float);   // should be 1 for (N, 3) C-contiguous
+
+        const auto d_row = static_cast<size_t>(directions_np.strides(0)) / sizeof(float);
+        const auto d_col = static_cast<size_t>(directions_np.strides(1)) / sizeof(float); // should be 1 for (N, 3) C-contiguous
+
+        // TODO: Maybe (N, 4) is needed for some layouts?
 
         py::array_t<bool> result(n_rays);
         if (n_rays == 0)
@@ -988,7 +1257,7 @@ struct PyBVH {
         }
 
         // Early out: empty BVH
-        if (!bvh_ptr || bvh_ptr->triCount == 0) {
+        if (!active_bvh_ || active_bvh_->triCount == 0) {
             auto* outp = result.mutable_data();
             for (py::ssize_t i = 0; i < n_rays; ++i) outp[i] = false;
             return result;
@@ -998,21 +1267,23 @@ struct PyBVH {
         const auto* directions_ptr = directions_np.data();
 
         // Decide if packets are eligible
-        const bool layout_is_std_bvh = (bvh_ptr->layout == tinybvh::BVHBase::LAYOUT_BVH);
-        bool want_packets = (packet != PacketMode::Never) &&
-                            layout_is_std_bvh &&
-                            (custom_type == CustomType::None) &&
-                            (n_rays >= 256);
+        const bool layout_is_std_bvh = (active_bvh_->layout == tinybvh::BVHBase::LAYOUT_BVH);
+        bool want_packets = (packet != PacketMode::Never)
+              && layout_is_std_bvh   // non-standard layouts don't expose Intersect256Rays*
+              && (custom_type == CustomType::None)
+              && !is_tlas()          // tinybvh's Packet kernels assume BLAS traversal
+              && (n_rays >= 256);
+        // TODO: maybe we should also enforce frustum-like rays (per tinybvh: "assumes a specific layout of the rays. Provided as ‘proof of concept’, should not be used in production code"), but that's a bit heavy to check here...
 
         // Same-origin check
-        bool same_origin = true;
         if (want_packets) {
-            const float ox0 = origins_ptr[0], oy0 = origins_ptr[1], oz0 = origins_ptr[2];
+            bool same_origin = true;
+            const float ox0 = origins_ptr[0 * o_col], oy0 = origins_ptr[1 * o_col], oz0 = origins_ptr[2 * o_col];
             for (py::ssize_t i = 1; i < n_rays; ++i) {
-                const size_t iS = size_t(i) * size_t(stride);
-                const float dx = std::fabs(origins_ptr[iS+0] - ox0);
-                const float dy = std::fabs(origins_ptr[iS+1] - oy0);
-                const float dz = std::fabs(origins_ptr[iS+2] - oz0);
+                const size_t iSo = static_cast<size_t>(i) * o_row;
+                const float dx = std::fabs(origins_ptr[iSo + 0 * o_col] - ox0);
+                const float dy = std::fabs(origins_ptr[iSo + 1 * o_col] - oy0);
+                const float dz = std::fabs(origins_ptr[iSo + 2 * o_col] - oz0);
                 if (dx > same_origin_eps || dy > same_origin_eps || dz > same_origin_eps) {
                     same_origin = false; break;
                 }
@@ -1021,10 +1292,11 @@ struct PyBVH {
                 if (warn_on_incoherent && packet != PacketMode::Never) {
                     py::module::import("warnings").attr("warn")(
                         packet == PacketMode::Force ?
-                        "pytinybvh: forcing packet traversal for occlusion, but ray origins differ. "
-                        "Packet kernels assume a shared origin; results may be inaccurate." :
+                        "pytinybvh: forcing packet traversal, but ray origins differ. "
+                        "Packet kernels assume a shared origin and coherent directions; results may be inaccurate." :
 
-                        "pytinybvh: occlusion rays have differing origins; falling back to scalar traversal."
+                        "pytinybvh: ray origins differ; falling back to scalar traversal. "
+                        "Packet traversal also requires coherent directions."
                     );
                 }
                 if (packet == PacketMode::Auto) want_packets = false;
@@ -1033,13 +1305,13 @@ struct PyBVH {
 
         // Aligned Ray storage
         std::unique_ptr<tinybvh::Ray, void(*)(tinybvh::Ray*)> rays(
-            static_cast<tinybvh::Ray*>(tinybvh::malloc64(size_t(n_rays) * sizeof(tinybvh::Ray), nullptr)),
+            static_cast<tinybvh::Ray*>(tinybvh::malloc64(static_cast<size_t>(n_rays) * sizeof(tinybvh::Ray), nullptr)),
             [](tinybvh::Ray* p){ tinybvh::free64(p, nullptr); }
         );
         if (!rays) throw std::bad_alloc();
 
         // Output buffer (0/1), written inside traversal
-        std::vector<uint8_t> occluded(size_t(n_rays), 0);
+        std::vector<uint8_t> occluded(static_cast<size_t>(n_rays), 0);
 
         {
             py::gil_scoped_release release;     // release GIL for traversal
@@ -1049,27 +1321,25 @@ struct PyBVH {
             #pragma omp parallel for schedule(static)
             #endif
             for (py::ssize_t i = 0; i < n_rays; ++i) {
-                const size_t iS = size_t(i) * size_t(stride);
+                const size_t iSo = static_cast<size_t>(i) * o_row;
+                const size_t iSd = static_cast<size_t>(i) * d_row;
                 const float t_init  = t_max_ptr ? t_max_ptr[i] : 1e30f;
                 const uint32_t mask = masks_ptr ? masks_ptr[i] : 0xFFFFu;
                 new (&rays.get()[i]) tinybvh::Ray(
-                    { origins_ptr[iS+0],    origins_ptr[iS+1],    origins_ptr[iS+2] },
-                    { directions_ptr[iS+0], directions_ptr[iS+1], directions_ptr[iS+2] },
+                    { origins_ptr[iSo + 0 * o_col], origins_ptr[iSo + 1 * o_col], origins_ptr[iSo + 2 * o_col] },
+                    { directions_ptr[iSd + 0 * d_col], directions_ptr[iSd + 1 * d_col], directions_ptr[iSd + 2 * d_col] },
                     t_init, mask
                 );
                 if (custom_type != CustomType::None) rays.get()[i].hit.auxData = &context;
             }
 
-            dispatch_bvh_call(bvh_ptr.get(), [&](auto& bvh) {
+            dispatch_bvh_call(active_bvh_, [&](auto& bvh) {
                 using BVHType = std::decay_t<decltype(bvh)>;
 
                 if constexpr (std::is_same_v<BVHType, tinybvh::BVH>) {
                     const bool is_tlas = bvh.isTLAS();
 
-                    // Only use packet path for standard BLAS BVH
-                    const bool use_packets = want_packets && !is_tlas;
-
-                    if (use_packets) {
+                    if (want_packets) {
                         #ifdef _OPENMP
                         #pragma omp parallel for schedule(dynamic)
                         #endif
@@ -1077,7 +1347,7 @@ struct PyBVH {
                             const py::ssize_t end = std::min(i + 256, n_rays);
                             if (end - i == 256) {
                                 // Run 256-ray intersection kernel
-                                #ifdef BVH_USEAVX
+                                #ifdef BVH_USESSE
                                 bvh.Intersect256RaysSSE(&rays.get()[i]);
                                 #else
                                 bvh.Intersect256Rays(&rays.get()[i]);
@@ -1085,12 +1355,12 @@ struct PyBVH {
                                 // Convert to occlusion flags (t reduced?)
                                 for (py::ssize_t j = i; j < end; ++j) {
                                     const float t_init = t_max_ptr ? t_max_ptr[j] : 1e30f;
-                                    if (rays.get()[j].hit.t < t_init) occluded[(size_t)j] = 1;
+                                    if (rays.get()[j].hit.t < t_init) occluded[static_cast<size_t>(j)] = 1;
                                 }
                             } else {
                                 // remaining rays: scalar occlusion
                                 for (py::ssize_t j = i; j < end; ++j) {
-                                    if (bvh.IsOccluded(rays.get()[j])) occluded[(size_t)j] = 1;
+                                    if (bvh.IsOccluded(rays.get()[j])) occluded[static_cast<size_t>(j)] = 1;
                                 }
                             }
                         }
@@ -1100,7 +1370,7 @@ struct PyBVH {
                         #pragma omp parallel for schedule(dynamic)
                         #endif
                         for (py::ssize_t i = 0; i < n_rays; ++i) {
-                            if (bvh.IsOccluded(rays.get()[i])) occluded[(size_t)i] = 1;
+                            if (bvh.IsOccluded(rays.get()[i])) occluded[static_cast<size_t>(i)] = 1;
                         }
                     }
                 } else {
@@ -1109,7 +1379,7 @@ struct PyBVH {
                     #pragma omp parallel for schedule(dynamic)
                     #endif
                     for (py::ssize_t i = 0; i < n_rays; ++i) {
-                        if (bvh.IsOccluded(rays.get()[i])) occluded[(size_t)i] = 1;
+                        if (bvh.IsOccluded(rays.get()[i])) occluded[static_cast<size_t>(i)] = 1;
                     }
                 }
             });
@@ -1117,20 +1387,20 @@ struct PyBVH {
 
         // Pack Python bools
         auto* outp = result.mutable_data();
-        for (py::ssize_t i = 0; i < n_rays; ++i) outp[i] = (occluded[(size_t)i] != 0);
+        for (py::ssize_t i = 0; i < n_rays; ++i) outp[i] = (occluded[static_cast<size_t>(i)] != 0);
         return result;
     }
 
     [[nodiscard]] bool intersect_sphere(const py::object& center_obj, float radius) const {
-        if (!bvh_ptr || bvh_ptr->triCount == 0) {
+        if (!active_bvh_ || active_bvh_->triCount == 0) {
             return false;
         }
-        if (bvh_ptr->layout != tinybvh::BVHBase::LAYOUT_BVH) {
+        if (active_bvh_->layout != tinybvh::BVHBase::LAYOUT_BVH) {
             throw std::runtime_error("Sphere intersection is only supported for the standard BVH layout.");
         }
         // This static_cast is safe because the layout has just been checked
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
-        const auto* bvh = static_cast<const tinybvh::BVH*>(bvh_ptr.get());
+        const auto* bvh = static_cast<const tinybvh::BVH*>(active_bvh_);
         tinybvh::bvhvec3 center = py_obj_to_vec3(center_obj);
         return bvh->IntersectSphere(center, radius);
     }
@@ -1138,12 +1408,12 @@ struct PyBVH {
     // Refitting, TLAS
 
     void refit() const {
-        if (!bvh_ptr || bvh_ptr->layout != tinybvh::BVHBase::LAYOUT_BVH) {
+        if (!active_bvh_ || active_bvh_->layout != tinybvh::BVHBase::LAYOUT_BVH) {
             throw std::runtime_error("Refit is only supported for the standard BVH layout.");
         }
         // This static_cast is safe because the layout has just been checked
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
-        auto* bvh = static_cast<tinybvh::BVH*>(bvh_ptr.get());
+        auto* bvh = static_cast<tinybvh::BVH*>(active_bvh_);
 
         if (!bvh->refittable) {
             throw std::runtime_error("BVH is not refittable. This is expected for a BVH built with high quality (spatial splits).");
@@ -1176,12 +1446,12 @@ struct PyBVH {
         // Extract the BVHBase* pointers from the BLASes
         for (const auto& blas_obj : blases_py) {
             auto& py_blas = blas_obj.cast<PyBVH&>();
-            if (!py_blas.bvh_ptr) {
+            if (!py_blas.active_bvh_) {
                 throw std::runtime_error("One of the provided BLASes is uninitialized.");
             }
             // Get raw pointer from the unique_ptr. This correctly gets the BVHBase*
             // regardless of the BLAS's actual layout (Standard, SoA, etc.)
-            wrapper->blas_pointers.push_back(py_blas.bvh_ptr.get());
+            wrapper->blas_pointers.push_back(py_blas.active_bvh_);
         }
 
         // Populate instance data
@@ -1211,7 +1481,7 @@ struct PyBVH {
             static_cast<uint32_t>(wrapper->blas_pointers.size())
         );
 
-        wrapper->bvh_ptr.reset(tlas_bvh.release()); // transfer ownership
+        finalize_build(wrapper, std::move(tlas_bvh)); // transfer ownership
         return wrapper;
     }
 
@@ -1276,18 +1546,18 @@ struct PyBVH {
              wrapper->source_geometry_refs.append(py::cast<py::array>(indices_obj));
         }
 
-        wrapper->bvh_ptr.reset(bvh.release());  // transfer ownership
+        finalize_build(wrapper, std::move(bvh));  // transfer ownership
         return wrapper;
 
     }
 
     void save(const py::object& filepath_obj) const {
-        if (!bvh_ptr || bvh_ptr->layout != tinybvh::BVHBase::LAYOUT_BVH) {
+        if (!active_bvh_ || active_bvh_->layout != tinybvh::BVHBase::LAYOUT_BVH) {
             throw std::runtime_error("Saving is only supported for the standard BVH layout.");
         }
         // This static_cast is safe because the layout has just been checked
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
-        auto* bvh = static_cast<tinybvh::BVH*>(bvh_ptr.get());
+        auto* bvh = static_cast<tinybvh::BVH*>(active_bvh_);
 
         auto filepath = py::str(filepath_obj).cast<std::string>();
         bvh->Save(filepath.c_str());
@@ -1299,12 +1569,12 @@ struct PyBVH {
 
         // TODO: Why does this produce garbage SOMETIMES ? (Kept your original comment)
 
-        if (!bvh_ptr || bvh_ptr->layout != tinybvh::BVHBase::LAYOUT_BVH) {
+        if (!active_bvh_ || active_bvh_->layout != tinybvh::BVHBase::LAYOUT_BVH) {
             throw std::runtime_error("Optimization is only supported for the standard BVH layout.");
         }
         // This static_cast is safe because the layout has just been checked
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
-        auto* bvh = static_cast<tinybvh::BVH*>(bvh_ptr.get());
+        auto* bvh = static_cast<tinybvh::BVH*>(active_bvh_);
 
         tinybvh::BVH_Verbose verbose_bvh;
 
@@ -1327,32 +1597,32 @@ struct PyBVH {
         }
         // tinybvh expects a specific size: N*N bits per triangle
         // The array should contain (triCount * N * N) / 32 uint32_t values
-        const size_t expected_size = (bvh_ptr->triCount * N * N + 31) / 32;
+        const size_t expected_size = (active_bvh_->triCount * N * N + 31) / 32;
         if (static_cast<size_t>(map_data.size()) != expected_size) {
             throw std::runtime_error("Opacity map data has incorrect size for the given N and primitive count.");
         }
 
         opacity_map_ref = map_data; // Keep reference
-        bvh_ptr->SetOpacityMicroMaps(opacity_map_ref.mutable_data(), N);
+        active_bvh_->SetOpacityMicroMaps(opacity_map_ref.mutable_data(), N);
     }
 
     void compact() const {
-        if (!bvh_ptr || bvh_ptr->layout != tinybvh::BVHBase::LAYOUT_BVH) {
+        if (!active_bvh_ || active_bvh_->layout != tinybvh::BVHBase::LAYOUT_BVH) {
             throw std::runtime_error("Compaction is only supported for the standard BVH layout.");
         }
         // This static_cast is safe because the layout has just been checked
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
-        auto* bvh = static_cast<tinybvh::BVH*>(bvh_ptr.get());
+        auto* bvh = static_cast<tinybvh::BVH*>(active_bvh_);
         bvh->Compact();
     }
 
     void split_leaves(uint32_t max_prims) const {
-        if (!bvh_ptr || bvh_ptr->layout != tinybvh::BVHBase::LAYOUT_BVH) {
+        if (!active_bvh_ || active_bvh_->layout != tinybvh::BVHBase::LAYOUT_BVH) {
             throw std::runtime_error("Splitting leaves is only supported for the standard BVH layout.");
         }
         // This static_cast is safe because the layout has just been checked
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
-        auto* bvh = static_cast<tinybvh::BVH*>(bvh_ptr.get());
+        auto* bvh = static_cast<tinybvh::BVH*>(active_bvh_);
         if (bvh->triCount == 0) throw std::runtime_error("BVH is not initialized.");
         if (bvh->usedNodes + bvh->triCount > bvh->allocatedNodes) {
             throw std::runtime_error("Cannot split leaves: not enough allocated node capacity.");
@@ -1361,20 +1631,20 @@ struct PyBVH {
     }
 
     void combine_leaves() const {
-        if (!bvh_ptr || bvh_ptr->layout != tinybvh::BVHBase::LAYOUT_BVH) {
+        if (!active_bvh_ || active_bvh_->layout != tinybvh::BVHBase::LAYOUT_BVH) {
             throw std::runtime_error("Combining leaves is only supported for the standard BVH layout.");
         }
         // This static_cast is safe because the layout has just been checked
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
-        auto* bvh = static_cast<tinybvh::BVH*>(bvh_ptr.get());
+        auto* bvh = static_cast<tinybvh::BVH*>(active_bvh_);
         if (bvh->triCount == 0) throw std::runtime_error("BVH is not initialized.");
         bvh->CombineLeafs();
     }
 
     [[nodiscard]] bool is_tlas() const {
-        if (!bvh_ptr) return false;
+        if (!active_bvh_) return false;
 
-        return dispatch_bvh_call(bvh_ptr.get(), [](auto& bvh){
+        return dispatch_bvh_call(active_bvh_, [](auto& bvh){
             using BvhType = std::decay_t<decltype(bvh)>;
             // Only the standard BVH layout can be a TLAS
             if constexpr (std::is_same_v<BvhType, tinybvh::BVH>) {
@@ -1386,22 +1656,22 @@ struct PyBVH {
     }
 
     [[nodiscard]] py::array get_nodes() const {
-        if (!bvh_ptr || bvh_ptr->layout != tinybvh::BVHBase::LAYOUT_BVH) {
+        if (!active_bvh_ || active_bvh_->layout != tinybvh::BVHBase::LAYOUT_BVH) {
             return py::array(py::dtype::of<tinybvh::BVH::BVHNode>(), {0}, {});
         }
         // This static_cast is safe because the layout has just been checked
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
-        const auto* bvh = static_cast<const tinybvh::BVH*>(bvh_ptr.get());
+        const auto* bvh = static_cast<const tinybvh::BVH*>(active_bvh_);
         return py::array_t<tinybvh::BVH::BVHNode>(bvh->usedNodes, bvh->bvhNode, py::cast(*this));
     }
 
     static py::array get_prims_indices(const PyBVH &self) {
-        if (!self.bvh_ptr || self.bvh_ptr->layout != tinybvh::BVHBase::LAYOUT_BVH) {
+        if (!self.active_bvh_ || self.active_bvh_->layout != tinybvh::BVHBase::LAYOUT_BVH) {
             return py::array_t<uint32_t>(0); // return empty uint32 array if not standard
         }
         // This static_cast is safe because the layout has just been checked
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
-        const auto* bvh = static_cast<const tinybvh::BVH*>(self.bvh_ptr.get());
+        const auto* bvh = static_cast<const tinybvh::BVH*>(self.active_bvh_);
 
         if (bvh->idxCount == 0) {
             return py::array_t<uint32_t>(0);
@@ -1413,12 +1683,25 @@ struct PyBVH {
         );
     }
 
+    [[nodiscard]] py::list get_cached_layouts() const {
+        py::list cached;
+        if (soa_)      cached.append(Layout::SoA);
+        if (mbvh4_)    cached.append(Layout::MBVH4);
+        if (mbvh8_)    cached.append(Layout::MBVH8);
+        if (bvh4_cpu_) cached.append(Layout::BVH4_CPU);
+        if (bvh4_gpu_) cached.append(Layout::BVH4_GPU);
+        if (cwbvh_)    cached.append(Layout::CWBVH);
+        if (bvh8_cpu_) cached.append(Layout::BVH8_CPU);
+        if (bvh_gpu_)  cached.append(Layout::BVH_GPU);
+        return cached;
+    }
+
     [[nodiscard]] std::string get_repr() const {
-        if (!bvh_ptr) return "<pytinybvh.BVH (uninitialized)>";
+        if (!active_bvh_) return "<pytinybvh.BVH (uninitialized)>";
 
         std::string repr = "<pytinybvh.BVH (";
-        repr += std::to_string(bvh_ptr->triCount) + " primitives, ";
-        repr += std::to_string(bvh_ptr->usedNodes) + " nodes, ";
+        repr += std::to_string(active_bvh_->triCount) + " primitives, ";
+        repr += std::to_string(active_bvh_->usedNodes) + " nodes, ";
 
         switch (custom_type) {
         case CustomType::AABB:   repr += "Geometry: AABBs, "; break;
@@ -1437,13 +1720,12 @@ struct PyBVH {
             }
             repr += "Type: BLAS, Quality: " + quality_str + ", ";
         }
-        repr += "Layout: " + layout_to_string(bvh_ptr->layout) + ", ";
-        repr += std::string("Status: ") + (bvh_ptr->may_have_holes ? "Not compact" : "Compact");
+        repr += "Layout: " + layout_to_string(active_bvh_->layout) + ", ";
+        repr += std::string("Status: ") + (active_bvh_->may_have_holes ? "Not compact" : "Compact");
         repr += ")>";
         return repr;
     }
 };
-
 
 
 // =============================================== pybind11 module =====================================================
@@ -1451,6 +1733,59 @@ struct PyBVH {
 
 PYBIND11_MODULE(pytinybvh, m) {
     m.doc() = "Python bindings for the tinybvh library";
+
+    // Layout capabilities and information helpers
+    m.def("capabilities", [] {
+        py::dict out, simd, layouts;
+
+        simd["SSE4_2"] = tb_caps::SSE;
+        simd["AVX"]    = tb_caps::AVX;
+        simd["AVX2"]   = tb_caps::AVX2;
+        simd["NEON"]   = tb_caps::NEON;
+
+        auto add = [&](Layout L, bool trav) {
+            py::dict row; row["convert"] = true; row["traverse"] = trav;
+            layouts[layout_to_string(L)] = row;
+        };
+        add(Layout::Standard,  true);
+        add(Layout::SoA,       tb_caps::SoA_trav);
+        add(Layout::BVH4_CPU,  tb_caps::BVH4CPU_trav);
+        add(Layout::CWBVH,     tb_caps::CWBVH_trav);
+        add(Layout::BVH8_CPU,  tb_caps::BVH8CPU_trav);
+        add(Layout::BVH_GPU,   true);
+        add(Layout::BVH4_GPU,  true);
+
+        out["simd"]    = simd;
+        out["layouts"] = layouts;
+        return out;
+    });
+
+    py::enum_<Layout>(m, "Layout")
+        .value("Standard",   Layout::Standard)
+        .value("SoA",        Layout::SoA)
+        .value("BVH_GPU",    Layout::BVH_GPU)
+        .value("MBVH4",      Layout::MBVH4)
+        .value("MBVH8",      Layout::MBVH8)
+        .value("BVH4_CPU",   Layout::BVH4_CPU)
+        .value("BVH4_GPU",   Layout::BVH4_GPU)
+        .value("CWBVH",      Layout::CWBVH)
+        .value("BVH8_CPU",   Layout::BVH8_CPU);
+
+    m.def("layout_to_string", [](Layout L){ return std::string(layout_to_string(L)); });
+
+    m.def("supports_layout",
+          [](Layout L, bool for_traversal) { return supports_layout(L, for_traversal); },
+          py::arg("layout"), py::arg("for_traversal") = true);
+
+    m.def("require_layout",
+          [](Layout L, bool for_traversal) {
+              if (!supports_layout(L, for_traversal)) {
+                  throw std::runtime_error(
+                      std::string("Requested layout '") + layout_to_string(L) + "' unavailable: " +
+                      explain_requirement(L));
+              }
+          },
+          py::arg("layout"), py::arg("for_traversal") = true);
 
     // numpy dtypes for batched hit records, vec3, and BVH node
     PYBIND11_NUMPY_DTYPE(HitRecord, prim_id, inst_id, t, u, v);
@@ -1471,7 +1806,7 @@ PYBIND11_MODULE(pytinybvh, m) {
     PYBIND11_NUMPY_DTYPE(TLASInstance, transform, blas_id, mask);
     m.attr("instance_dtype") = py::dtype::of<TLASInstance>();
 
-    // Build quality, Geometry type, BVH Layout, and Packet mode enums exposed to Python
+    // Build quality, Geometry type, BVH Layout, Packet Mode, and Cache Policy enums exposed to Python
     py::enum_<BuildQuality>(m, "BuildQuality", "Enum for selecting BVH build quality.")
         .value("Quick", BuildQuality::Quick, "Fastest build, lower quality queries.")
         .value("Balanced", BuildQuality::Balanced, "Balanced build time and query performance (default).")
@@ -1482,21 +1817,14 @@ PYBIND11_MODULE(pytinybvh, m) {
         .value("AABBs", GeometryType::AABBs, "The BVH was built over custom Axis-Aligned Bounding Boxes.")
         .value("Spheres", GeometryType::Spheres, "The BVH was built over a point cloud with a radius (spheres).");
 
-    py::enum_<tinybvh::BVHBase::BVHType> layout_enum(m, "Layout",
-        "Enum for the internal memory layout of the BVH.");
-
-        layout_enum.value("Standard", tinybvh::BVHBase::LAYOUT_BVH,
-            "Standard BVH layout (default).");
-        layout_enum.value("SoA", tinybvh::BVHBase::LAYOUT_BVH_SOA,
-            "Structure of Arrays layout, optimized for SSE/NEON traversal.");
-        layout_enum.export_values();
-
-        // TODO: Add other layouts
+    py::enum_<CachePolicy>(m, "CachePolicy")
+        .value("ActiveOnly", CachePolicy::ActiveOnly)
+        .value("All", CachePolicy::All);
 
     py::enum_<PacketMode>(m, "PacketMode")
-        .value("Auto",  PacketMode::Auto,  "Use packets only when safe/beneficial (default).")
-        .value("Never", PacketMode::Never, "Always use scalar traversal.")
-        .value("Force", PacketMode::Force, "Force packet traversal (unsafe if origins differ).");
+        .value("Auto",  PacketMode::Auto,  "Use packets only if rays have a shared origin. Assumes coherent directions.")
+        .value("Never", PacketMode::Never, "Always use scalar traversal. Safest for non-coherent rays.")
+        .value("Force", PacketMode::Force, "Force packet traversal. This can provide a speedup, but is unsafe if rays are not coherent (even if they have the same origin).");
 
     // Main Python classes
     py::class_<PyRay>(m, "Ray", "Represents a ray for intersection queries.")
@@ -1555,6 +1883,41 @@ PYBIND11_MODULE(pytinybvh, m) {
 
     py::class_<PyBVH>(m, "BVH", "A Bounding Volume Hierarchy for fast ray intersections.")
 
+        // Cache policy management
+
+        .def("set_cache_policy", &PyBVH::set_cache_policy,
+            R"((
+                Sets caching policy for converted layouts.
+
+                Args:
+                    policy (CachePolicy): The new policy to use (ActiveOnly or All).
+                ))",
+            py::arg("policy"))
+
+        .def("clear_cached_layouts", &PyBVH::clear_cached_layouts,
+            R"((
+                Frees the memory of all cached layouts, except for the active one and the base layout.
+            ))")
+
+        // Converter method
+
+        .def("convert_to", &PyBVH::convert_to,
+            R"((
+                Converts the BVH to a different internal memory layout, modifying it in-place.
+
+                This allows optimizing the BVH for different traversal algorithms (SSE, AVX, etc.).
+                The caching policy of converted layouts can be controlled (see `set_cache_policy` and `clear_cached_layouts`).
+
+                Args:
+                    layout (Layout): The target memory layout.
+                    compact (bool): Whether to compact the BVH during conversion. Defaults to True.
+                    strict (bool): If True, raises a RuntimeError if the target layout is not
+                                   supported for traversal on the current system. Defaults to False.
+                ))",
+            py::arg("layout"),
+            py::arg("compact") = true,
+            py::arg("strict") = false)
+
         // Core Builders
 
         .def_static("from_vertices", &PyBVH::from_vertices,
@@ -1574,7 +1937,7 @@ PYBIND11_MODULE(pytinybvh, m) {
             ))",
             // noconvert() to enforce direct memory access!
             py::arg("vertices").noconvert(), py::arg("quality") = BuildQuality::Balanced,
-            py::arg("cost_traversal") = C_TRAV, py::arg("cost_intersection") = C_INT)
+            py::arg("traversal_cost") = C_TRAV, py::arg("intersection_cost") = C_INT)
 
         .def_static("from_indexed_mesh", &PyBVH::from_indexed_mesh,
             R"((
@@ -1597,7 +1960,7 @@ PYBIND11_MODULE(pytinybvh, m) {
             // noconvert() to enforce direct memory access!
             py::arg("vertices").noconvert(), py::arg("indices").noconvert(),
             py::arg("quality") = BuildQuality::Balanced,
-            py::arg("cost_traversal") = C_TRAV, py::arg("cost_intersection") = C_INT)
+            py::arg("traversal_cost") = C_TRAV, py::arg("intersection_cost") = C_INT)
 
         .def_static("from_aabbs", &PyBVH::from_aabbs,
             R"((
@@ -1617,7 +1980,7 @@ PYBIND11_MODULE(pytinybvh, m) {
             ))",
             // noconvert() to enforce direct memory access!
             py::arg("aabbs").noconvert(), py::arg("quality") = BuildQuality::Balanced,
-            py::arg("cost_traversal") = C_TRAV, py::arg("cost_intersection") = C_INT)
+            py::arg("traversal_cost") = C_TRAV, py::arg("intersection_cost") = C_INT)
 
         // Convenience builders (with copying)
 
@@ -1636,7 +1999,7 @@ PYBIND11_MODULE(pytinybvh, m) {
             ))",
             // no need for noconvert() here, we copy anyway
             py::arg("triangles"), py::arg("quality") = BuildQuality::Balanced,
-            py::arg("cost_traversal") = C_TRAV, py::arg("cost_intersection") = C_INT)
+            py::arg("traversal_cost") = C_TRAV, py::arg("intersection_cost") = C_INT)
 
         .def_static("from_points", &PyBVH::from_points,
              R"((
@@ -1653,10 +2016,13 @@ PYBIND11_MODULE(pytinybvh, m) {
             ))",
             // no need for noconvert() here, we copy anyway
             py::arg("points"), py::arg("radius") = 1e-5f, py::arg("quality") = BuildQuality::Balanced,
-            py::arg("cost_traversal") = C_TRAV, py::arg("cost_intersection") = C_INT)
+            py::arg("traversal_cost") = C_TRAV, py::arg("intersection_cost") = C_INT)
 
-        // TODO: Proper Layout converter method
-        .def("convert_to_soa", &PyBVH::convert_to_soa)
+        // Converter method
+        .def("convert_to", &PyBVH::convert_to,
+            py::arg("layout"),
+            py::arg("compact") = true,
+            py::arg("strict") = false)
 
         // Intersection methods
 
@@ -1691,9 +2057,9 @@ PYBIND11_MODULE(pytinybvh, m) {
                                                      For a ray to test an instance for intersection, the bitwise
                                                      AND of the ray's mask and the instance's mask must be non-zero.
                                                      If not provided, rays default to mask 0xFFFF (intersect all instances).
-                    packet (PacketMode, optional): Choose packet usage strategy. Defaults to Auto.
-                    same_origin_eps (float, optional): Epsilon for the "same origin" test. Defaults to 1e-6.
-                    warn_on_incoherent (bool, optional): Emit a warning when origins differ. Defaults to True.
+                    packet (PacketMode, optional): Choose packet usage strategy. Defaults to Never.
+                    same_origin_eps (float, optional): Epsilon for same-origin test. Default 1e-6.
+                    warn_on_incoherent (bool, optional): Warn when rays differ in origin. Default True.
 
                 Returns:
                     numpy.ndarray: A structured array of shape (N,) with dtype
@@ -1704,7 +2070,7 @@ PYBIND11_MODULE(pytinybvh, m) {
            ))",
             py::arg("origins"), py::arg("directions"),
             py::arg("t_max") = py::none(), py::arg("masks") = py::none(),
-            py::arg("packet") = PacketMode::Auto,
+            py::arg("packet") = PacketMode::Never,
             py::arg("same_origin_eps") = 1e-6f,
             py::arg("warn_on_incoherent") = true)
 
@@ -1738,7 +2104,7 @@ PYBIND11_MODULE(pytinybvh, m) {
                                                      For a ray to test an instance for intersection, the bitwise
                                                      AND of the ray's mask and the instance's mask must be non-zero.
                                                      If not provided, rays default to mask 0xFFFF (intersect all instances).
-                    packet (PacketMode, optional): Auto (default), Never, Force.
+                    packet (PacketMode, optional): Choose packet usage strategy. Defaults to Never.
                     same_origin_eps (float, optional): Epsilon for same-origin test. Default 1e-6.
                     warn_on_incoherent (bool, optional): Warn when rays differ in origin. Default True.
 
@@ -1747,7 +2113,7 @@ PYBIND11_MODULE(pytinybvh, m) {
            ))",
             py::arg("origins"), py::arg("directions"),
             py::arg("t_max") = py::none(), py::arg("masks") = py::none(),
-            py::arg("packet") = PacketMode::Auto,
+            py::arg("packet") = PacketMode::Never,
             py::arg("same_origin_eps") = 1e-6f,
             py::arg("warn_on_incoherent") = true)
 
@@ -1771,10 +2137,10 @@ PYBIND11_MODULE(pytinybvh, m) {
         // Getters for the main data
 
         .def_property_readonly("nodes", &PyBVH::get_nodes,
-            "The structured numpy array of BVH nodes (only available for standard layout).")
+            "The structured numpy array of BVH nodes (only for standard layout).")
 
         .def_property_readonly("prim_indices", &PyBVH::get_prims_indices,
-            "The array of primitive indices (only available for standard layout).")
+            "The array of primitive indices (only for standard layout).")
 
         // Refitting, TLAS
 
@@ -1904,54 +2270,54 @@ PYBIND11_MODULE(pytinybvh, m) {
 
         // Read-write properties
 
-        .def_property("cost_traversal",
+        .def_property("traversal_cost",
             [](const PyBVH &self) {
-                if (!self.bvh_ptr) throw std::runtime_error("BVH is not initialized.");
-                return self.bvh_ptr->c_trav;
+                if (!self.active_bvh_) throw std::runtime_error("BVH is not initialized.");
+                return self.active_bvh_->c_trav;
             },
-            [](PyBVH &self, float value) {
-                if (!self.bvh_ptr) throw std::runtime_error("BVH is not initialized.");
+            [](const PyBVH &self, float value) {
+                if (!self.active_bvh_) throw std::runtime_error("BVH is not initialized.");
                 if (value < 0) throw std::runtime_error("Traversal cost must be non-negative.");
-                self.bvh_ptr->c_trav = value;
+                self.active_bvh_->c_trav = value;
             },
             "The traversal cost used in the Surface Area Heuristic (SAH) calculation during the build.")
 
-        .def_property("cost_intersection",
+        .def_property("intersection_cost",
             [](const PyBVH &self) {
-                if (!self.bvh_ptr) throw std::runtime_error("BVH is not initialized.");
-                return self.bvh_ptr->c_int;
+                if (!self.active_bvh_) throw std::runtime_error("BVH is not initialized.");
+                return self.active_bvh_->c_int;
             },
-            [](PyBVH &self, float value) {
-                if (!self.bvh_ptr) throw std::runtime_error("BVH is not initialized.");
+            [](const PyBVH &self, float value) {
+                if (!self.active_bvh_) throw std::runtime_error("BVH is not initialized.");
                 if (value < 0) throw std::runtime_error("Intersection cost must be non-negative.");
-                self.bvh_ptr->c_int = value;
+                self.active_bvh_->c_int = value;
             },
             "The intersection cost used in the Surface Area Heuristic (SAH) calculation during the build.")
 
         // Read-only properties
 
-        .def_property_readonly("node_count", [](const PyBVH &self){ return self.bvh_ptr->usedNodes; }, "Total number of nodes in the BVH.")
+        .def_property_readonly("node_count", [](const PyBVH &self){ return self.active_bvh_->usedNodes; }, "Total number of nodes in the BVH.")
 
-        .def_property_readonly("prim_count", [](const PyBVH &self){ return self.bvh_ptr->triCount; }, "Total number of primitives in the BVH.")
+        .def_property_readonly("prim_count", [](const PyBVH &self){ return self.active_bvh_->triCount; }, "Total number of primitives in the BVH.")
 
         .def_property_readonly("aabb_min", [](PyBVH &self) -> py::array {
-            if (!self.bvh_ptr) return py::array_t<float>(0);
+            if (!self.active_bvh_) return py::array_t<float>(0);
             // Create a 1D array of shape (3,) that is a view into the bvh.aabbMin data
             std::vector<py::ssize_t> shape = {3};
             return py::array_t<float>(
                 shape,
-                &self.bvh_ptr->aabbMin.x,   // data pointer
+                &self.active_bvh_->aabbMin.x,   // data pointer
                 py::cast(self)          // owner
             );
         }, "The minimum corner of the root axis-aligned bounding box.")
 
         .def_property_readonly("aabb_max", [](PyBVH &self) -> py::array {
-            if (!self.bvh_ptr) return py::array_t<float>(0);
+            if (!self.active_bvh_) return py::array_t<float>(0);
             // Create a 1D array of shape (3,) that is a view into the bvh.aabbMax data
             std::vector<py::ssize_t> shape = {3};
             return py::array_t<float>(
                 shape,
-                &self.bvh_ptr->aabbMax.x,   // data pointer
+                &self.active_bvh_->aabbMax.x,   // data pointer
                 py::cast(self)          // owner
             );
         }, "The maximum corner of the root axis-aligned bounding box.")
@@ -1960,8 +2326,8 @@ PYBIND11_MODULE(pytinybvh, m) {
            "The build quality level used to construct the BVH.")
 
         .def_property_readonly("leaf_count", [](const PyBVH &self) {
-            if (!self.bvh_ptr) return 0;
-            return dispatch_bvh_call(self.bvh_ptr.get(), [](auto& bvh) {
+            if (!self.active_bvh_) return 0;
+            return dispatch_bvh_call(self.active_bvh_, [](auto& bvh) {
                 // Use a compile-time if to check if the method exists for the concrete type
                 // We know it exists on tinybvh::BVH. It also exists on MBVH<M>
                 using BvhType = std::decay_t<decltype(bvh)>;
@@ -1972,22 +2338,22 @@ PYBIND11_MODULE(pytinybvh, m) {
                     return 0;
                 }
             });
-            }, "The total number of leaf nodes in the BVH (not supported by all layouts).")
+            }, "The total number of leaf nodes (only for standard layout).")
 
         .def_property_readonly("sah_cost", [](const PyBVH &self) {
-            if (!self.bvh_ptr || self.bvh_ptr->triCount == 0) {
+            if (!self.active_bvh_ || self.active_bvh_->triCount == 0) {
                 return INFINITY;
             }
             // Dispatch the call to the appropriate concrete BVH type
             // Calling with SAHCost(0) is compatible with all layouts that have the method
-            return dispatch_bvh_call(self.bvh_ptr.get(), [](auto& bvh) {
+            return dispatch_bvh_call(self.active_bvh_, [](auto& bvh) {
                 return bvh.SAHCost(0);
             });
-            }, R"((Calculates the Surface Area Heuristic (SAH) cost of the BVH. Lower is better.))")
+            }, R"((Calculates the Surface Area Heuristic (SAH) cost of the BVH.))")
 
         .def_property_readonly("epo_cost", [](const PyBVH &self) {
-            if (!self.bvh_ptr || self.bvh_ptr->triCount == 0) return 0.0f;
-            return dispatch_bvh_call(self.bvh_ptr.get(), [](auto& bvh) {
+            if (!self.active_bvh_ || self.active_bvh_->triCount == 0) return 0.0f;
+            return dispatch_bvh_call(self.active_bvh_, [](auto& bvh) {
                 using BvhType = std::decay_t<decltype(bvh)>;
                 if constexpr (std::is_same_v<BvhType, tinybvh::BVH>) {
                     return bvh.EPOCost();
@@ -1995,11 +2361,11 @@ PYBIND11_MODULE(pytinybvh, m) {
                     return 0.0f; // EPO is not defined for other layouts
                 }
             });
-            }, "Calculates the EPO cost of the BVH (only supported for standard layout).")
+            }, "Calculates the Expected Projected Overlap (EPO) cost of the BVH (only for standard layout).")
 
         .def_property_readonly("layout", [](const PyBVH &self) {
-            return self.bvh_ptr->layout;
-        }, "The current memory layout of the BVH.")
+            return self.active_layout_;
+            }, "The current active memory layout of the BVH.")
 
         .def_property_readonly("is_tlas", &PyBVH::is_tlas,
             "Returns True if the BVH is a Top-Level Acceleration Structure (TLAS).")
@@ -2018,8 +2384,11 @@ PYBIND11_MODULE(pytinybvh, m) {
 
         .def_property_readonly("is_compact", [](const PyBVH &self) {
             // may_have_holes is true when it's *not* compact
-            return self.bvh_ptr ? !self.bvh_ptr->may_have_holes : true;
-        }, "Returns True if the BVH node and index arrays are contiguous in memory.")
+            return self.active_bvh_ ? !self.active_bvh_->may_have_holes : true;
+        }, "Returns True if the BVH is contiguous in memory.")
+
+        .def_property_readonly("cached_layouts", &PyBVH::get_cached_layouts,
+            "A list of the BVH layouts currently held in the cache.")
 
         .def("__repr__", &PyBVH::get_repr)
 

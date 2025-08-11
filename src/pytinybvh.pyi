@@ -1,10 +1,11 @@
 from __future__ import annotations
-import sys
 from pathlib import Path
 import numpy as np
-from typing import Optional, Union, List, Tuple, ClassVar
+from typing import Optional, Union, List, Tuple, ClassVar, Dict, Any
 from enum import IntEnum
 
+
+# Type aliases
 
 PathLike = Union[str, Path]
 """
@@ -16,6 +17,57 @@ Vec3Like = Union[List[float], Tuple[float, float, float], np.ndarray]
 A type hint for objects that can be interpreted as a 3D vector,
 including lists, tuples, and NumPy arrays of 3 floats.
 """
+
+
+
+# Top-level functions
+
+def capabilities() -> Dict[str, Any]:
+    """
+    Returns a dictionary detailing the compile-time capabilities of the library.
+
+    This includes detected SIMD instruction sets and which BVH layouts support
+    conversion and traversal on the current system.
+
+    Returns:
+        Dict[str, Any]: A dictionary with 'simd' and 'layouts' keys.
+    """
+    ...
+
+def supports_layout(layout: Layout, for_traversal: bool = True) -> bool:
+    """
+    Checks if the current system supports a given BVH layout.
+
+    Args:
+        layout (Layout): The layout to check.
+        for_traversal (bool): If True (default), checks if the layout is supported for
+                              ray traversal. If False, checks if it's supported for
+                              conversion (which is always True for valid layouts).
+
+    Returns:
+        bool: True if the layout is supported, False otherwise.
+    """
+    ...
+
+def require_layout(layout: Layout, for_traversal: bool = True) -> None:
+    """
+    Asserts that a given BVH layout is supported, raising a RuntimeError if not.
+
+    This is useful for writing tests or code that depends on a specific high-performance
+    layout being available.
+
+    Args:
+        layout (Layout): The layout to require.
+        for_traversal (bool): If True (default), requires traversal support.
+
+    Raises:
+        RuntimeError: If the layout is not supported on the current system.
+    """
+    ...
+
+
+
+# NumPy dtypes
 
 bvh_node_dtype: np.dtype
 """
@@ -54,6 +106,8 @@ instance_dtype = np.dtype([
 """
 
 
+# Enums
+
 class BuildQuality(IntEnum):
     """Enum for selecting BVH build quality."""
 
@@ -89,21 +143,59 @@ class Layout(IntEnum):
     """Enum for the internal memory layout of the BVH."""
 
     Standard: ClassVar[Layout]
-    """Standard BVH layout (default)."""
+    """Standard BVH layout. Always available and traversable."""
 
     SoA: ClassVar[Layout]
-    """Structure of Arrays layout, optimized for SSE/NEON traversal."""
+    """Structure of Arrays layout, optimized for AVX/NEON traversal."""
 
-    if sys.platform in ("linux", "win32", "darwin"):
-        BVH4_CPU: ClassVar[Layout]
-        """
-        4-wide BVH layout, optimized for SSE CPU traversal.
+    BVH_GPU: ClassVar[Layout]
+    """Aila & Laine layout, optimized for GPU traversal (scalar traversal on CPU)."""
 
-        Note:
-            This layout is only available on x86-64 architectures.
-            Attempting to access this on other platforms (e.g., ARM) will
-            result in an AttributeError.
-        """
+    MBVH4: ClassVar[Layout]
+    """
+    4-wide MBVH layout. This is a structural format used as an intermediate for
+    other wide layouts. Not directly traversable.
+    """
+
+    MBVH8: ClassVar[Layout]
+    """
+    8-wide MBVH layout. This is a structural format used as an intermediate for
+    other wide layouts. Not directly traversable.
+    """
+
+    BVH4_CPU: ClassVar[Layout]
+    """4-wide BVH layout, optimized for SSE CPU traversal."""
+
+    BVH4_GPU: ClassVar[Layout]
+    """Quantized 4-wide BVH layout for GPUs (scalar traversal on CPU)."""
+
+    CWBVH: ClassVar[Layout]
+    """Compressed 8-wide BVH layout, optimized for AVX traversal."""
+
+    BVH8_CPU: ClassVar[Layout]
+    """8-wide BVH layout, optimized for AVX2 CPU traversal."""
+
+    def __int__(self) -> int: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def value(self) -> int: ...
+
+
+class CachePolicy(IntEnum):
+    """Enum for managing cached BVH layouts after conversion."""
+
+    ActiveOnly: ClassVar[CachePolicy]
+    """
+    (Default) Free memory of any non-active layouts after a conversion.
+    This minimizes memory usage.
+    """
+
+    All: ClassVar[CachePolicy]
+    """
+    Keep all generated layouts in memory. This uses more memory but makes
+    switching back to a previously used layout instantaneous.
+    """
 
     def __int__(self) -> int: ...
     @property
@@ -113,18 +205,26 @@ class Layout(IntEnum):
 
 
 class PacketMode(IntEnum):
-    """Enum for the batched packets mode."""
-
+    """Enum for controlling SIMD packet traversal in batched queries."""
     Auto: ClassVar[PacketMode]
-    Never: ClassVar[PacketMode]
-    Force: ClassVar[PacketMode]
+    """Use packets only if rays have a shared origin. Assumes coherent directions."""
 
+    Never: ClassVar[PacketMode]
+    """Always use scalar traversal. Safest for non-coherent rays."""
+
+    Force: ClassVar[PacketMode]
+    """
+    Force packet traversal. This can provide a speedup, but is unsafe
+    if rays are not coherent (even if they have the same origin).
+    """
     def __int__(self) -> int: ...
     @property
     def name(self) -> str: ...
     @property
     def value(self) -> int: ...
 
+
+# Main classes
 
 class Ray:
     """Represents a ray for intersection queries."""
@@ -136,27 +236,25 @@ class Ray:
     @property
     def u(self) -> float:
         """
-        Barycentric u-coordinate for triangle hits, or the first
-        texture coordinate for custom geometry like spheres and AABBs.
+        Barycentric u-coordinate, or texture coordinate u when using custom geometry.
         """
         ...
 
     @property
     def v(self) -> float:
         """
-        Barycentric v-coordinate for triangle hits, or the second
-        texture coordinate for custom geometry like spheres and AABBs.
+        Barycentric v-coordinate, or texture coordinate v when using custom geometry.
         """
         ...
 
     @property
     def prim_id(self) -> int:
-        """The ID of the primitive that was hit. -1 if no hit."""
+        """The ID of the primitive hit (-1 for miss)."""
         ...
 
     @property
     def inst_id(self) -> int:
-        """The ID of the instance that was hit. -1 if no hit."""
+        """The ID of the instance hit (-1 for miss or BLAS hit)."""
         ...
 
     def __init__(self, origin: Vec3Like, direction: Vec3Like, t: float = 1e30, mask: int = 0xFFFF) -> None: ...
@@ -165,20 +263,18 @@ class Ray:
 class BVH:
     """A Bounding Volume Hierarchy for fast ray intersections."""
 
-    cost_traversal: float
+    traversal_cost: float
     """
-    The traversal cost used in the Surface Area Heuristic (SAH)
-    calculation. This can be read or modified.
+    The traversal cost used in the Surface Area Heuristic (SAH) calculation.
     """
 
-    cost_intersection: float
+    intersection_cost: float
     """
-    The intersection cost used in the Surface Area Heuristic (SAH)
-    calculation. This can be read or modified.
+    The intersection cost used in the Surface Area Heuristic (SAH) calculation.
     """
 
     @staticmethod
-    def from_triangles(triangles: np.ndarray, quality: BuildQuality = ..., cost_traversal: float = ..., cost_intersection: float = ...) -> BVH:
+    def from_triangles(triangles: np.ndarray, quality: BuildQuality = ..., traversal_cost: float = ..., intersection_cost: float = ...) -> BVH:
         """
         Builds a BVH from a standard triangle array. This is a convenience method that
         copies and reformats the data into the layout required by the BVH.
@@ -187,8 +283,8 @@ class BVH:
             triangles (numpy.ndarray): A float32 array of shape (N, 3, 3) or (N, 9)
                                        representing N triangles.
             quality (BuildQuality): The desired quality of the BVH.
-            cost_traversal (float, optional): The SAH traversal cost.
-            cost_intersection (float, optional): The SAH intersection cost.
+            traversal_cost (float, optional): The SAH traversal cost.
+            intersection_cost (float, optional): The SAH intersection cost.
 
         Returns:
             BVH: A new BVH instance.
@@ -196,7 +292,7 @@ class BVH:
         ...
 
     @staticmethod
-    def from_points(points: np.ndarray, radius: float = 1e-05, quality: BuildQuality = ..., cost_traversal: float = ..., cost_intersection: float = ...) -> BVH:
+    def from_points(points: np.ndarray, radius: float = 1e-05, quality: BuildQuality = ..., traversal_cost: float = ..., intersection_cost: float = ...) -> BVH:
         """
         Builds a BVH from a point cloud. This is a convenience method that creates an
         axis-aligned bounding box for each point and builds the BVH from those.
@@ -205,8 +301,8 @@ class BVH:
             points (numpy.ndarray): A float32 array of shape (N, 3) representing N points.
             radius (float): The radius used to create an AABB for each point.
             quality (BuildQuality): The desired quality of the BVH.
-            cost_traversal (float, optional): The SAH traversal cost.
-            cost_intersection (float, optional): The SAH intersection cost.
+            traversal_cost (float, optional): The SAH traversal cost.
+            intersection_cost (float, optional): The SAH intersection cost.
 
         Returns:
             BVH: A new BVH instance.
@@ -214,7 +310,7 @@ class BVH:
         ...
 
     @staticmethod
-    def from_vertices(vertices: np.ndarray, quality: BuildQuality = ..., cost_traversal: float = ..., cost_intersection: float = ...) -> BVH:
+    def from_vertices(vertices: np.ndarray, quality: BuildQuality = ..., traversal_cost: float = ..., intersection_cost: float = ...) -> BVH:
         """
         Builds a BVH from a flat array of vertices in tinybvh's native format.
 
@@ -226,8 +322,8 @@ class BVH:
             vertices (numpy.ndarray): A float32, C-contiguous array of shape (N * 3, 4).
                                       The 4th component is for padding and is ignored.
             quality (BuildQuality): The desired quality of the BVH.
-            cost_traversal (float, optional): The SAH traversal cost.
-            cost_intersection (float, optional): The SAH intersection cost.
+            traversal_cost (float, optional): The SAH traversal cost.
+            intersection_cost (float, optional): The SAH intersection cost.
 
         Returns:
             BVH: A new BVH instance.
@@ -235,7 +331,7 @@ class BVH:
         ...
 
     @staticmethod
-    def from_indexed_mesh(vertices: np.ndarray, indices: np.ndarray, quality: BuildQuality = ..., cost_traversal: float = ..., cost_intersection: float = ...) -> BVH:
+    def from_indexed_mesh(vertices: np.ndarray, indices: np.ndarray, quality: BuildQuality = ..., traversal_cost: float = ..., intersection_cost: float = ...) -> BVH:
         """
         Builds a BVH from a vertex buffer and an index buffer.
 
@@ -249,8 +345,8 @@ class BVH:
             indices (numpy.ndarray): A uint32, C-contiguous array of shape (N, 3), where N is the
                                      number of triangles.
             quality (BuildQuality): The desired quality of the BVH.
-            cost_traversal (float, optional): The SAH traversal cost.
-            cost_intersection (float, optional): The SAH intersection cost.
+            traversal_cost (float, optional): The SAH traversal cost.
+            intersection_cost (float, optional): The SAH intersection cost.
 
         Returns:
             BVH: A new BVH instance.
@@ -258,7 +354,7 @@ class BVH:
         ...
 
     @staticmethod
-    def from_aabbs(aabbs: np.ndarray, quality: BuildQuality = ..., cost_traversal: float = ..., cost_intersection: float = ...) -> BVH:
+    def from_aabbs(aabbs: np.ndarray, quality: BuildQuality = ..., traversal_cost: float = ..., intersection_cost: float = ...) -> BVH:
         """
         Builds a BVH from an array of Axis-Aligned Bounding Boxes.
 
@@ -270,8 +366,8 @@ class BVH:
             aabbs (numpy.ndarray): A float32, C-contiguous array of shape (N, 2, 3),
                                    where each item is a pair of [min_corner, max_corner].
             quality (BuildQuality): The desired quality of the BVH.
-            cost_traversal (float, optional): The SAH traversal cost.
-            cost_intersection (float, optional): The SAH intersection cost.
+            traversal_cost (float, optional): The SAH traversal cost.
+            intersection_cost (float, optional): The SAH intersection cost.
 
         Returns:
             BVH: A new BVH instance.
@@ -323,6 +419,36 @@ class BVH:
         """
         ...
 
+    def convert_to(self, layout: Layout, compact: bool = True, strict: bool = False) -> None:
+        """
+        Converts the BVH to a different internal memory layout, modifying it in-place.
+
+        This allows optimizing the BVH for different traversal algorithms (SSE, AVX, etc.).
+        The caching policy of converted layouts can be controlled (see `set_cache_policy` and `clear_cached_layouts`).
+
+        Args:
+            layout (Layout): The target memory layout.
+            compact (bool): Whether to compact the BVH during conversion. Defaults to True.
+            strict (bool): If True, raises a RuntimeError if the target layout is not
+                           supported for traversal on the current system. Defaults to False.
+        """
+        ...
+
+    def set_cache_policy(self, policy: CachePolicy) -> None:
+        """
+        Sets caching policy for converted layouts.
+
+        Args:
+            policy (CachePolicy): The new policy to use (ActiveOnly or All).
+        """
+        ...
+
+    def clear_cached_layouts(self) -> None:
+        """
+        Frees the memory of all cached layouts, except for the active one and the base layout.
+        """
+        ...
+
     def intersect(self, ray: Ray) -> float:
         """
         Performs an intersection query with a single ray.
@@ -343,7 +469,7 @@ class BVH:
                         directions: np.ndarray,
                         t_max: Optional[np.ndarray] = None,
                         masks: Optional[np.ndarray] = None,
-                        packet: PacketMode = PacketMode.Auto,
+                        packet: PacketMode = PacketMode.Never,
                         same_origin_eps: float = 1e-6,
                         warn_on_incoherent: bool = True) -> np.ndarray:
         """
@@ -353,6 +479,18 @@ class BVH:
         (triangles, AABBs, spheres). For standard triangle meshes, it also leverages SIMD
         instructions where available for maximum throughput.
 
+        .. warning::
+            Packet traversal (`Auto` or `Force`) is highly optimized but
+            makes strict assumptions about the input rays:
+                - Shared origin: All rays in a batch must share the same origin point.
+                - Coherent directions: The ray directions should form a coherent frustum,
+                    like rays cast from a camera through pixels on a screen.
+
+            Providing rays with different origins or random, incoherent directions
+            with packet traversal enabled may lead to **incorrect results (false misses)**.
+            If your rays do not meet these criteria, use `packet='Never'` to ensure
+            correctness via scalar traversal.
+
         Args:
             origins (numpy.ndarray): A (N, 3) float array of ray origins.
             directions (numpy.ndarray): A (N, 3) float array of ray directions.
@@ -361,9 +499,9 @@ class BVH:
                                              For a ray to test an instance for intersection, the bitwise
                                              AND of the ray's mask and the instance's mask must be non-zero.
                                              If not provided, rays default to mask 0xFFFF (intersect all instances).
-            packet (PacketMode, optional): Choose packet usage strategy. Defaults to Auto.
-            same_origin_eps (float, optional): Epsilon for the "same origin" test. Defaults to 1e-6.
-            warn_on_incoherent (bool, optional): Emit a warning when origins differ. Defaults to True.
+            packet (PacketMode, optional): Choose packet usage strategy. Defaults to Never.
+            same_origin_eps (float, optional): Epsilon for same-origin test. Default 1e-6.
+            warn_on_incoherent (bool, optional): Warn when rays differ in origin. Default True.
 
         Returns:
             numpy.ndarray: A structured array of shape (N,) with dtype
@@ -394,13 +532,25 @@ class BVH:
                           directions: np.ndarray,
                           t_max: Optional[np.ndarray] = None,
                           masks: Optional[np.ndarray] = None,
-                          packet: PacketMode = PacketMode.Auto,
+                          packet: PacketMode = PacketMode.Never,
                           same_origin_eps: float = 1e-6,
                           warn_on_incoherent: bool = True) -> np.ndarray:
         """
         Performs occlusion queries for a batch of rays, parallelized for performance.
 
         This method uses multi-core parallelization for all geometry types (triangles, AABBs, spheres).
+
+        .. warning::
+            Packet traversal (`Auto` or `Force`) is highly optimized but
+            makes strict assumptions about the input rays:
+                - Shared origin: All rays in a batch must share the same origin point.
+                - Coherent directions: The ray directions should form a coherent frustum,
+                    like rays cast from a camera through pixels on a screen.
+
+            Providing rays with different origins or random, incoherent directions
+            with packet traversal enabled may lead to **incorrect results (false misses)**.
+            If your rays do not meet these criteria, use `packet='Never'` to ensure
+            correctness via scalar traversal.
 
         Args:
             origins (numpy.ndarray): A (N, 3) float array of ray origins.
@@ -411,7 +561,7 @@ class BVH:
                                              For a ray to test an instance for intersection, the bitwise
                                              AND of the ray's mask and the instance's mask must be non-zero.
                                              If not provided, rays default to mask 0xFFFF (intersect all instances).
-            packet (PacketMode, optional): Auto (default), Never, Force.
+            packet (PacketMode, optional): Choose packet usage strategy. Defaults to Never.
             same_origin_eps (float, optional): Epsilon for same-origin test. Default 1e-6.
             warn_on_incoherent (bool, optional): Warn when rays differ in origin. Default True.
 
@@ -524,17 +674,17 @@ class BVH:
 
     @property
     def prim_indices(self) -> np.ndarray:
-        """The array of primitive indices, ordered for locality (only for standard layout)."""
+        """The array of primitive indices (only for standard layout)."""
         ...
 
     @property
     def node_count(self) -> int:
-        """Total number of nodes in the BVH."""
+        """Total number of nodes in the currently active BVH representation."""
         ...
 
     @property
     def leaf_count(self) -> int:
-        """The total number of leaf nodes in the BVH."""
+        """The total number of leaf nodes (only for standard layout)."""
         ...
 
     @property
@@ -574,24 +724,25 @@ class BVH:
 
     @property
     def is_compact(self) -> bool:
-        """Returns True if the BVH node and index arrays are contiguous in memory."""
+        """Returns True if the BVH is contiguous in memory."""
         ...
 
     @property
     def sah_cost(self) -> float:
-        """
-        Calculates the Surface Area Heuristic (SAH) cost of the BVH. Lower is better.
-        """
+        """Calculates the Surface Area Heuristic (SAH) cost of the BVH."""
         ...
 
     @property
     def epo_cost(self) -> float:
-        """
-        Calculates the Expected Projected Overlap (EPO) cost of the BVH. Lower is better.
-        """
+        """Calculates the Expected Projected Overlap (EPO) cost of the BVH (only for standard layout)."""
         ...
 
     @property
     def layout(self) -> Layout:
-        """The current memory layout of the BVH."""
+        """The current active memory layout of the BVH."""
+        ...
+
+    @property
+    def cached_layouts(self) -> List[Layout]:
+        """A list of the BVH layouts currently held in the cache."""
         ...

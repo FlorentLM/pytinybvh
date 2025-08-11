@@ -8,21 +8,41 @@ from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
 import pybind11
 
+def _macos_arch():
+    # 'arm64' on Apple Silicon, 'x86_64' on Intel
+    return platform.machine()
+
+def _sanitize_arch_flags(cmd):
+    """Remove all -arch pairs. On macOS we will add back a single arch."""
+    out = []
+    skip = False
+    for i, tok in enumerate(cmd):
+        if skip:
+            skip = False
+            continue
+        if tok == "-arch" and i + 1 < len(cmd):
+            skip = True
+            continue
+        out.append(tok)
+    return out
+
 def try_compile(compiler, flags, code):
-    """
-    Try compiling a tiny translation unit with the given flags.
-    Returns True on success, False on failure.
-    """
+    from pathlib import Path
+    import tempfile, textwrap, subprocess
+
     with tempfile.TemporaryDirectory() as td:
         src = Path(td, "test.cpp")
         src.write_text(code, encoding="utf-8")
+        if compiler.compiler_type == "msvc":
+            base = compiler.compiler
+            cmd = base + flags + ["/c", str(src), "/Fo" + str(Path(td, "test.obj"))]
+        else:
+            base = compiler.compiler
+            if sys.platform == "darwin":
+                base = _sanitize_arch_flags(base)
+                base += ["-arch", _macos_arch()]
+            cmd = base + flags + ["-c", str(src), "-o", str(Path(td, "test.o"))]
         try:
-            # MSVC uses /Fo for object output; unix compilers use -c -o
-            if compiler.compiler_type == "msvc":
-                # emulate minimal compile call
-                cmd = compiler.compiler + flags + ["/c", str(src), "/Fo" + str(Path(td, "test.obj"))]
-            else:
-                cmd = compiler.compiler + flags + ["-c", str(src), "-o", str(Path(td, "test.o"))]
             compiler.spawn(cmd)
             return True
         except Exception:
@@ -79,25 +99,24 @@ def is_arm32():
     return m.startswith("armv7") or m == "armv7l" or m == "armv6l" or m == "arm"
 
 def supports_neon(compiler):
-    # Simple NEON smoke test (works for armv7 and arm64)
     code = r"""
     #include <arm_neon.h>
     int main() {
         float32x4_t a = vdupq_n_f32(1.0f);
         float32x4_t b = vdupq_n_f32(2.0f);
         float32x4_t c = vaddq_f32(a, b);
-        (void)c;
-        return 0;
+        (void)c; return 0;
     }"""
-    if compiler.compiler_type == "msvc":
-        # On Windows ARM64, NEON is baseline, so we just try to compile without extra flags
+    if is_arm64():
+        # NEON is baseline on arm64, no-flag compile should work
         return try_compile(compiler, [], code)
-    else:
-        # For 32-bit ARM, compilers often require -mfpu=neon. On aarch64 it's baseline
-        # So we try no flags first (covers aarch64), and then fall back to -mfpu=neon
+    if is_arm32():
+        # Some toolchains require -mfpu=neon (with matching -mfloat-abi set by the env)
         if try_compile(compiler, [], code):
             return True
         return try_compile(compiler, ["-mfpu=neon"], code)
+    # Non-ARM
+    return False
 
 
 class CppBuildExt(build_ext):

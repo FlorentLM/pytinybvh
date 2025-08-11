@@ -279,13 +279,23 @@ if ray.prim_id != -1:
 #### Batch of Rays
 
 ```python
-      
+import numpy as np
+from pytinybvh import BVH, BuildQuality, PacketMode
+
 # (N, 3) arrays for origins and directions
 origins = np.array([[0.5, 0.2, -5], [10, 10, -5]], dtype=np.float32)
 directions = np.array([[0, 0, 1], [0, 0, 1]], dtype=np.float32)
 
 # Returns a structured numpy array with hit records
-hits = bvh.intersect_batch(origins, directions)
+# By default (PacketMode.Auto), pytinybvh will use 256-ray packet traversal
+# only when safe/beneficial (rays share the same origin on a standard triangle BVH)
+hits = bvh.intersect_batch(origins, directions, packet=PacketMode.Auto)
+
+# You can force scalar traversal (never use packets):
+# hits = bvh.intersect_batch(origins, directions, packet=PacketMode.Never)
+
+# Or force packet traversal (this is unsafe if rays origins differ and will warn unless disabled):
+# hits = bvh.intersect_batch(origins, directions, packet=PacketMode.Force, same_origin_eps=1e-6, warn_on_incoherent=True)
 
 # You can access columns like a dictionary
 hit_distances = hits['t']
@@ -303,6 +313,26 @@ for i in range(len(hits)):
 #   Ray 0 hit primitive 0 at t=5.000
 #   Ray 1 missed.
 
+```
+
+#### Batched Occlusion (shadows)
+
+```python
+import numpy as np
+from pytinybvh import BVH, PacketMode
+
+# (N, 3) arrays for origins and directions
+origins = np.array([[0.5, 0.2, -5], [10, 10, -5]], dtype=np.float32)
+directions = np.array([[0, 0, 1], [0, 0, 1]], dtype=np.float32)
+
+# Returns a boolean array (N,) where True means "occluded"
+# For standard triangle BVHs (BLAS, not TLAS), pytinybvh can use the 256-ray
+# intersection packet kernel internally and reduce to occlusion flags
+occluded = bvh.is_occluded_batch(origins, directions, packet=PacketMode.Auto)
+
+# Useful derived mask:
+visible = ~occluded
+print("Visible rays:", np.where(visible)[0].tolist())
 ```
 
 ## Running Tests
@@ -390,10 +420,13 @@ Immediate priorities:
 
 ## Remarks
 
-### A Note on performance and concurrency (Update!)
+### A Note on performance and concurrency (Another update! v1.1.0)
 
--   **Multi-Core processing:** The batch intersection methods (`intersect_batch` and `is_occluded_batch`) are now fully parallelized for _all_ supported geometry types: triangles, custom AABBs, and custom spheres.
--   **SIMD optimizations:** This is still only for standard triangle meshes, but such case `intersect_batch` gains an additional speedup by using AVX SIMD instructions to process rays in large packets, if your CPU and build configuration support it.
+- **Multi-core:** Both `intersect_batch` and `is_occluded_batch` run in parallel on all geometry types (using OpenMP when available).
+- **Packet traversal:** For standard triangle BVHs (BLAS), both methods can use 256-ray packet traversal when rays share the same origin. This is controlled via `PacketMode` and is **Auto** by default.
+- **Occlusion specifics:** `is_occluded_batch` uses the packet *intersection* kernel internally (when eligible) and reduces to booleans. For TLAS builds or custom geometry (AABBs / spheres), it falls back to scalar.
+- **Alignment:** You don't need to do anything special, pytinybvh builds a 64-byte aligned internal ray buffer so SIMD loads are always safe. Since it's for a batched call, this one-time cost is negligible anyway.
+- **Coherence:** If rays don't share the same origin, `Auto` mode falls back to scalar and emits a warning (once). You can silence it with `warn_on_incoherent=False` or force packets with `PacketMode.Force` (unsafe).
 
 ## Acknowledgements
 

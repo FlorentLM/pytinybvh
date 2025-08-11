@@ -106,10 +106,22 @@ class Layout(IntEnum):
         """
 
     def __int__(self) -> int: ...
-
     @property
     def name(self) -> str: ...
+    @property
+    def value(self) -> int: ...
 
+
+class PacketMode(IntEnum):
+    """Enum for the batched packets mode."""
+
+    Auto: ClassVar[PacketMode]
+    Never: ClassVar[PacketMode]
+    Force: ClassVar[PacketMode]
+
+    def __int__(self) -> int: ...
+    @property
+    def name(self) -> str: ...
     @property
     def value(self) -> int: ...
 
@@ -326,8 +338,14 @@ class BVH:
         """
         ...
 
-    def intersect_batch(self, origins: np.ndarray, directions: np.ndarray,
-                        t_max: Optional[np.ndarray] = None, masks: Optional[np.ndarray] = None) -> np.ndarray:
+    def intersect_batch(self,
+                        origins: np.ndarray,
+                        directions: np.ndarray,
+                        t_max: Optional[np.ndarray] = None,
+                        masks: Optional[np.ndarray] = None,
+                        packet: PacketMode = PacketMode.Auto,
+                        same_origin_eps: float = 1e-6,
+                        warn_on_incoherent: bool = True) -> np.ndarray:
         """
         Performs intersection queries for a batch of rays.
 
@@ -343,6 +361,9 @@ class BVH:
                                              For a ray to test an instance for intersection, the bitwise
                                              AND of the ray's mask and the instance's mask must be non-zero.
                                              If not provided, rays default to mask 0xFFFF (intersect all instances).
+            packet (PacketMode, optional): Choose packet usage strategy. Defaults to Auto.
+            same_origin_eps (float, optional): Epsilon for the "same origin" test. Defaults to 1e-6.
+            warn_on_incoherent (bool, optional): Emit a warning when origins differ. Defaults to True.
 
         Returns:
             numpy.ndarray: A structured array of shape (N,) with dtype
@@ -368,8 +389,14 @@ class BVH:
         """
         ...
 
-    def is_occluded_batch(self, origins: np.ndarray, directions: np.ndarray,
-                          t_max: Optional[np.ndarray] = None, masks: Optional[np.ndarray] = None) -> np.ndarray:
+    def is_occluded_batch(self,
+                          origins: np.ndarray,
+                          directions: np.ndarray,
+                          t_max: Optional[np.ndarray] = None,
+                          masks: Optional[np.ndarray] = None,
+                          packet: PacketMode = PacketMode.Auto,
+                          same_origin_eps: float = 1e-6,
+                          warn_on_incoherent: bool = True) -> np.ndarray:
         """
         Performs occlusion queries for a batch of rays, parallelized for performance.
 
@@ -384,6 +411,9 @@ class BVH:
                                              For a ray to test an instance for intersection, the bitwise
                                              AND of the ray's mask and the instance's mask must be non-zero.
                                              If not provided, rays default to mask 0xFFFF (intersect all instances).
+            packet (PacketMode, optional): Auto (default), Never, Force.
+            same_origin_eps (float, optional): Epsilon for same-origin test. Default 1e-6.
+            warn_on_incoherent (bool, optional): Warn when rays differ in origin. Default True.
 
         Returns:
             numpy.ndarray: A boolean array of shape (N,) where `True` indicates occlusion.

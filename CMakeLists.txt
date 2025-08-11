@@ -4,7 +4,11 @@ project(pytinybvh LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 
 # use local python .venv
-set(VENV_PYTHON "${CMAKE_SOURCE_DIR}/.venv/bin/python")
+if(WIN32)
+    set(VENV_PYTHON "${CMAKE_SOURCE_DIR}/.venv/Scripts/python.exe")
+else()
+    set(VENV_PYTHON "${CMAKE_SOURCE_DIR}/.venv/bin/python")
+endif()
 
 # pybind11 include
 execute_process(
@@ -26,7 +30,7 @@ find_package(Python3 COMPONENTS Development REQUIRED)
 
 include_directories(
         ${PYBIND11_INCLUDES}              # pybind11
-        ${CMAKE_SOURCE_DIR}/deps          # tinybvh (your deps/)
+        ${CMAKE_SOURCE_DIR}/deps          # tinybvh
         ${Python3_INCLUDE_DIRS}           # Python API
 )
 

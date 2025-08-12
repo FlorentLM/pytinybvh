@@ -13,7 +13,7 @@ For example, the BVH can be used as-is in a SSBO for real time ray-tracing with 
 
 ## Current status
 
-Most of `tinybvh`'s functionalities are now implemented and functional :)
+Most of `tinybvh`'s code functionality is now implemented and functional :)
 
 See [Features](##Features) and [Roadmap](##Roadmap) below for more details.
 
@@ -322,6 +322,46 @@ occluded = bvh.is_occluded_batch(origins, directions, packet=PacketMode.Auto)
 visible = ~occluded
 print("Visible rays:", np.where(visible)[0].tolist())
 ```
+---
+
+### Other useful things: Access the BVH internal data and source geometry directly
+
+```python
+import numpy as np
+from pytinybvh import BVH
+
+# Example with AABBs
+aabbs = np.random.rand(100, 2, 3).astype(np.float32)
+bvh_aabbs = BVH.from_aabbs(aabbs)
+
+buffers = bvh_aabbs.get_buffers()
+print(buffers.keys())
+# Expected output: dict_keys(['nodes', 'prim_indices', 'aabbs', 'inv_extents'])
+# buffers['aabbs'] is a zero-copy reference to the original `aabbs` numpy array
+
+# Example with Spheres
+points = np.random.rand(50, 3).astype(np.float32)
+bvh_spheres = BVH.from_points(points, radius=0.1)
+
+buffers = bvh_spheres.get_buffers()
+print(buffers.keys())
+# Expected output: dict_keys(['nodes', 'prim_indices', 'points', 'sphere_radius'])
+# buffers['points'] is a zero-copy reference to the original `points` numpy array
+# buffers['sphere_radius'] is 0.1
+
+# Example with Triangles
+triangles = np.array([
+    [[0, 0, 0], [1, 0, 0], [0, 1, 0]],
+    [[2, 2, 2], [3, 2, 2], [2, 3, 2]],
+], dtype=np.float32)
+bvh_tris = BVH.from_triangles(triangles)
+
+buffers = bvh_tris.get_buffers()
+print(buffers.keys())
+# Expected output: dict_keys(['nodes', 'prim_indices', 'vertices'])
+```
+
+---
 
 ### Advanced Usage: Building a Scene with TLAS
 
@@ -372,6 +412,8 @@ if ray.prim_id != -1:
     print(f"Hit instance {ray.inst_id} (BLAS {blases[ray.inst_id].prim_count} tris)")
     print(f"Hit primitive {ray.prim_id} within that instance.")
 ```
+
+---
 
 ### Advanced Usage: Memory Layouts and Performance
 
@@ -499,6 +541,7 @@ pytinybvh/
 │   └── screenshot.png
 ├── src/
 │   ├── pytinybvh.cpp       # C++ wrapper source
+│   ├── capabilities.h      # C++ header to detect hardware capabilities
 │   └── pytinybvh.pyi       # Python stub file
 ├── .gitignore
 ├── .gitattributes

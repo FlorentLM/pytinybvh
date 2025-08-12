@@ -1535,7 +1535,7 @@ struct PyBVH {
 
     void optimize(unsigned int iterations, bool extreme, bool stochastic) {
 
-        // TODO: Why does this produce garbage SOMETIMES ? (Kept your original comment)
+        // TODO: Why does this produce garbage SOMETIMES ?
 
         if (!active_bvh_ || active_bvh_->layout != tinybvh::BVHBase::LAYOUT_BVH) {
             throw std::runtime_error("Optimization is only supported for the standard BVH layout.");
@@ -1649,6 +1649,154 @@ struct PyBVH {
             bvh->primIdx,
             py::cast(self)
         );
+    }
+
+    [[nodiscard]] py::dict get_buffers() const {
+        if (!active_bvh_) {
+            throw std::runtime_error("BVH is not initialized.");
+        }
+        py::dict buffers;
+        const PyBVH& self = *this; // for py::cast owner
+
+        // Get buffers for the BVH structure itself
+        dispatch_bvh_call(active_bvh_, [&](auto& bvh) {
+            using BvhType = std::decay_t<decltype(bvh)>;
+
+            // Standard layout
+            if constexpr (std::is_same_v<BvhType, tinybvh::BVH>) {
+                if (bvh.bvhNode) {
+                    // exposes nodes as a raw float array. Each is 32 bytes (8 floats)
+                    buffers["nodes"] = py::array_t<float>(
+                        static_cast<py::ssize_t>(bvh.usedNodes * 8),
+                        reinterpret_cast<const float*>(bvh.bvhNode),
+                        py::cast(self)
+                    );
+                }
+                if (bvh.primIdx) {
+                    buffers["prim_indices"] = py::array_t<uint32_t>(
+                        {static_cast<py::ssize_t>(bvh.idxCount)},
+                        bvh.primIdx,
+                        py::cast(self)
+                    );
+                }
+            }
+            // GPU layouts
+            else if constexpr (std::is_same_v<BvhType, tinybvh::BVH_GPU>) {
+                if (bvh.bvhNode) {
+                    // Each node is 64 bytes (16 floats)
+                    buffers["nodes"] = py::array_t<float>(
+                        static_cast<py::ssize_t>(bvh.usedNodes * 16),
+                        reinterpret_cast<const float*>(bvh.bvhNode),
+                        py::cast(self)
+                    );
+                }
+            }
+            else if constexpr (std::is_same_v<BvhType, tinybvh::BVH4_GPU>) {
+                if (bvh.bvh4Data) {
+                    // usedBlocks is in units of 16 bytes (a bvhvec4). Total floats = usedBlocks * 4
+                    buffers["packed_data"] = py::array_t<float>(
+                        static_cast<py::ssize_t>(bvh.usedBlocks * 4),
+                        reinterpret_cast<const float*>(bvh.bvh4Data),
+                        py::cast(self)
+                    );
+                }
+            }
+            else if constexpr (std::is_same_v<BvhType, tinybvh::BVH8_CWBVH>) {
+                if (bvh.bvh8Data) {
+                    // usedBlocks is in units of 16 bytes
+                    buffers["nodes"] = py::array_t<float>(
+                        static_cast<py::ssize_t>(bvh.usedBlocks * 4),
+                        reinterpret_cast<const float*>(bvh.bvh8Data),
+                        py::cast(self)
+                    );
+                }
+                if (bvh.bvh8Tris) {
+                    // this determines the size based on compilation flags
+                    #ifdef CWBVH_COMPRESSED_TRIS
+                        size_t elements_per_tri = 4 * 4; // 4 vec4s
+                    #else
+                        size_t elements_per_tri = 3 * 4; // 3 vec4s
+                    #endif
+                    buffers["triangles"] = py::array_t<float>(
+                        static_cast<py::ssize_t>(bvh.triCount * elements_per_tri),
+                        reinterpret_cast<const float*>(bvh.bvh8Tris),
+                        py::cast(self)
+                    );
+                }
+            }
+            // CPU SIMD layouts
+            else if constexpr (std::is_same_v<BvhType, tinybvh::BVH4_CPU>) {
+                if (bvh.bvh4Data) {
+                    // usedBlocks is in units of 64 bytes (CacheLine). Total floats = usedBlocks * 16
+                    buffers["packed_data"] = py::array_t<float>(
+                        static_cast<py::ssize_t>(bvh.usedBlocks * 16),
+                        reinterpret_cast<const float*>(bvh.bvh4Data),
+                        py::cast(self)
+                    );
+                }
+            }
+            else if constexpr (std::is_same_v<BvhType, tinybvh::BVH8_CPU>) {
+                if (bvh.bvh8Data) {
+                    // usedBlocks is in units of 64 bytes (CacheLine). Total floats = usedBlocks * 16
+                    buffers["packed_data"] = py::array_t<float>(
+                        static_cast<py::ssize_t>(bvh.usedBlocks * 16),
+                        reinterpret_cast<const float*>(bvh.bvh8Data),
+                        py::cast(self)
+                    );
+                }
+            }
+            // Intermediate layouts
+            else if constexpr (std::is_same_v<BvhType, tinybvh::MBVH<4>> || std::is_same_v<BvhType, tinybvh::MBVH<8>>) {
+                 if (bvh.mbvhNode) {
+                    // MBVH<4> node is 48 bytes (12 floats). MBVH<8> is 64 bytes (16 floats)
+                    constexpr size_t node_size_in_floats = sizeof(typename BvhType::MBVHNode) / sizeof(float);
+                    buffers["nodes"] = py::array_t<float>(
+                        static_cast<py::ssize_t>(bvh.usedNodes * node_size_in_floats),
+                        reinterpret_cast<const float*>(bvh.mbvhNode),
+                        py::cast(self)
+                    );
+                }
+            }
+            else if constexpr (std::is_same_v<BvhType, tinybvh::BVH_SoA>) {
+                if (bvh.bvhNode) {
+                    // Each node is 64 bytes (16 floats)
+                    buffers["nodes"] = py::array_t<float>(
+                        static_cast<py::ssize_t>(bvh.usedNodes * 16),
+                        reinterpret_cast<const float*>(bvh.bvhNode),
+                        py::cast(self)
+                    );
+                }
+            }
+        });
+
+        // Add custom geometry data if present
+        switch (self.custom_type) {
+            case CustomType::AABB:
+                // for AABBs source_geometry_refs contains [aabbs_np, inv_extents_np]
+                if (self.source_geometry_refs.size() >= 2) {
+                    buffers["aabbs"] = self.source_geometry_refs[0];
+                    buffers["inv_extents"] = self.source_geometry_refs[1];
+                }
+                break;
+            case CustomType::Sphere:
+                // for Spheres source_geometry_refs contains [points_np]
+                if (!self.source_geometry_refs.empty()) {
+                    buffers["points"] = self.source_geometry_refs[0];
+                    buffers["sphere_radius"] = self.sphere_radius;
+                }
+                break;
+            case CustomType::None: // triangles
+                if (!self.source_geometry_refs.empty()) {
+                    buffers["vertices"] = self.source_geometry_refs[0];
+                    // if indexed mesh, also include the indices buffer
+                    if (self.source_geometry_refs.size() > 1) {
+                        buffers["indices"] = self.source_geometry_refs[1];
+                    }
+                }
+                break;
+        }
+
+        return buffers;
     }
 
     [[nodiscard]] py::list get_cached_layouts() const {
@@ -1939,7 +2087,7 @@ PYBIND11_MODULE(pytinybvh, m) {
                     strict (bool): If True, raises a RuntimeError if the target layout is not
                                    supported for traversal on the current system. Defaults to False.
                 ))",
-            py::arg("layout"),
+            py::arg("layout") = Layout::Standard,
             py::arg("compact") = true,
             py::arg("strict") = false)
 
@@ -2159,13 +2307,66 @@ PYBIND11_MODULE(pytinybvh, m) {
             ))",
             py::arg("center"), py::arg("radius"))
 
-        // Getters for the main data
+        // Accessors for the BVH data
 
         .def_property_readonly("nodes", &PyBVH::get_nodes,
             "The structured numpy array of BVH nodes (only for standard layout).")
 
         .def_property_readonly("prim_indices", &PyBVH::get_prims_indices,
-            "The array of primitive indices (only for standard layout).")
+            "The BVH-ordered array of primitive indices (only for standard layout).")
+
+        // Accessors for source geometry
+
+        .def_property_readonly("source_vertices", [](const PyBVH& self) -> py::object {
+            if (self.custom_type == PyBVH::CustomType::None && !self.source_geometry_refs.empty()) {
+                return self.source_geometry_refs[0];
+            }
+            return py::none();
+            }, "The source vertex buffer as a numpy array, or None.")
+
+        .def_property_readonly("source_indices", [](const PyBVH& self) -> py::object {
+            if (self.custom_type == PyBVH::CustomType::None && self.source_geometry_refs.size() > 1) {
+                return self.source_geometry_refs[1];
+            }
+            return py::none();
+            }, "The source index buffer for an indexed mesh as a numpy array, or None.")
+
+        .def_property_readonly("source_aabbs", [](const PyBVH& self) -> py::object {
+            if (self.custom_type == PyBVH::CustomType::AABB && !self.source_geometry_refs.empty()) {
+                return self.source_geometry_refs[0];
+            }
+            return py::none();
+            }, "The source AABB buffer as a numpy array, or None.")
+
+        .def_property_readonly("source_points", [](const PyBVH& self) -> py::object {
+            if (self.custom_type == PyBVH::CustomType::Sphere && !self.source_geometry_refs.empty()) {
+                return self.source_geometry_refs[0];
+            }
+            return py::none();
+            }, "The source point buffer for sphere geometry as a numpy array, or None.")
+
+        .def_property_readonly("sphere_radius", [](const PyBVH& self) -> py::object {
+            if (self.custom_type == PyBVH::CustomType::Sphere) {
+                return py::cast(self.sphere_radius);
+            }
+            return py::none();
+            }, "The radius for sphere geometry, or None.")
+
+        .def("get_buffers", &PyBVH::get_buffers,
+            R"((
+                Returns a dictionary of raw, zero-copy numpy arrays for all current BVH's internal data and geometry.
+
+                This provides low-level access to all the underlying C++ buffers. The returned arrays
+                are views into the BVH's memory.
+                The structure of the returned dictionary and the shape/content of the arrays depend on the active layout.
+
+                This is primarily useful for advanced use cases (sending BVH data to a SSBO, etc.).
+
+                Returns:
+                    Dict[str, numpy.ndarray]: A dictionary mapping buffer names (e.g., 'nodes',
+                                            'prim_indices', 'packed_data', 'vertices', etc.) to
+                                            their corresponding raw data arrays.
+            ))")
 
         // Refitting, TLAS
 
@@ -2293,7 +2494,7 @@ PYBIND11_MODULE(pytinybvh, m) {
         ))",
         py::arg("map_data").noconvert(), py::arg("N"))
 
-        // Read-write properties
+        // Read-only properties
 
         .def_property_readonly("traversal_cost",
             [](const PyBVH &self) {
@@ -2308,8 +2509,6 @@ PYBIND11_MODULE(pytinybvh, m) {
                 return self.active_bvh_->c_int;
             },
             "The intersection cost used in the Surface Area Heuristic (SAH) calculation during the build.")
-
-        // Read-only properties
 
         .def_property_readonly("node_count", [](const PyBVH &self){ return self.active_bvh_->usedNodes; }, "Total number of nodes in the BVH.")
 

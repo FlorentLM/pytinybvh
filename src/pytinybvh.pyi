@@ -15,7 +15,7 @@ A type hint for file paths that can be a string or a pathlib.Path object.
 Vec3Like = Union[List[float], Tuple[float, float, float], np.ndarray]
 """
 A type hint for objects that can be interpreted as a 3D vector,
-including lists, tuples, and NumPy arrays of 3 floats.
+including lists, tuples, and numpy arrays of 3 floats.
 """
 
 
@@ -66,7 +66,7 @@ def require_layout(layout: Layout, for_traversal: bool = True) -> None:
 
 
 
-# NumPy dtypes
+# numpy dtypes
 
 bvh_node_dtype: np.dtype
 """
@@ -663,7 +663,49 @@ class BVH:
 
     @property
     def prim_indices(self) -> np.ndarray:
-        """The array of primitive indices (only for standard layout)."""
+        """The BVH-ordered array of primitive indices (only for standard layout)."""
+        ...
+
+    @property
+    def source_vertices(self) -> Optional[np.ndarray]:
+        """The source vertex buffer as a numpy array, or None."""
+        ...
+
+    @property
+    def source_indices(self) -> Optional[np.ndarray]:
+        """The source index buffer for an indexed mesh as a numpy array, or None."""
+        ...
+
+    @property
+    def source_aabbs(self) -> Optional[np.ndarray]:
+        """The source AABB buffer as a numpy array, or None."""
+        ...
+
+    @property
+    def source_points(self) -> Optional[np.ndarray]:
+        """The source point buffer for sphere geometry as a numpy array, or None."""
+        ...
+
+    @property
+    def sphere_radius(self) -> Optional[float]:
+        """The radius for sphere geometry, or None."""
+        ...
+
+    def get_buffers(self) -> Dict[str, np.ndarray]:
+        """
+        Returns a dictionary of raw, zero-copy numpy arrays for all current BVH's internal data and geometry.
+
+        This provides low-level access to all the underlying C++ buffers. The returned arrays
+        are views into the BVH's memory.
+        The structure of the returned dictionary and the shape/content of the arrays depend on the active layout.
+
+        This is primarily useful for advanced use cases (sending BVH data to a SSBO, etc.).
+
+        Returns:
+            Dict[str, numpy.ndarray]: A dictionary mapping buffer names (e.g., 'nodes',
+                                    'prim_indices', 'packed_data', 'vertices', etc.) to
+                                    their corresponding raw data arrays.
+        """
         ...
 
     @property

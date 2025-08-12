@@ -222,8 +222,7 @@ class CppBuildExt(build_ext):
                     # Re-run quickly to see if flags were needed:
                     if not try_compile(self.compiler, [], "#include <arm_neon.h>\nint main(){return 0;}"):
                         compile_args += ["-mfpu=neon"]
-                    print("Enabling NEON on ARM.")
-                    define_macros += [("BVH_USENEON", "1")]
+                    print("NEON available (letting tiny_bvh.h enable it per-arch).")
             else:
                 print("NEON not supported by this ARM target. Building baseline.")
         else:

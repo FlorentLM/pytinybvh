@@ -34,7 +34,7 @@ include_directories(
         ${Python3_INCLUDE_DIRS}           # Python API
 )
 
-add_library(pytinybvh MODULE src/pytinybvh.cpp)
+add_library(pytinybvh MODULE src/pytinybvh.cpp src/capabilities.h)
 
 # avoid 'lib' prefix for Python extension modules on macOS
 set_target_properties(pytinybvh PROPERTIES PREFIX "")

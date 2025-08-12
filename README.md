@@ -7,14 +7,15 @@ Python bindings for the great C++ Bounding Volume Hierarchy (BVH) library [tinyb
 Exposes `tinybvh`'s fast BVH construction algorithms to Python.
 For example, the BVH can be used as-is in a SSBO for real time ray-tracing with PyOpenGL or Vulkan, or for CPU-side computations like collision detection, etc.
 
-**Note:** Most of `tinybvh`'s functionalities are now implemented :)
-
-**Important note:** Some things might be a little bit unstable for now (like occasional crashes when intersecting a large number of rays after layout conversion), and current design choices might evolve (like dropping the use of `Intersect256()` in occlusion tests, etc). This is still under active development.
-
-
 <div style="text-align:center">
 <img alt="Screenshot of a test model in a Bounding Volume Hierarchy" src="img/screenshot.png" title="Screenshot" width="500"/>
 </div>
+
+## Current status
+
+Most of `tinybvh`'s functionalities are now implemented and functional :)
+
+See [Features](##Features) and [Roadmap](##Roadmap) below for more details.
 
 ## Prerequisites
 
@@ -34,17 +35,11 @@ The C++ dependency (`tinybvh`) is included as a Git submodule.
 1.  **Clone the repository:**
 
     ```bash
-    git clone https://github.com/FlorentLM/pytinybvh.git
+    git clone --recurse-submodules https://github.com/FlorentLM/pytinybvh.git
     cd pytinybvh
     ```
 
-2.  **Initialize the C++ Submodule:**
-
-    ```bash
-    git submodule update --init --recursive
-    ```
-
-3.  **Create and activate a virtual environment:**
+2.  **Create and activate a virtual environment:**
     I like `uv`, but `venv` works too.
 
     ```bash
@@ -54,7 +49,7 @@ The C++ dependency (`tinybvh`) is included as a Git submodule.
     # On Windows: .venv\Scripts\activate
     ```
 
-4.   **Compile and install:**
+3.  **Compile and install:**
     This command will automatically download Python dependencies (if any) and compile the C++ extension module.
 
     ```bash
@@ -74,7 +69,7 @@ The C++ dependency (`tinybvh`) is included as a Git submodule.
 
 If the process completes without errors, the `pytinybvh` module is now installed and ready to be used in your virtual environment.
 
-5. **Use in other projects:**
+4. **Use in other projects:**
     From the virtual environment of your other project, run the installation of `pytinybvh` in editable mode.
     
    ```bash
@@ -120,7 +115,7 @@ Alernatively, you can also disable SIMD (AVX, AVX2, NEON) entirely by setting th
 PYTINYBVH_NO_SIMD=1 uv pip install .
 ```
 
-**Note:** SIMD detection happens at _build_ time, so the built wheel won't work on a machine with different CPU capabilities.
+**IMPORTANT:** SIMD detection happens at **build time**, so the built wheel _won't_ work on a machine with _different_ capabilities.
 
 ## Usage examples
 
@@ -328,6 +323,126 @@ visible = ~occluded
 print("Visible rays:", np.where(visible)[0].tolist())
 ```
 
+### Advanced Usage: Building a Scene with TLAS
+
+A Top-Level Acceleration Structure (TLAS) is a BVH built over other BVHs (called Bottom-Level Acceleration Structures, or BLASes). This is the standard method for creating complex scenes with multiple objects, each with its own transformation (position, rotation, scale).
+
+```python
+import numpy as np
+from pytinybvh import BVH, BuildQuality, instance_dtype
+
+# Create your BLASes (individual object BVHs)
+cube_tris = load_cube_triangles()
+sphere_tris = load_sphere_triangles()
+
+bvh_cube = BVH.from_triangles(cube_tris)
+bvh_sphere = BVH.from_triangles(sphere_tris)
+
+blases = [bvh_cube, bvh_sphere]
+
+# Create an instance array
+# This structured array tells the TLAS where to place each BLAS.
+instances = np.zeros(3, dtype=instance_dtype)
+
+# Instance 0: A cube at the origin
+instances[0]['blas_id'] = 0  # Index into the `blases` list
+instances[0]['transform'] = np.eye(4, dtype=np.float32)
+
+# Instance 1: Another cube, moved to the right
+transform_b = np.eye(4, dtype=np.float32)
+transform_b[3, 0] = 5.0 # Translate 5 units on X
+instances[1]['blas_id'] = 0
+instances[1]['transform'] = transform_b
+
+# Instance 2: A sphere, scaled up and moved left
+transform_c = np.eye(4, dtype=np.float32)
+transform_c[0,0] = transform_c[1,1] = transform_c[2,2] = 2.0 # Scale by 2
+transform_c[3, 0] = -5.0 # Translate -5 units on X
+instances[2]['blas_id'] = 1
+instances[2]['transform'] = transform_c
+
+# Build the TLAS
+tlas = BVH.build_tlas(instances, blases)
+
+# Intersect the entire scene
+ray = Ray(origin=[-10, 0, 0], direction=[1, 0, 0])
+tlas.intersect(ray)
+
+if ray.prim_id != -1:
+    print(f"Hit instance {ray.inst_id} (BLAS {blases[ray.inst_id].prim_count} tris)")
+    print(f"Hit primitive {ray.prim_id} within that instance.")
+```
+
+### Advanced Usage: Memory Layouts and Performance
+
+`pytinybvh` exposes `tinybvh`'s conversion system. This allows you to convert the internal memory structure of the BVH to different layouts, each optimized for specific hardware instructions (like AVX or NEON). Converting to a supported layout can significantly speed up batch intersection queries.
+
+#### Converting a BVH
+
+You can convert a BVH in-place using the `convert_to()` method.
+
+```python
+from pytinybvh import BVH, Layout, BuildQuality
+
+# Build a BVH as usual
+bvh = BVH.from_vertices(vertices_4d, quality=BuildQuality.Balanced)
+print(f"Initial layout: {bvh.layout}")
+
+# Convert to a Structure-of-Arrays (SoA) layout, which is faster for
+# batch traversal on CPUs with AVX or NEON support.
+try:
+    bvh.convert_to(Layout.SoA, strict=True)
+    print(f"Successfully converted to: {bvh.layout}")
+except RuntimeError as e:
+    print(f"Could not convert to SoA: {e}")
+```
+
+#### Example layouts
+
+-   `Layout.Standard`: The default. Well-balanced and required for certain operations like `refit()` and `optimize()`.
+-   `Layout.SoA`: **Structure of Arrays.** Optimized for SIMD traversal on CPU. Requires AVX or NEON support.
+-   `Layout.BVH4_CPU`: A 4-wide BVH layout. Requires SSE.
+-   `Layout.BVH8_CPU`: An 8-wide BVH layout. Offers the highest performance for batch traversal on modern CPUs. Requires AVX2 and FMA.
+
+#### Checking Hardware Support
+
+You can programmatically check what your system's CPU supports at both compile-time and runtime. This is useful for selecting the best layout or debugging issues.
+
+```python
+from pytinybvh import hardware_info
+
+info = hardware_info()
+print("Compile-time AVX2 support:", info['compile_time']['simd']['AVX2'])
+print("Runtime AVX2 support:", info['runtime']['simd']['AVX2'])
+
+# You can use this to dynamically choose a layout
+if info['runtime']['simd']['AVX2']:
+    bvh.convert_to(Layout.BVH8_CPU)
+elif info['runtime']['simd']['AVX']:
+    bvh.convert_to(Layout.SoA)
+```
+
+#### Caching Converted Layouts
+
+When you convert a BVH, `pytinybvh` can cache the intermediate structures to make subsequent conversions faster. You can control this behavior:
+
+```python
+from pytinybvh import CachePolicy
+
+# Policy: All - Keep all generated layouts in memory
+bvh.set_cache_policy(CachePolicy.All)
+bvh.convert_to(Layout.BVH8_CPU)     # Creates MBVH8 and BVH8_CPU internally
+print(bvh.cached_layouts)           # Shows [Layout.MBVH8, Layout.BVH8_CPU]
+
+# Policy: ActiveOnly (default) - Discard all layouts except the active one and the base standard layout
+bvh.set_cache_policy(CachePolicy.ActiveOnly)
+bvh.convert_to(Layout.SoA)
+print(bvh.cached_layouts)           # Shows [Layout.SoA]
+
+# You can also manually clear the cache
+bvh.clear_cached_layouts()
+```
+
 ## Running Tests
 
 The test suite uses `pytest`.
@@ -397,21 +512,33 @@ pytinybvh/
 └── README.md
 ```
 
+## Features
+
+This exposes most of `tinybvh`'s features, with a few Pythonic additions:
+
+- Fast BVH construction from multiple geometry types
+- Zero-copy builders for maximum performance with NumPy
+- Convenience builders for common data layouts
+- Highly optimized batch ray intersection and occlusion queries using OpenMP and SIMD (AVX2/NEON)
+- Support for custom primitives (AABBs, Spheres)
+- Full Top-Level / Bottom-Level Acceleration Structure (TLAS/BLAS) support for complex scenes
+- Conversion between different performance-oriented memory layouts
+- BVH refitting, optimization, saving, and loading
+
+Some things are still a little bit unstable for now:
+- Occasional crashes when intersecting a large number of rays after layout conversion. Investigating this.
+
+Current design choices might evolve
+- I might be dropping the use of `Intersect256()` in occlusion tests, as I am not sure it's actually faster in a real-life situation
 
 ## Roadmap
 
-The current version of `pytinybvh` does not yet provide all of `tinybvh`'s functionality.
-I plan to expand the Python API to include everything. 
-
 Immediate priorities:
 
-- [x] Indexed Geometry support
-- [x] Custom Geometry primitives (AABBs and Spheres)
-- [x] Top-Level Acceleration Structure (TLAS) support
-- [x] Support for more `tinybvh` layouts (BVH8, etc)
-- [ ] Investigate the occasional crashes when intersecting huge number of rays
-- [ ] Add mutexes where needed
+- [ ] Investigate and fix instability with very large batch intersections
+- [ ] Add mutexes for concurrent access to a single BVH object from multiple Python threads
 - [ ] Properly time in real life scenario whether using `Intersect256()` in occlusion queries is useful
+
 
 ## Remarks
 

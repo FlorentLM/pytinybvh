@@ -19,18 +19,17 @@ including lists, tuples, and NumPy arrays of 3 floats.
 """
 
 
-
 # Top-level functions
 
-def capabilities() -> Dict[str, Any]:
+def hardware_info() -> Dict[str, Any]:
     """
-    Returns a dictionary detailing the compile-time capabilities of the library.
+    Returns a dictionary detailing the compile-time and runtime capabilities of the library.
 
     This includes detected SIMD instruction sets and which BVH layouts support
     conversion and traversal on the current system.
 
     Returns:
-        Dict[str, Any]: A dictionary with 'simd' and 'layouts' keys.
+        Dict[str, Any]: A dictionary with the hardware info.
     """
     ...
 

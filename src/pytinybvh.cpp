@@ -15,47 +15,17 @@
 #include <string>
 #include <cmath>
 
-namespace py = pybind11;
-using namespace pybind11::literals;
+#include "capabilities.h"
 
-// ----- compile-time capabilities checks -----
-namespace tb_caps {
-static constexpr bool SSE =
-#if defined(BVH_USESSE)
-    true;
-#else
-    false;
-#endif
+namespace py = pybind11;    // TODO: replace by nanobind?
 
-static constexpr bool AVX =
-#if defined(BVH_USEAVX)
-    true;
-#else
-    false;
-#endif
+// --------------------------- handy things to represent the library's capabilities ---------------------------
 
-static constexpr bool AVX2 =
-#if defined(BVH_USEAVX2)
-    true;
-#else
-    false;
-#endif
+// Single compile-time instance of the CPU info struct to use in helpers
+constexpr CompileTimeCapabilities compiletime_caps;
 
-static constexpr bool NEON =
-#if defined(BVH_USENEON)
-    true;
-#else
-    false;
-#endif
 
-// Traversal availability per layout (conversion is always allowed)
-static constexpr bool SoA_trav     = (AVX || NEON);
-static constexpr bool BVH4CPU_trav = (SSE && !NEON);      // header stubs SSE-only on x86
-static constexpr bool CWBVH_trav   = AVX;                 // needs AVX
-static constexpr bool BVH8CPU_trav = AVX2;                // needs AVX2 (+FMA, MSVC implies it)
-} // namespace tb_caps
-
-// ----- public Layout enum (that one mirrors the one in tinybvh) -----
+// Public Layout enum (that one mirrors the one in tinybvh)
 enum class Layout : uint32_t {
     Standard        = tinybvh::BVHBase::LAYOUT_BVH,
     SoA             = tinybvh::BVHBase::LAYOUT_BVH_SOA,
@@ -64,8 +34,8 @@ enum class Layout : uint32_t {
     BVH4_GPU        = tinybvh::BVHBase::LAYOUT_BVH4_GPU,
     CWBVH           = tinybvh::BVHBase::LAYOUT_CWBVH,
     BVH8_CPU        = tinybvh::BVHBase::LAYOUT_BVH8_AVX2,
-    MBVH4           = 100, // custom value, tinybvh does not exopse this
-    MBVH8           = 101, // custom value, tinybvh does not exopse this
+    MBVH4           = 100, // custom value, tinybvh does not expose this
+    MBVH8           = 101, // custom value, tinybvh does not expose this
 };
 
 static inline const char* layout_to_string(Layout L) {
@@ -88,12 +58,12 @@ static inline bool supports_layout(Layout L, bool for_traversal) {
 
     switch (L) {
         case Layout::Standard:  return true;
-        case Layout::SoA:       return tb_caps::SoA_trav;
+        case Layout::SoA:       return compiletime_caps.SoA_trav;
         case Layout::MBVH4:     return false; // NOLINT(*-branch-clone) Reason: being explicit is better here
         case Layout::MBVH8:     return false;
-        case Layout::BVH4_CPU:  return tb_caps::BVH4CPU_trav;
-        case Layout::CWBVH:     return tb_caps::CWBVH_trav;
-        case Layout::BVH8_CPU:  return tb_caps::BVH8CPU_trav;
+        case Layout::BVH4_CPU:  return compiletime_caps.BVH4CPU_trav;
+        case Layout::CWBVH:     return compiletime_caps.CWBVH_trav;
+        case Layout::BVH8_CPU:  return compiletime_caps.BVH8CPU_trav;
         case Layout::BVH_GPU:   return true; // NOLINT(*-branch-clone) Reason: being explicit is better here
         case Layout::BVH4_GPU:  return true;
     }
@@ -1087,7 +1057,7 @@ struct PyBVH {
                         for (py::ssize_t i = 0; i < n_rays; i += 256) {
                             const py::ssize_t end = std::min(i + 256, n_rays);
                             if (end - i == 256) {
-                            #ifdef BVH_USESSE
+                            #if defined(BVH_USEAVX) && defined(BVH_USESSE)
                                 bvh.Intersect256RaysSSE(&rays.get()[i]);  // uses aligned SIMD loads and same-origin assumption
                             #else
                                 bvh.Intersect256Rays(&rays.get()[i]);     // also assumes same-origin
@@ -1337,8 +1307,6 @@ struct PyBVH {
                 using BVHType = std::decay_t<decltype(bvh)>;
 
                 if constexpr (std::is_same_v<BVHType, tinybvh::BVH>) {
-                    const bool is_tlas = bvh.isTLAS();
-
                     if (want_packets) {
                         #ifdef _OPENMP
                         #pragma omp parallel for schedule(dynamic)
@@ -1347,7 +1315,7 @@ struct PyBVH {
                             const py::ssize_t end = std::min(i + 256, n_rays);
                             if (end - i == 256) {
                                 // Run 256-ray intersection kernel
-                                #ifdef BVH_USESSE
+                                #if defined(BVH_USEAVX) && defined(BVH_USESSE)
                                 bvh.Intersect256RaysSSE(&rays.get()[i]);
                                 #else
                                 bvh.Intersect256Rays(&rays.get()[i]);
@@ -1730,35 +1698,68 @@ struct PyBVH {
 
 // =============================================== pybind11 module =====================================================
 
+// helper function to build the hardware info dict
+
+py::dict get_hardware_info() {
+    py::dict result, compile_time, runtime, compile_simd, runtime_simd, compile_layouts;
+
+    // Architecture
+    #if defined(__aarch64__) || defined(_M_ARM64)
+        result["architecture"] = "arm64";
+    #elif defined(__arm__) || defined(_M_ARM)
+        result["architecture"] = "arm";
+    #elif defined(__x86_64__) || defined(_M_X64)
+        result["architecture"] = "x86_64";
+    #elif defined(__i386__) || defined(_M_IX86)
+        result["architecture"] = "x86";
+    #else
+        result["architecture"] = "unknown";
+    #endif
+
+    // Compile-Time capabilities
+    compile_simd["SSE4_2"] = compiletime_caps.SSE4_2;
+    compile_simd["AVX"]    = compiletime_caps.AVX;
+    compile_simd["AVX2"]   = compiletime_caps.AVX2;
+    compile_simd["NEON"]   = compiletime_caps.NEON;
+    compile_time["simd"]   = compile_simd;
+
+    // mini helper to populate layout support info
+    auto add_layout = [&](Layout L) {
+        py::dict row;
+        row["convert"] = true; // conversion is always possible
+        row["traverse"] = supports_layout(L, /*for_traversal=*/true);
+        row["requirement"] = explain_requirement(L);
+        compile_layouts[layout_to_string(L)] = row;
+    };
+
+    add_layout(Layout::Standard);
+    add_layout(Layout::SoA);
+    add_layout(Layout::BVH4_CPU);
+    add_layout(Layout::CWBVH);
+    add_layout(Layout::BVH8_CPU);
+    add_layout(Layout::BVH_GPU);
+    add_layout(Layout::BVH4_GPU);
+    add_layout(Layout::MBVH4);
+    add_layout(Layout::MBVH8);
+    compile_time["layouts"] = compile_layouts;
+
+    result["compile_time"] = compile_time;
+
+    // Runtime capabilities
+    RuntimeCapabilities rt_info = get_runtime_caps();
+    runtime_simd["SSE4_2"] = rt_info.sse42;
+    runtime_simd["AVX"]    = rt_info.avx;
+    runtime_simd["AVX2"]   = rt_info.avx2;
+    runtime_simd["NEON"]   = rt_info.neon;
+    runtime["simd"] = runtime_simd;
+
+    result["runtime"] = runtime;
+
+    return result;
+}
 
 PYBIND11_MODULE(pytinybvh, m) {
     m.doc() = "Python bindings for the tinybvh library";
-
-    // Layout capabilities and information helpers
-    m.def("capabilities", [] {
-        py::dict out, simd, layouts;
-
-        simd["SSE4_2"] = tb_caps::SSE;
-        simd["AVX"]    = tb_caps::AVX;
-        simd["AVX2"]   = tb_caps::AVX2;
-        simd["NEON"]   = tb_caps::NEON;
-
-        auto add = [&](Layout L, bool trav) {
-            py::dict row; row["convert"] = true; row["traverse"] = trav;
-            layouts[layout_to_string(L)] = row;
-        };
-        add(Layout::Standard,  true);
-        add(Layout::SoA,       tb_caps::SoA_trav);
-        add(Layout::BVH4_CPU,  tb_caps::BVH4CPU_trav);
-        add(Layout::CWBVH,     tb_caps::CWBVH_trav);
-        add(Layout::BVH8_CPU,  tb_caps::BVH8CPU_trav);
-        add(Layout::BVH_GPU,   true);
-        add(Layout::BVH4_GPU,  true);
-
-        out["simd"]    = simd;
-        out["layouts"] = layouts;
-        return out;
-    });
 
     py::enum_<Layout>(m, "Layout")
         .value("Standard",   Layout::Standard)
@@ -1770,6 +1771,9 @@ PYBIND11_MODULE(pytinybvh, m) {
         .value("BVH4_GPU",   Layout::BVH4_GPU)
         .value("CWBVH",      Layout::CWBVH)
         .value("BVH8_CPU",   Layout::BVH8_CPU);
+
+    m.def("hardware_info", &get_hardware_info,
+        "Get architecture, compile-time, and runtime hardware capabilities.");
 
     m.def("layout_to_string", [](Layout L){ return std::string(layout_to_string(L)); });
 
@@ -1839,7 +1843,8 @@ PYBIND11_MODULE(pytinybvh, m) {
                  static_cast<uint32_t>(-1),
                  static_cast<uint32_t>(-1), mask
              };
-        }), "origin"_a, "direction"_a, "t"_a = 1e30f, "mask"_a = 0xFFFF)
+        }),
+        py::arg("origin"), py::arg("direction"), py::arg("t") = 1e30f, py::arg("mask") = 0xFFFF)
 
         .def_property("origin",
             [](const PyRay &r) { return py::make_tuple(r.origin.x, r.origin.y, r.origin.z); },
@@ -2203,7 +2208,6 @@ PYBIND11_MODULE(pytinybvh, m) {
         // Advanced manipulation methods
 
         .def("optimize", &PyBVH::optimize,
-             "iterations"_a = 25, "extreme"_a = false, "stochastic"_a = false,
              R"((
                 Optimizes the BVH tree structure to improve query performance.
 
@@ -2216,7 +2220,8 @@ PYBIND11_MODULE(pytinybvh, m) {
                                     for optimization in each pass.
                     stochastic (bool): If true, uses a randomized approach to select
                                        nodes for re-insertion.
-             ))")
+             ))",
+             py::arg("iterations") = 25, py::arg("extreme") = false, py::arg("stochastic") = false)
 
         .def("compact", &PyBVH::compact,
             R"((

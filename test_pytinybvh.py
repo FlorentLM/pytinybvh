@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from typing import Union
-from pytinybvh import BVH, Ray, BuildQuality, Layout, CachePolicy, capabilities
+from pytinybvh import BVH, Ray, BuildQuality, Layout, CachePolicy, hardware_info
 import trimesh
 import warnings
 
@@ -667,14 +667,16 @@ class TestCustomGeometry:
 class TestLayoutConversion:
     """Tests for converting between different BVH memory layouts"""
 
+    hwinfo = hardware_info()
+
     # Define all layouts we want to test for traversal
     TRAVERSABLE_LAYOUTS = [
-        (Layout.SoA, capabilities()["layouts"]["SoA"]["traverse"]),
-        (Layout.BVH_GPU, capabilities()["layouts"]["BVH (GPU)"]["traverse"]),
-        (Layout.BVH4_CPU, capabilities()["layouts"]["BVH4 (CPU)"]["traverse"]),
-        (Layout.BVH4_GPU, capabilities()["layouts"]["BVH4 (GPU)"]["traverse"]),
-        (Layout.CWBVH, capabilities()["layouts"]["BVH8 (CWBVH)"]["traverse"]),
-        (Layout.BVH8_CPU, capabilities()["layouts"]["BVH8 (CPU)"]["traverse"]),
+        (Layout.SoA, hwinfo['compile_time']["layouts"]["SoA"]["traverse"]),
+        (Layout.BVH_GPU, hwinfo['compile_time']["layouts"]["BVH (GPU)"]["traverse"]),
+        (Layout.BVH4_CPU, hwinfo['compile_time']["layouts"]["BVH4 (CPU)"]["traverse"]),
+        (Layout.BVH4_GPU, hwinfo['compile_time']["layouts"]["BVH4 (GPU)"]["traverse"]),
+        (Layout.CWBVH, hwinfo['compile_time']["layouts"]["BVH8 (CWBVH)"]["traverse"]),
+        (Layout.BVH8_CPU, hwinfo['compile_time']["layouts"]["BVH8 (CPU)"]["traverse"]),
     ]
 
     NON_TRAVERSABLE_LAYOUTS = [

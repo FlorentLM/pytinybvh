@@ -1758,7 +1758,27 @@ py::dict get_hardware_info() {
     return result;
 }
 
+
+// Fail fast if the binary was built with an ISA the current CPU/OS can't run
+static inline void isa_compat_check() {
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+    RuntimeCapabilities rt = get_runtime_caps();
+    if (compiletime_caps.AVX2 && !rt.avx2)
+        throw std::runtime_error("pytinybvh was built with AVX2, but this CPU/OS doesn't support AVX2. Reinstall from source on this machine (no cached wheel), or set PYTINYBVH_NO_SIMD=1 for a baseline build.");
+    if (compiletime_caps.AVX && !rt.avx)
+        throw std::runtime_error("pytinybvh was built with AVX, but this CPU/OS doesn't support AVX. Reinstall from source on this machine (no cached wheel), or set PYTINYBVH_NO_SIMD=1 for a baseline build.");
+    if (compiletime_caps.SSE4_2 && !rt.sse42)
+        throw std::runtime_error("pytinybvh was built with SSE4.2, but this CPU does not support SSE4.2.");
+#elif defined(__aarch64__) || defined(_M_ARM64) || defined(__arm__) || defined(_M_ARM)
+    RuntimeCapabilities rt = get_runtime_caps();
+    if (compiletime_caps.NEON && !rt.neon)
+        throw std::runtime_error("pytinybvh was built with NEON, but this device/OS does not expose NEON.");
+#endif
+}
+
 PYBIND11_MODULE(pytinybvh, m) {
+    isa_compat_check();
+
     m.doc() = "Python bindings for the tinybvh library";
 
     py::enum_<Layout>(m, "Layout")

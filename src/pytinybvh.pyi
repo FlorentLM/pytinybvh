@@ -262,16 +262,6 @@ class Ray:
 class BVH:
     """A Bounding Volume Hierarchy for fast ray intersections."""
 
-    traversal_cost: float
-    """
-    The traversal cost used in the Surface Area Heuristic (SAH) calculation.
-    """
-
-    intersection_cost: float
-    """
-    The intersection cost used in the Surface Area Heuristic (SAH) calculation.
-    """
-
     @staticmethod
     def from_triangles(triangles: np.ndarray, quality: BuildQuality = ..., traversal_cost: float = ..., intersection_cost: float = ...) -> BVH:
         """
@@ -724,6 +714,21 @@ class BVH:
     @property
     def is_compact(self) -> bool:
         """Returns True if the BVH is contiguous in memory."""
+        ...
+
+    @property
+    def is_refittable(self) -> bool:
+        """Returns True if the BVH can be refitted."""
+        ...
+
+    @property
+    def traversal_cost(self) -> float:
+        """The traversal cost used in the Surface Area Heuristic (SAH) calculation during the build."""
+        ...
+
+    @property
+    def intersection_cost(self) -> float:
+        """The intersection cost used in the Surface Area Heuristic (SAH) calculation during the build."""
         ...
 
     @property

@@ -2295,27 +2295,17 @@ PYBIND11_MODULE(pytinybvh, m) {
 
         // Read-write properties
 
-        .def_property("traversal_cost",
+        .def_property_readonly("traversal_cost",
             [](const PyBVH &self) {
                 if (!self.active_bvh_) throw std::runtime_error("BVH is not initialized.");
                 return self.active_bvh_->c_trav;
             },
-            [](const PyBVH &self, float value) {
-                if (!self.active_bvh_) throw std::runtime_error("BVH is not initialized.");
-                if (value < 0) throw std::runtime_error("Traversal cost must be non-negative.");
-                self.active_bvh_->c_trav = value;
-            },
             "The traversal cost used in the Surface Area Heuristic (SAH) calculation during the build.")
 
-        .def_property("intersection_cost",
+        .def_property_readonly("intersection_cost",
             [](const PyBVH &self) {
                 if (!self.active_bvh_) throw std::runtime_error("BVH is not initialized.");
                 return self.active_bvh_->c_int;
-            },
-            [](const PyBVH &self, float value) {
-                if (!self.active_bvh_) throw std::runtime_error("BVH is not initialized.");
-                if (value < 0) throw std::runtime_error("Intersection cost must be non-negative.");
-                self.active_bvh_->c_int = value;
             },
             "The intersection cost used in the Surface Area Heuristic (SAH) calculation during the build.")
 
@@ -2411,6 +2401,12 @@ PYBIND11_MODULE(pytinybvh, m) {
             // may_have_holes is true when it's *not* compact
             return self.active_bvh_ ? !self.active_bvh_->may_have_holes : true;
         }, "Returns True if the BVH is contiguous in memory.")
+
+        .def_property_readonly("is_refittable", [](const PyBVH &self) {
+            if (!self.active_bvh_) return false;
+            // refittable status is determined by the base BVH
+            return self.base_ ? self.base_->refittable : false;
+        }, "Returns True if the BVH can be refitted.")
 
         .def_property_readonly("cached_layouts", &PyBVH::get_cached_layouts,
             "A list of the BVH layouts currently held in the cache.")

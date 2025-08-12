@@ -13,9 +13,9 @@ For example, the BVH can be used as-is in a SSBO for real time ray-tracing with 
 
 ## Current status
 
-Most of `tinybvh`'s code functionality is now implemented and functional :)
+Most of `tinybvh`'s core functionality is now implemented and functional :)
 
-See [Features](##Features) and [Roadmap](##Roadmap) below for more details.
+See [Features](#Features) and [Roadmap](#Roadmap) below for more details.
 
 ## Prerequisites
 

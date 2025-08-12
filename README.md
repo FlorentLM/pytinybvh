@@ -7,9 +7,10 @@ Python bindings for the great C++ Bounding Volume Hierarchy (BVH) library [tinyb
 Exposes `tinybvh`'s fast BVH construction algorithms to Python.
 For example, the BVH can be used as-is in a SSBO for real time ray-tracing with PyOpenGL or Vulkan, or for CPU-side computations like collision detection, etc.
 
-**Note:** Not all functionalities are implemented yet!
+**Note:** Most of `tinybvh`'s functionalities are now implemented :)
 
-**Another note:** This is still under active development, so expect some breaking changes! Sorry about that
+**Important note:** Some things might be a little bit unstable for now (like occasional crashes when intersecting a large number of rays after layout conversion), and current design choices might evolve (like dropping the use of `Intersect256()` in occlusion tests, etc). This is still under active development.
+
 
 <div style="text-align:center">
 <img alt="Screenshot of a test model in a Bounding Volume Hierarchy" src="img/screenshot.png" title="Screenshot" width="500"/>
@@ -319,7 +320,7 @@ directions = np.array([[0, 0, 1], [0, 0, 1]], dtype=np.float32)
 
 # Returns a boolean array (N,) where True means "occluded"
 # For standard triangle BVHs (BLAS, not TLAS), pytinybvh can use the 256-ray
-# intersection packet kernel internally and reduce to occlusion flags
+# intersection packet kernel internally and reduce to occlusion flags (although this might change in the future)
 occluded = bvh.is_occluded_batch(origins, directions, packet=PacketMode.Auto)
 
 # Useful derived mask:
@@ -404,11 +405,13 @@ I plan to expand the Python API to include everything.
 
 Immediate priorities:
 
-- [x] Indexed Geometry Support
-- [x] Custom Geometry Primitives (AABBs and Spheres)
-- [x] Top-Level Acceleration Structure (TLAS) Support for instancing
-- [ ] Fix the sometimes unreliable `optimize()` method
-- [ ] Support for more `tinybvh` build presets and layouts (BVH8, etc)
+- [x] Indexed Geometry support
+- [x] Custom Geometry primitives (AABBs and Spheres)
+- [x] Top-Level Acceleration Structure (TLAS) support
+- [x] Support for more `tinybvh` layouts (BVH8, etc)
+- [ ] Investigate the occasional crashes when intersecting huge number of rays
+- [ ] Add mutexes where needed
+- [ ] Properly time in real life scenario whether using `Intersect256()` in occlusion queries is useful
 
 ## Remarks
 

@@ -70,10 +70,10 @@ The C++ dependency (`tinybvh`) is included as a Git submodule.
 If the process completes without errors, the `pytinybvh` module is now installed and ready to be used in your virtual environment.
 
 4. **Use in other projects:**
-    From the virtual environment of your other project, run the installation of `pytinybvh` in editable mode.
+    From the virtual environment of your other project:
     
    ```bash
-    uv pip install -e /path/to/this/repo
+    uv pip install /path/to/pytinybvh
     ```
 
 ## Performance & Build optimizations

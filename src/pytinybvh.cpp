@@ -20,11 +20,19 @@
 
 namespace py = pybind11;    // TODO: replace by nanobind?
 
+constexpr float PI = 3.1415926535f;
+constexpr float TWO_PI = (2.0f * PI);
+constexpr float INV_PI = 1.0f / PI;
+constexpr float INV_TWO_PI = 1.0f / TWO_PI;
+
 // --------------------------- handy things to represent the library's capabilities ---------------------------
+
+// Packet kernels require 64B aligned rays and an array stride a multiple of 64
+constexpr bool TBVH_PACKET_SAFE =
+    (alignof(tinybvh::Ray) >= 64) && ((sizeof(tinybvh::Ray) % 64) == 0);
 
 // Single compile-time instance of the CPU info struct to use in helpers
 constexpr CompileTimeCapabilities compiletime_caps;
-
 
 // Public Layout enum (that one mirrors the one in tinybvh)
 enum class Layout : uint32_t {
@@ -278,10 +286,6 @@ bool sphere_intersect_callback(tinybvh::Ray& ray, const unsigned int prim_id) {
     if (auto t = intersect_sphere_primitive(ray, center, radius_sq)) {
         ray.hit.t = *t;
         ray.hit.prim = prim_id;
-
-        constexpr float PI = 3.1415926535f;
-        constexpr float INV_PI = 1.0f / PI;
-        constexpr float INV_TWO_PI = 1.0f / (2.0f * PI);
 
         const tinybvh::bvhvec3 hit_point = ray.O + ray.D * (*t);
         const tinybvh::bvhvec3 normal = tinybvh::tinybvh_normalize(hit_point - center);
@@ -997,12 +1001,10 @@ struct PyBVH {
         const auto d_row = static_cast<size_t>(directions_np.strides(0)) / sizeof(float);
         const auto d_col = static_cast<size_t>(directions_np.strides(1)) / sizeof(float); // should be 1 for (N, 3) C-contiguous
 
-        // TODO: Maybe we need (N, 4) actually (for the other layouts)
-
         if (n_rays == 0)
-            return py::array_t<HitRecord>(0);
+            return {py::dtype(py::format_descriptor<HitRecord>::format()), 0};
 
-        // Optional t_max / masks: keep arrays alive across GIL release
+        // Optional inputs
         const float* t_max_ptr = nullptr;
         const uint32_t* masks_ptr = nullptr;
         if (!t_max_obj.is_none()) {
@@ -1039,23 +1041,13 @@ struct PyBVH {
 
         // Early out: empty BVH
         if (!active_bvh_ || active_bvh_->triCount == 0) {
-            py::array_t<HitRecord> result(n_rays);
-            auto* rp = result.mutable_data();
-            for (py::ssize_t i = 0; i < n_rays; ++i)
-                rp[i] = {
-                static_cast<uint32_t>(-1),
-                static_cast<uint32_t>(-1),
-                INFINITY,
-                0.0f,
-                0.0f
-                };
-            return result;
+            return {py::dtype(py::format_descriptor<HitRecord>::format()), n_rays};
         }
 
-        const auto* origins_ptr = origins_np.data();
+        const auto* origins_ptr    = origins_np.data();
         const auto* directions_ptr = directions_np.data();
 
-        // Decide base eligibility for packets
+        // Decide base eligibility for packets (global capability / layout)
         const bool layout_is_std_bvh = (active_bvh_->layout == tinybvh::BVHBase::LAYOUT_BVH);
         bool want_packets = (packet != PacketMode::Never)
                          && layout_is_std_bvh
@@ -1063,34 +1055,34 @@ struct PyBVH {
                          && !is_tlas()
                          && (n_rays >= 256);
 
-        // Shared-origin gate
+        // Warn if the *whole batch* mixes origins: we'll still decide per 256-chunk below
         if (want_packets && !same_origin_ok(origins_ptr, o_row, o_col, n_rays, same_origin_eps)) {
             if (warn_on_incoherent && packet != PacketMode::Never) {
                 py::module::import("warnings").attr("warn")(
                     packet == PacketMode::Force ?
-                    "pytinybvh: forcing packet traversal, but ray origins differ. "
-                    "Packet kernels assume a shared origin and coherent directions; results may be inaccurate."
+                    "pytinybvh: Forcing packet traversal, but ray origins differ. "
+                    "Packet kernels assume a shared origin per 16x16 tile. Only packet-chunk rays that satisfy it."
                     :
-                    "pytinybvh: ray origins differ, falling back to scalar traversal. "
-                    "Packet traversal also requires coherent directions."
+                    "pytinybvh: Ray origins differ. Packet traversal will only apply to 16x16 chunks with shared origin."
                 );
             }
-            if (packet == PacketMode::Auto) want_packets = false;
+            // keep packets_possible and decide per chunk
         }
 
-        // Per-block gate: rays cone size + tmax band
-        const float tmax_band_ratio = 8.0f; // unused for now anyway
-        const float cos_thresh = std::cos(max_cone_deg * static_cast<float>(M_PI) / 180.0f);
+        // Per-block gate: rays cone size + tmax band (soft heuristic used only in Auto)
+        const float tmax_band_ratio = 8.0f; // unused right now
+        const float cos_thresh = std::cos(max_cone_deg * static_cast<float>(PI) / 180.0f);
         PacketGate gate{ directions_ptr, d_row, d_col, t_max_ptr, cos_thresh, tmax_band_ratio };
 
         // 64B-aligned ray storage for packet kernels
         // Note: using this buffer even for scalar, cost is negligible
         std::unique_ptr<tinybvh::Ray, void(*)(tinybvh::Ray*)> rays(
-            static_cast<tinybvh::Ray*>(tinybvh::malloc64(static_cast<size_t>(n_rays) * sizeof(tinybvh::Ray), nullptr)),
-            [](tinybvh::Ray* p){ tinybvh::free64(p, nullptr); }
+            static_cast<tinybvh::Ray*>(_aligned_malloc(static_cast<size_t>(n_rays) * sizeof(tinybvh::Ray), 64)),
+            [](tinybvh::Ray* p){ if (p) _aligned_free(p); }
         );
         if (!rays) throw std::bad_alloc();
 
+        // Result buffer (POD to memcpy once)
         std::vector<HitRecord> out(n_rays);
 
         {
@@ -1105,13 +1097,24 @@ struct PyBVH {
                 const size_t iSd = static_cast<size_t>(i) * d_row;
                 const float t_init   = t_max_ptr   ? t_max_ptr[i]   : 1e30f;
                 const uint32_t mask  = masks_ptr   ? masks_ptr[i]   : 0xFFFFu;
-                new (&rays.get()[i]) tinybvh::Ray(
-                    { origins_ptr[iSo + 0 * o_col], origins_ptr[iSo + 1 * o_col], origins_ptr[iSo + 2 * o_col] },
-                    { directions_ptr[iSd + 0 * d_col], directions_ptr[iSd + 1 * d_col], directions_ptr[iSd + 2 * d_col] },
-                    t_init, mask
+
+                tinybvh::Ray& r = rays.get()[i];
+                r = tinybvh::Ray(
+                    tinybvh::bvhvec3(
+                        origins_ptr[iSo + 0 * o_col],
+                        origins_ptr[iSo + 1 * o_col],
+                        origins_ptr[iSo + 2 * o_col]),
+                    tinybvh::bvhvec3(
+                        directions_ptr[iSd + 0 * d_col],
+                        directions_ptr[iSd + 1 * d_col],
+                        directions_ptr[iSd + 2 * d_col]),
+                    /* t */   t_init,
+                    /* mask */mask
                 );
+
+                // if using custom geometry we also need the read-only context pointer
                 if (custom_type != CustomType::None) {
-                    rays.get()[i].hit.auxData = &context;
+                    r.hit.auxData = &context;
                 }
             }
 
@@ -1126,14 +1129,26 @@ struct PyBVH {
                         #endif
                         for (py::ssize_t i = 0; i < n_rays; i += 256) {
                             const py::ssize_t end = std::min(i + 256, n_rays);
-                            if (end - i == 256 && want_packets && gate.cone_ok(i, 256) && gate.tmax_ok(i, 256)) {
+                            bool used_packet = false;
+                            if (end - i == 256) {
+                                const bool chunk_same_origin = same_origin_ok(
+                                    origins_ptr + static_cast<size_t>(i) * o_row,
+                                    o_row, o_col, 256, same_origin_eps);
+                                const bool chunk_coherent = (packet == PacketMode::Force)
+                                    ? true
+                                    : (gate.cone_ok(i, 256) && gate.tmax_ok(i, 256));
+
+                                if (chunk_same_origin && chunk_coherent) {
                             #if defined(BVH_USEAVX) && defined(BVH_USESSE)
-                                bvh.Intersect256RaysSSE(&rays.get()[i]);  // uses aligned SIMD loads and same-origin assumption
+                                    bvh.Intersect256RaysSSE(&rays.get()[i]);  // uses aligned SIMD loads and same-origin assumption
                             #else
-                                bvh.Intersect256Rays(&rays.get()[i]);     // also assumes same-origin
+                                    bvh.Intersect256Rays(&rays.get()[i]);     // also assumes same-origin
                             #endif
-                            } else {
-                                // remining rays: scalar
+                                    used_packet = true;
+                                }
+                            }
+                            if (!used_packet) {
+                                // remaining rays: scalar
                                 for (py::ssize_t j = i; j < end; ++j) bvh.Intersect(rays.get()[j]);
                             }
                         }
@@ -1145,13 +1160,14 @@ struct PyBVH {
                         for (py::ssize_t i = 0; i < n_rays; ++i) bvh.Intersect(rays.get()[i]);
                     }
                 } else {
-                    // Other layouts (SoA, etc): scalar path
+                    // Non-standard layouts: scalar traversal only
                     #ifdef _OPENMP
                     #pragma omp parallel for schedule(dynamic)
                     #endif
                     for (py::ssize_t i = 0; i < n_rays; ++i) bvh.Intersect(rays.get()[i]);
                 }
             });
+
         } // GIL re-acquired
 
         // Determine TLAS vs BLAS (only standard BVH exposes isTLAS())
@@ -1244,6 +1260,7 @@ struct PyBVH {
         if (custom_type != CustomType::None && active_bvh_->layout != tinybvh::BVHBase::LAYOUT_BVH) {
             throw std::runtime_error("Custom geometry (AABBs / Spheres) can only be traversed in the Standard layout.");
         }
+
         // Shape checks
         if (origins_np.ndim() != 2 || origins_np.shape(1) != 3)
             throw std::runtime_error("Origins must be (N, 3) float32.");
@@ -1255,44 +1272,47 @@ struct PyBVH {
         const py::ssize_t n_rays = origins_np.shape(0);
 
         const auto o_row = static_cast<size_t>(origins_np.strides(0)) / sizeof(float);
-        const auto o_col = static_cast<size_t>(origins_np.strides(1)) / sizeof(float);   // should be 1 for (N, 3) C-contiguous
+        const auto o_col = static_cast<size_t>(origins_np.strides(1)) / sizeof(float); // should be 1 for (N, 3) C-contiguous
 
         const auto d_row = static_cast<size_t>(directions_np.strides(0)) / sizeof(float);
         const auto d_col = static_cast<size_t>(directions_np.strides(1)) / sizeof(float); // should be 1 for (N, 3) C-contiguous
 
-        py::array_t<bool> result(n_rays);
         if (n_rays == 0)
-            return result;
+            return py::array_t<bool>(0);
 
-        // Optional t_max / masks: keep arrays alive across GIL release
+        // Optional inputs
         const float* t_max_ptr = nullptr;
         const uint32_t* masks_ptr = nullptr;
         if (!t_max_obj.is_none()) {
             auto t_max_np = py::cast<py::array_t<float>>(t_max_obj);
 
             if (t_max_np.ndim() != 1 || t_max_np.size() != n_rays)
-                throw std::runtime_error("t_max must be a 1D float array of length N.");
+                throw std::runtime_error("`t_max` must be a 1D float array of length N.");
+
             t_max_ptr = t_max_np.data();
         }
         if (!masks_obj.is_none()) {
             auto masks_np = py::cast<py::array_t<uint32_t>>(masks_obj);
 
             if (masks_np.ndim() != 1 || masks_np.size() != n_rays)
-                throw std::runtime_error("masks must be a 1D uint32 array of length N.");
+                throw std::runtime_error("`masks` must be a 1D uint32 array of length N.");
+
             masks_ptr = masks_np.data();
         }
+
+        // Prepare output array (Python bool)
+        py::array_t<bool> result(n_rays);
 
         // Custom geometry context: keep source arrays alive across GIL release
         CustomGeometryContext context{};
         if (custom_type == CustomType::AABB) {
-            auto aabbs = py::cast<py::array_t<float>>(source_geometry_refs[0]);
-            auto invex = py::cast<py::array_t<float>>(source_geometry_refs[1]);
-            context.aabbs_ptr = aabbs.data();
-            context.inv_extents_ptr = invex.data();
-
+            py::array_t<float> aabbs_arr = py::cast<py::array_t<float>>(source_geometry_refs[0]);
+            py::array_t<float> inv_extents_arr = py::cast<py::array_t<float>>(source_geometry_refs[1]);
+            context.aabbs_ptr = aabbs_arr.data();
+            context.inv_extents_ptr = inv_extents_arr.data();
         } else if (custom_type == CustomType::Sphere) {
-            auto points = py::cast<py::array_t<float>>(source_geometry_refs[0]);
-            context.points_ptr = points.data();
+            py::array_t<float> points_arr = py::cast<py::array_t<float>>(source_geometry_refs[0]);
+            context.points_ptr = points_arr.data();
             context.sphere_radius = sphere_radius;
         }
 
@@ -1303,10 +1323,10 @@ struct PyBVH {
             return result;
         }
 
-        const auto* origins_ptr = origins_np.data();
+        const auto* origins_ptr    = origins_np.data();
         const auto* directions_ptr = directions_np.data();
 
-        // Decide base eligibility for packets
+        // Decide base eligibility for packets (global capability / layout)
         const bool layout_is_std_bvh = (active_bvh_->layout == tinybvh::BVHBase::LAYOUT_BVH);
         bool want_packets = (packet != PacketMode::Never)
                          && layout_is_std_bvh
@@ -1314,37 +1334,37 @@ struct PyBVH {
                          && !is_tlas()
                          && (n_rays >= 256);
 
-        // Shared-origin gate
+        // Warn if the *whole batch* mixes origins; we'll still decide per 256-chunk below.
         if (want_packets && !same_origin_ok(origins_ptr, o_row, o_col, n_rays, same_origin_eps)) {
             if (warn_on_incoherent && packet != PacketMode::Never) {
                 py::module::import("warnings").attr("warn")(
                     packet == PacketMode::Force ?
                     "pytinybvh: forcing packet traversal, but ray origins differ. "
-                    "Packet kernels assume a shared origin and coherent directions; results may be inaccurate."
+                    "Packet kernels assume a shared origin per 16x16 tile; we'll only packet-chunk rays that satisfy it."
                     :
-                    "pytinybvh: ray origins differ, falling back to scalar traversal. "
-                    "Packet traversal also requires coherent directions."
+                    "pytinybvh: ray origins differ; packet traversal will only apply to 16x16 chunks with shared origin."
                 );
             }
-            if (packet == PacketMode::Auto) want_packets = false;
+            // Keep packets_possible, decide per chunk
         }
 
-        // Per-block gate: rays cone size + tmax band
-        const float tmax_band_ratio = 8.0f; // unused for now anyway
-        const float cos_thresh = std::cos(max_cone_deg * static_cast<float>(M_PI) / 180.0f);
+        // Per-block gate: rays cone size + tmax band (soft heuristic used only in Auto)
+        const float tmax_band_ratio = 8.0f; // unused for now
+        const float cos_thresh = std::cos(max_cone_deg * static_cast<float>(PI) / 180.0f);
         PacketGate gate{ directions_ptr, d_row, d_col, t_max_ptr, cos_thresh, tmax_band_ratio };
 
-        // Aligned Ray storage
+        // 64B-aligned ray storage for packet kernels
         std::unique_ptr<tinybvh::Ray, void(*)(tinybvh::Ray*)> rays(
-            static_cast<tinybvh::Ray*>(tinybvh::malloc64(static_cast<size_t>(n_rays) * sizeof(tinybvh::Ray), nullptr)),
-            [](tinybvh::Ray* p){ tinybvh::free64(p, nullptr); }
+            static_cast<tinybvh::Ray*>(_aligned_malloc(static_cast<size_t>(n_rays) * sizeof(tinybvh::Ray), 64)),
+            [](tinybvh::Ray* p){ if (p) _aligned_free(p); }
         );
         if (!rays) throw std::bad_alloc();
 
-        // Output buffer (0/1), written inside traversal
+        // Scratch for occlusion result (byte per ray, converted to bools at the end)
         std::vector<uint8_t> occluded(static_cast<size_t>(n_rays), 0);
+
         {
-            py::gil_scoped_release release;     // release GIL for traversal
+            py::gil_scoped_release release;
 
             // Construct rays
             #ifdef _OPENMP
@@ -1353,39 +1373,62 @@ struct PyBVH {
             for (py::ssize_t i = 0; i < n_rays; ++i) {
                 const size_t iSo = static_cast<size_t>(i) * o_row;
                 const size_t iSd = static_cast<size_t>(i) * d_row;
-                const float t_init  = t_max_ptr ? t_max_ptr[i] : 1e30f;
-                const uint32_t mask = masks_ptr ? masks_ptr[i] : 0xFFFFu;
-                new (&rays.get()[i]) tinybvh::Ray(
-                    { origins_ptr[iSo + 0 * o_col], origins_ptr[iSo + 1 * o_col], origins_ptr[iSo + 2 * o_col] },
-                    { directions_ptr[iSd + 0 * d_col], directions_ptr[iSd + 1 * d_col], directions_ptr[iSd + 2 * d_col] },
-                    t_init, mask
+                const float t_init   = t_max_ptr ? t_max_ptr[i] : 1e30f;
+                const uint32_t mask  = masks_ptr ? masks_ptr[i] : 0xFFFFu;
+
+                tinybvh::Ray& r = rays.get()[i];
+                r = tinybvh::Ray(
+                    tinybvh::bvhvec3(
+                        origins_ptr[iSo + 0 * o_col],
+                        origins_ptr[iSo + 1 * o_col],
+                        origins_ptr[iSo + 2 * o_col]),
+                    tinybvh::bvhvec3(
+                        directions_ptr[iSd + 0 * d_col],
+                        directions_ptr[iSd + 1 * d_col],
+                        directions_ptr[iSd + 2 * d_col]),
+                    /* t */   t_init,
+                    /* mask */mask
                 );
-                if (custom_type != CustomType::None) rays.get()[i].hit.auxData = &context;
+
+                // if using custom geometry we also need the read-only context pointer
+                if (custom_type != CustomType::None) {
+                    r.hit.auxData = &context;
+                }
             }
 
             dispatch_bvh_call(active_bvh_, [&](auto& bvh) {
                 using BVHType = std::decay_t<decltype(bvh)>;
-
-                if constexpr (std::is_same_v<BVHType, tinybvh::BVH>) {  // TODO: Are any other layouts compatible??
+                if constexpr (std::is_same_v<BVHType, tinybvh::BVH>) {  // BLAS only
                     if (want_packets) {
                         #ifdef _OPENMP
                         #pragma omp parallel for schedule(dynamic)
                         #endif
                         for (py::ssize_t i = 0; i < n_rays; i += 256) {
                             const py::ssize_t end = std::min(i + 256, n_rays);
-                            if (end - i == 256 && want_packets && gate.cone_ok(i, 256) && gate.tmax_ok(i, 256)) {
-                                // Packet path
+                            bool used_packet = false;
+                            if (end - i == 256) {
+                                const bool chunk_same_origin = same_origin_ok(
+                                    origins_ptr + static_cast<size_t>(i) * o_row,
+                                    o_row, o_col, 256, same_origin_eps);
+                                const bool chunk_coherent = (packet == PacketMode::Force)
+                                    ? true
+                                    : (gate.cone_ok(i, 256) && gate.tmax_ok(i, 256));
+
+                                if (chunk_same_origin && chunk_coherent) {
                                 #if defined(BVH_USEAVX) && defined(BVH_USESSE)
-                                bvh.Intersect256RaysSSE(&rays.get()[i]);
+                                    bvh.Intersect256RaysSSE(&rays.get()[i]);
                                 #else
-                                bvh.Intersect256Rays(&rays.get()[i]);
+                                    bvh.Intersect256Rays(&rays.get()[i]);
                                 #endif
-                                // Convert to occlusion flags (t reduced?)
+                                // Convert to occlusion flags
                                 for (py::ssize_t j = i; j < end; ++j) {
                                     const float t_init = t_max_ptr ? t_max_ptr[j] : 1e30f;
                                     if (rays.get()[j].hit.t < t_init) occluded[static_cast<size_t>(j)] = 1;
                                 }
-                            } else {
+                                used_packet = true;
+                                }
+                            }
+                            if (!used_packet) {
                                 // Fallback: scalar occlusion for this chunk
                                 for (py::ssize_t j = i; j < end; ++j) {
                                     if (bvh.IsOccluded(rays.get()[j])) occluded[static_cast<size_t>(j)] = 1;
@@ -1402,7 +1445,7 @@ struct PyBVH {
                         }
                     }
                 } else {
-                    // Other layouts: scalar occlusion only
+                    // Non-standard layouts: scalar-only
                     #ifdef _OPENMP
                     #pragma omp parallel for schedule(dynamic)
                     #endif
@@ -1909,7 +1952,7 @@ struct PyBVH {
 // helper function to build the hardware info dict
 
 py::dict get_hardware_info() {
-    py::dict result, compile_time, runtime, compile_simd, runtime_simd, compile_layouts;
+    py::dict result, compile_time, runtime, compile_simd, runtime_simd, compile_layouts, rays;
 
     // Architecture
     #if defined(__aarch64__) || defined(_M_ARM64)
@@ -1952,6 +1995,12 @@ py::dict get_hardware_info() {
     compile_time["layouts"] = compile_layouts;
 
     result["compile_time"] = compile_time;
+
+    // Ray info
+    rays["align"] = py::int_(alignof(tinybvh::Ray));
+    rays["size"]  = py::int_(sizeof(tinybvh::Ray));
+    rays["packet_safe"] = py::bool_(TBVH_PACKET_SAFE);
+    result["rays"] = rays;
 
     // Runtime capabilities
     RuntimeCapabilities rt_info = get_runtime_caps();

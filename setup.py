@@ -1,5 +1,4 @@
 import os
-import tempfile
 import sys
 from pathlib import Path
 import platform
@@ -7,67 +6,22 @@ import textwrap
 from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
 from setuptools.errors import CompileError
-
 import pybind11
 
-
-def _macos_arch():
-    # 'arm64' on Apple Silicon, 'x86_64' on Intel
-    return platform.machine()
-
-def _sanitize_arch_flags(cmd):
-    """Remove all -arch pairs. On macOS we will add back a single arch."""
-    out = []
-    skip = False
-    for i, tok in enumerate(cmd):
-        if skip:
-            skip = False
-            continue
-        if tok == "-arch" and i + 1 < len(cmd):
-            skip = True
-            continue
-        out.append(tok)
-    return out
-
-
-
 def try_compile(compiler, flags, code):
-    """Tries to compile a given code snippet with a set of flags"""
-
-    try:
-        base_cmd = compiler.executables['compiler_cxx']
-    except (KeyError, AttributeError):
-        # Defensive fallback for bizarre environments. This should not be needed.
-        if compiler.compiler_type == "msvc":
-            base_cmd = ["cl.exe"]
-        else:
-            base_cmd = ["c++"] # or g++
+    import tempfile
 
     with tempfile.TemporaryDirectory() as td:
         src = Path(td, "test.cpp")
         src.write_text(code, encoding="utf-8")
-
-        if compiler.compiler_type == "msvc":
-            # On MSVC, base_cmd is ['cl.exe']. We just add flags
-            cmd = base_cmd + flags + ["/c", str(src), "/Fo" + str(Path(td, "test.obj"))]
-        else:
-            # For GCC/Clang, we need a copy to modify for macOS
-            current_base_cmd = list(base_cmd)
-            if sys.platform == "darwin":
-                current_base_cmd = _sanitize_arch_flags(current_base_cmd)
-                current_base_cmd += ["-arch", _macos_arch()]
-
-            cmd = current_base_cmd + flags + ["-c", str(src), "-o", str(Path(td, "test.o"))]
-
         try:
-            compiler.spawn(cmd)
+            compiler.compile([str(src)], output_dir=str(td), extra_postargs=list(flags))
             return True
-
-        except CompileError:
+        except CompileError as e:
+            print(f"[probe] compile failed with flags {flags}: {e}")
             return False
-
-        except Exception:
-            # for any other weird error
+        except Exception as e:
+            print(f"[probe] unexpected error with flags {flags}: {e}")
             return False
 
 def supports_sse42(compiler):
@@ -185,7 +139,7 @@ class CppBuildExt(build_ext):
             if supports_avx2(self.compiler):
                 if self.compiler.compiler_type == "msvc":
                     compile_args += ["/arch:AVX2"]
-                    define_macros += [("__AVX__", "1"), ("__AVX2__", "1"), ("__FMA__", "1")]
+                    define_macros += [("__AVX__", "1"), ("__AVX2__", "1"), ("__FMA__", "1"), ("BVH_USEAVX2", "1")]
                 else:
                     compile_args += ["-mavx2", "-mfma"]
                 print("Enabling AVX2 (detected).")
@@ -255,13 +209,6 @@ ext_modules = [
 
 setup(
     name="pytinybvh",
-    package_dir={"": "src"},
-    py_modules=['pytinybvh'],
-    package_data={
-        'pytinybvh': ['*.pyi'],
-    },
     ext_modules=ext_modules,
     cmdclass={"build_ext": CppBuildExt},
-    include_package_data=True,
-    zip_safe=False,
 )

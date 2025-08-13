@@ -228,13 +228,16 @@ class CppBuildExt(build_ext):
         else:
             print(f"Unknown architecture ({platform.machine()}). Building baseline.")
 
+        # define_macros += [("WATERTIGHT_TRITEST", "1")]
+        define_macros += [("ENABLE_INDEXED_GEOMETRY", "1")]
+        define_macros += [("ENABLE_CUSTOM_GEOMETRY", "1")]
+
         for ext in self.extensions:
             ext.extra_compile_args = list(getattr(ext, "extra_compile_args", [])) + compile_args
             ext.extra_link_args = list(getattr(ext, "extra_link_args", [])) + link_args
             ext.define_macros = list(getattr(ext, "define_macros", [])) + define_macros
 
         super().build_extensions()
-
 
 
 ext_modules = [
@@ -252,6 +255,13 @@ ext_modules = [
 
 setup(
     name="pytinybvh",
+    package_dir={"": "src"},
+    py_modules=['pytinybvh'],
+    package_data={
+        'pytinybvh': ['*.pyi'],
+    },
     ext_modules=ext_modules,
     cmdclass={"build_ext": CppBuildExt},
+    include_package_data=True,
+    zip_safe=False,
 )

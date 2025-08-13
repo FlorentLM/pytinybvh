@@ -460,6 +460,7 @@ class BVH:
                         masks: Optional[np.ndarray] = None,
                         packet: PacketMode = PacketMode.Never,
                         same_origin_eps: float = 1e-6,
+                        max_spread: float = 1.0,
                         warn_on_incoherent: bool = True) -> np.ndarray:
         """
         Performs intersection queries for a batch of rays.
@@ -490,6 +491,7 @@ class BVH:
                                              If not provided, rays default to mask 0xFFFF (intersect all instances).
             packet (PacketMode, optional): Choose packet usage strategy. Defaults to Never.
             same_origin_eps (float, optional): Epsilon for same-origin test. Default 1e-6.
+            max_spread (float, optional): Max spread allowed for a batch (cone angle, in degrees). Default 1.0.
             warn_on_incoherent (bool, optional): Warn when rays differ in origin. Default True.
 
         Returns:
@@ -523,6 +525,7 @@ class BVH:
                           masks: Optional[np.ndarray] = None,
                           packet: PacketMode = PacketMode.Never,
                           same_origin_eps: float = 1e-6,
+                          max_spread: float = 1.0,
                           warn_on_incoherent: bool = True) -> np.ndarray:
         """
         Performs occlusion queries for a batch of rays, parallelized for performance.
@@ -552,6 +555,7 @@ class BVH:
                                              If not provided, rays default to mask 0xFFFF (intersect all instances).
             packet (PacketMode, optional): Choose packet usage strategy. Defaults to Never.
             same_origin_eps (float, optional): Epsilon for same-origin test. Default 1e-6.
+            max_spread (float, optional): Max spread allowed for a batch (cone angle, in degrees). Default 1.0.
             warn_on_incoherent (bool, optional): Warn when rays differ in origin. Default True.
 
         Returns:

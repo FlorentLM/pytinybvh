@@ -14,6 +14,7 @@
 #include <memory> // for std::unique_ptr
 #include <string>
 #include <cmath>
+#include <cfloat>
 
 #include "capabilities.h"
 
@@ -304,6 +305,81 @@ bool sphere_isoccluded_callback(const tinybvh::Ray& ray, const unsigned int prim
 
     return intersect_sphere_primitive(ray, center, radius_sq).has_value();
 }
+
+
+// Packet gating helpers (TU-local), for batch intersect and batch occlusion tests
+
+namespace {
+
+// Check all origins are the same within eps
+inline bool same_origin_ok(const float* origins, size_t o_row, size_t o_col,
+                           py::ssize_t n, float eps)
+{
+    if (n <= 1) return true;
+    const float ox0 = origins[0 * o_col];
+    const float oy0 = origins[1 * o_col];
+    const float oz0 = origins[2 * o_col];
+    for (py::ssize_t i = 1; i < n; ++i) {
+        const size_t base = static_cast<size_t>(i) * o_row;
+        const float dx = std::fabs(origins[base + 0 * o_col] - ox0);
+        const float dy = std::fabs(origins[base + 1 * o_col] - oy0);
+        const float dz = std::fabs(origins[base + 2 * o_col] - oz0);
+        if (dx > eps || dy > eps || dz > eps) return false;
+    }
+    return true;
+}
+
+// Per-block cone/tmax tests
+struct PacketGate {
+    const float* dirs;        // (N,3)
+    size_t       d_row, d_col;
+    const float* tmax;        // nullable
+    float        cos_thresh;  // cos(max_cone_deg)
+    float        tmax_ratio;  // allowed tmax band
+
+    [[nodiscard]] inline bool cone_ok(py::ssize_t start, int count) const {
+        float mx = 0.f, my = 0.f, mz = 0.f;
+        for (int j = 0; j < count; ++j) {
+            const size_t base = static_cast<size_t>(start + j) * d_row;
+            mx += dirs[base + 0 * d_col];
+            my += dirs[base + 1 * d_col];
+            mz += dirs[base + 2 * d_col];
+        }
+        const float len = std::sqrt(mx*mx + my*my + mz*mz);
+        if (len < 1e-20f) return false;
+        const float ux = mx / len, uy = my / len, uz = mz / len;
+
+        float min_dot = 1.0f;
+        for (int j = 0; j < count; ++j) {
+            const size_t base = static_cast<size_t>(start + j) * d_row;
+            const float dx = dirs[base + 0 * d_col];
+            const float dy = dirs[base + 1 * d_col];
+            const float dz = dirs[base + 2 * d_col];
+            const float dot = dx*ux + dy*uy + dz*uz;
+            if (dot < min_dot) {
+                min_dot = dot;
+                if (min_dot < cos_thresh) return false; // early out
+            }
+        }
+        return true;
+    }
+
+    static inline bool tmax_ok(py::ssize_t start, int count) {
+    // [[nodiscard]] inline bool tmax_ok(py::ssize_t start, int count) {
+        // if (!tmax) return true;
+        // float tmin = FLT_MAX, tmaxv = 0.f;
+        // for (int j = 0; j < count; ++j) {
+        //     const float t = tmax[start + j];
+        //     if (t < tmin) tmin = t;
+        //     if (t > tmaxv) tmaxv = t;
+        // }
+        // tmin = std::max(1e-6f, tmin);
+        // return (tmaxv <= tmin * tmax_ratio);
+        return true;
+    }
+};
+
+} // anonymous namespace
 
 
 // -------------------------------- internal structs ---------------------------------
@@ -860,6 +936,7 @@ struct PyBVH {
             ray.hit.auxData = &context;
         }
 
+        // Determine TLAS vs BLAS (only standard BVH exposes isTLAS())
         bool is_tlas = false;
         dispatch_bvh_call(active_bvh_, [&](auto& bvh) {
             bvh.Intersect(ray);
@@ -889,6 +966,8 @@ struct PyBVH {
         const py::object& t_max_obj, const py::object& masks_obj,
         PacketMode packet = PacketMode::Never,
         float same_origin_eps = 1e-6f,
+        float max_cone_deg = 1.0f,
+        // float tmax_band_ratio = 8.0f,
         bool warn_on_incoherent = true) const
     {
         // Guards
@@ -976,42 +1055,33 @@ struct PyBVH {
         const auto* origins_ptr = origins_np.data();
         const auto* directions_ptr = directions_np.data();
 
-        // Decide if packets are eligible
+        // Decide base eligibility for packets
         const bool layout_is_std_bvh = (active_bvh_->layout == tinybvh::BVHBase::LAYOUT_BVH);
         bool want_packets = (packet != PacketMode::Never)
-                 && layout_is_std_bvh   // non-standard layouts don't expose Intersect256Rays*
-                 && (custom_type == CustomType::None)
-                 && !is_tlas()          // tinybvh's Packet kernels assume BLAS traversal
-                 && (n_rays >= 256);
-        // TODO: maybe we should also enforce frustum-like rays (per tinybvh: "assumes a specific layout of the rays. Provided as ‘proof of concept’, should not be used in production code"), but that's a bit heavy to check here...
+                         && layout_is_std_bvh
+                         && (custom_type == CustomType::None)
+                         && !is_tlas()
+                         && (n_rays >= 256);
 
-        // Coherence check (same origin)
-        if (want_packets && n_rays > 0) {
-            bool same_origin = true;
-            const float ox0 = origins_ptr[0 * o_col], oy0 = origins_ptr[1 * o_col], oz0 = origins_ptr[2 * o_col];
-            for (py::ssize_t i = 1; i < n_rays; ++i) {
-                const size_t iSo = static_cast<size_t>(i) * o_row;
-                const float dx = std::fabs(origins_ptr[iSo + 0 * o_col] - ox0);
-                const float dy = std::fabs(origins_ptr[iSo + 1 * o_col] - oy0);
-                const float dz = std::fabs(origins_ptr[iSo + 2 * o_col] - oz0);
-                if (dx > same_origin_eps || dy > same_origin_eps || dz > same_origin_eps) {
-                    same_origin = false; break;
-                }
+        // Shared-origin gate
+        if (want_packets && !same_origin_ok(origins_ptr, o_row, o_col, n_rays, same_origin_eps)) {
+            if (warn_on_incoherent && packet != PacketMode::Never) {
+                py::module::import("warnings").attr("warn")(
+                    packet == PacketMode::Force ?
+                    "pytinybvh: forcing packet traversal, but ray origins differ. "
+                    "Packet kernels assume a shared origin and coherent directions; results may be inaccurate."
+                    :
+                    "pytinybvh: ray origins differ, falling back to scalar traversal. "
+                    "Packet traversal also requires coherent directions."
+                );
             }
-            if (!same_origin) {
-                if (warn_on_incoherent && packet != PacketMode::Never) {
-                    py::module::import("warnings").attr("warn")(
-                        packet == PacketMode::Force ?
-                        "pytinybvh: forcing packet traversal, but ray origins differ. "
-                        "Packet kernels assume a shared origin and coherent directions; results may be inaccurate." :
-
-                        "pytinybvh: ray origins differ; falling back to scalar traversal. "
-                        "Packet traversal also requires coherent directions."
-                    );
-                }
-                if (packet == PacketMode::Auto) want_packets = false; // auto falls back
-            }
+            if (packet == PacketMode::Auto) want_packets = false;
         }
+
+        // Per-block gate: rays cone size + tmax band
+        const float tmax_band_ratio = 8.0f; // unused for now anyway
+        const float cos_thresh = std::cos(max_cone_deg * static_cast<float>(M_PI) / 180.0f);
+        PacketGate gate{ directions_ptr, d_row, d_col, t_max_ptr, cos_thresh, tmax_band_ratio };
 
         // 64B-aligned ray storage for packet kernels
         // Note: using this buffer even for scalar, cost is negligible
@@ -1056,7 +1126,7 @@ struct PyBVH {
                         #endif
                         for (py::ssize_t i = 0; i < n_rays; i += 256) {
                             const py::ssize_t end = std::min(i + 256, n_rays);
-                            if (end - i == 256) {
+                            if (end - i == 256 && want_packets && gate.cone_ok(i, 256) && gate.tmax_ok(i, 256)) {
                             #if defined(BVH_USEAVX) && defined(BVH_USESSE)
                                 bvh.Intersect256RaysSSE(&rays.get()[i]);  // uses aligned SIMD loads and same-origin assumption
                             #else
@@ -1160,6 +1230,8 @@ struct PyBVH {
         const py::object& t_max_obj, const py::object& masks_obj,
         PacketMode packet = PacketMode::Never,
         float same_origin_eps = 1e-6f,
+        float max_cone_deg = 1.0f,
+        // float tmax_band_ratio = 8.0f,
         bool warn_on_incoherent = true) const
     {
         // Guards
@@ -1187,8 +1259,6 @@ struct PyBVH {
 
         const auto d_row = static_cast<size_t>(directions_np.strides(0)) / sizeof(float);
         const auto d_col = static_cast<size_t>(directions_np.strides(1)) / sizeof(float); // should be 1 for (N, 3) C-contiguous
-
-        // TODO: Maybe (N, 4) is needed for some layouts?
 
         py::array_t<bool> result(n_rays);
         if (n_rays == 0)
@@ -1236,42 +1306,33 @@ struct PyBVH {
         const auto* origins_ptr = origins_np.data();
         const auto* directions_ptr = directions_np.data();
 
-        // Decide if packets are eligible
+        // Decide base eligibility for packets
         const bool layout_is_std_bvh = (active_bvh_->layout == tinybvh::BVHBase::LAYOUT_BVH);
         bool want_packets = (packet != PacketMode::Never)
-              && layout_is_std_bvh   // non-standard layouts don't expose Intersect256Rays*
-              && (custom_type == CustomType::None)
-              && !is_tlas()          // tinybvh's Packet kernels assume BLAS traversal
-              && (n_rays >= 256);
-        // TODO: maybe we should also enforce frustum-like rays (per tinybvh: "assumes a specific layout of the rays. Provided as ‘proof of concept’, should not be used in production code"), but that's a bit heavy to check here...
+                         && layout_is_std_bvh
+                         && (custom_type == CustomType::None)
+                         && !is_tlas()
+                         && (n_rays >= 256);
 
-        // Same-origin check
-        if (want_packets) {
-            bool same_origin = true;
-            const float ox0 = origins_ptr[0 * o_col], oy0 = origins_ptr[1 * o_col], oz0 = origins_ptr[2 * o_col];
-            for (py::ssize_t i = 1; i < n_rays; ++i) {
-                const size_t iSo = static_cast<size_t>(i) * o_row;
-                const float dx = std::fabs(origins_ptr[iSo + 0 * o_col] - ox0);
-                const float dy = std::fabs(origins_ptr[iSo + 1 * o_col] - oy0);
-                const float dz = std::fabs(origins_ptr[iSo + 2 * o_col] - oz0);
-                if (dx > same_origin_eps || dy > same_origin_eps || dz > same_origin_eps) {
-                    same_origin = false; break;
-                }
+        // Shared-origin gate
+        if (want_packets && !same_origin_ok(origins_ptr, o_row, o_col, n_rays, same_origin_eps)) {
+            if (warn_on_incoherent && packet != PacketMode::Never) {
+                py::module::import("warnings").attr("warn")(
+                    packet == PacketMode::Force ?
+                    "pytinybvh: forcing packet traversal, but ray origins differ. "
+                    "Packet kernels assume a shared origin and coherent directions; results may be inaccurate."
+                    :
+                    "pytinybvh: ray origins differ, falling back to scalar traversal. "
+                    "Packet traversal also requires coherent directions."
+                );
             }
-            if (!same_origin) {
-                if (warn_on_incoherent && packet != PacketMode::Never) {
-                    py::module::import("warnings").attr("warn")(
-                        packet == PacketMode::Force ?
-                        "pytinybvh: forcing packet traversal, but ray origins differ. "
-                        "Packet kernels assume a shared origin and coherent directions; results may be inaccurate." :
-
-                        "pytinybvh: ray origins differ; falling back to scalar traversal. "
-                        "Packet traversal also requires coherent directions."
-                    );
-                }
-                if (packet == PacketMode::Auto) want_packets = false;
-            }
+            if (packet == PacketMode::Auto) want_packets = false;
         }
+
+        // Per-block gate: rays cone size + tmax band
+        const float tmax_band_ratio = 8.0f; // unused for now anyway
+        const float cos_thresh = std::cos(max_cone_deg * static_cast<float>(M_PI) / 180.0f);
+        PacketGate gate{ directions_ptr, d_row, d_col, t_max_ptr, cos_thresh, tmax_band_ratio };
 
         // Aligned Ray storage
         std::unique_ptr<tinybvh::Ray, void(*)(tinybvh::Ray*)> rays(
@@ -1282,7 +1343,6 @@ struct PyBVH {
 
         // Output buffer (0/1), written inside traversal
         std::vector<uint8_t> occluded(static_cast<size_t>(n_rays), 0);
-
         {
             py::gil_scoped_release release;     // release GIL for traversal
 
@@ -1306,15 +1366,15 @@ struct PyBVH {
             dispatch_bvh_call(active_bvh_, [&](auto& bvh) {
                 using BVHType = std::decay_t<decltype(bvh)>;
 
-                if constexpr (std::is_same_v<BVHType, tinybvh::BVH>) {
+                if constexpr (std::is_same_v<BVHType, tinybvh::BVH>) {  // TODO: Are any other layouts compatible??
                     if (want_packets) {
                         #ifdef _OPENMP
                         #pragma omp parallel for schedule(dynamic)
                         #endif
                         for (py::ssize_t i = 0; i < n_rays; i += 256) {
                             const py::ssize_t end = std::min(i + 256, n_rays);
-                            if (end - i == 256) {
-                                // Run 256-ray intersection kernel
+                            if (end - i == 256 && want_packets && gate.cone_ok(i, 256) && gate.tmax_ok(i, 256)) {
+                                // Packet path
                                 #if defined(BVH_USEAVX) && defined(BVH_USESSE)
                                 bvh.Intersect256RaysSSE(&rays.get()[i]);
                                 #else
@@ -1326,7 +1386,7 @@ struct PyBVH {
                                     if (rays.get()[j].hit.t < t_init) occluded[static_cast<size_t>(j)] = 1;
                                 }
                             } else {
-                                // remaining rays: scalar occlusion
+                                // Fallback: scalar occlusion for this chunk
                                 for (py::ssize_t j = i; j < end; ++j) {
                                     if (bvh.IsOccluded(rays.get()[j])) occluded[static_cast<size_t>(j)] = 1;
                                 }
@@ -1681,7 +1741,7 @@ struct PyBVH {
                 }
             }
             // GPU layouts
-            else if constexpr (std::is_same_v<BvhType, tinybvh::BVH_GPU>) {
+            else if constexpr (std::is_same_v<BvhType, tinybvh::BVH_GPU>) { // NOLINT(*-branch-clone) Reason: being explicit is better here
                 if (bvh.bvhNode) {
                     // Each node is 64 bytes (16 floats)
                     buffers["nodes"] = py::array_t<float>(
@@ -2232,6 +2292,7 @@ PYBIND11_MODULE(pytinybvh, m) {
                                                      If not provided, rays default to mask 0xFFFF (intersect all instances).
                     packet (PacketMode, optional): Choose packet usage strategy. Defaults to Never.
                     same_origin_eps (float, optional): Epsilon for same-origin test. Default 1e-6.
+                    max_spread (float, optional): Max spread allowed for a batch (cone angle, in degrees). Default 1.0.
                     warn_on_incoherent (bool, optional): Warn when rays differ in origin. Default True.
 
                 Returns:
@@ -2245,6 +2306,7 @@ PYBIND11_MODULE(pytinybvh, m) {
             py::arg("t_max") = py::none(), py::arg("masks") = py::none(),
             py::arg("packet") = PacketMode::Never,
             py::arg("same_origin_eps") = 1e-6f,
+            py::arg("max_spread") = 1.0f,
             py::arg("warn_on_incoherent") = true)
 
         .def("is_occluded", &PyBVH::is_occluded,
@@ -2279,6 +2341,7 @@ PYBIND11_MODULE(pytinybvh, m) {
                                                      If not provided, rays default to mask 0xFFFF (intersect all instances).
                     packet (PacketMode, optional): Choose packet usage strategy. Defaults to Never.
                     same_origin_eps (float, optional): Epsilon for same-origin test. Default 1e-6.
+                    max_spread (float, optional): Max spread allowed for a batch (cone angle, in degrees). Default 1.0.
                     warn_on_incoherent (bool, optional): Warn when rays differ in origin. Default True.
 
                 Returns:
@@ -2288,6 +2351,7 @@ PYBIND11_MODULE(pytinybvh, m) {
             py::arg("t_max") = py::none(), py::arg("masks") = py::none(),
             py::arg("packet") = PacketMode::Never,
             py::arg("same_origin_eps") = 1e-6f,
+            py::arg("max_spread") = 1.0f,
             py::arg("warn_on_incoherent") = true)
 
         .def("intersect_sphere", &PyBVH::intersect_sphere,

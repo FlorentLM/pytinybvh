@@ -47,19 +47,38 @@ enum class Layout : uint32_t {
     MBVH8           = 101, // custom value, tinybvh does not expose this
 };
 
+// Helpers to convert layout enum to string
+
+// For tinybvh layout
+static inline const char* layout_to_string(tinybvh::BVHBase::BVHType L) {
+    switch (L) {
+        case tinybvh::BVHBase::LAYOUT_BVH:        return "Standard";
+        case tinybvh::BVHBase::LAYOUT_BVH_SOA:    return "SoA";
+        case tinybvh::BVHBase::LAYOUT_BVH_GPU:    return "BVH (GPU)";
+        case tinybvh::BVHBase::LAYOUT_MBVH:       return "MBVH4";
+        case tinybvh::BVHBase::LAYOUT_MBVH8:      return "MBVH8";
+        case tinybvh::BVHBase::LAYOUT_BVH4_CPU:   return "BVH4 (CPU)";
+        case tinybvh::BVHBase::LAYOUT_BVH4_GPU:   return "BVH4 (GPU)";
+        case tinybvh::BVHBase::LAYOUT_CWBVH:      return "BVH8 (CWBVH)";
+        case tinybvh::BVHBase::LAYOUT_BVH8_AVX2:  return "BVH8 (CPU)";
+        default:                                  return "Unknown";
+    }
+}
+
+// For our layout
 static inline const char* layout_to_string(Layout L) {
     switch (L) {
-        case Layout::Standard: return "Standard";
-        case Layout::SoA: return "SoA";
-        case Layout::BVH_GPU: return "BVH (GPU)";
-        case Layout::MBVH4: return "MBVH4";
-        case Layout::MBVH8: return "MBVH8";
-        case Layout::BVH4_CPU: return "BVH4 (CPU)";
-        case Layout::BVH4_GPU: return "BVH4 (GPU)";
-        case Layout::CWBVH: return "BVH8 (CWBVH)";
-        case Layout::BVH8_CPU: return "BVH8 (CPU)";
+        case Layout::Standard:                      return "Standard";
+        case Layout::SoA:                           return "SoA";
+        case Layout::BVH_GPU:                       return "BVH (GPU)";
+        case Layout::MBVH4:                         return "MBVH4";
+        case Layout::MBVH8:                         return "MBVH8";
+        case Layout::BVH4_CPU:                      return "BVH4 (CPU)";
+        case Layout::BVH4_GPU:                      return "BVH4 (GPU)";
+        case Layout::CWBVH:                         return "BVH8 (CWBVH)";
+        case Layout::BVH8_CPU:                      return "BVH8 (CPU)";
+        default:                                    return "Unknown";
     }
-    return "Unknown";
 }
 
 static inline bool supports_layout(Layout L, bool for_traversal) {
@@ -96,13 +115,32 @@ static inline std::string explain_requirement(Layout L) {
 
 // -------------------------------- some other internal helpers and things ---------------------------------
 
-// Helper function to convert layout enum to string
-std::string layout_to_string(tinybvh::BVHBase::BVHType layout) {
-    switch (layout) {
-    case tinybvh::BVHBase::LAYOUT_BVH: return "Standard";
-    case tinybvh::BVHBase::LAYOUT_BVH_SOA: return "SoA";
-    default: return "Unknown";
-    }
+// Small default context for building a BVH
+static inline tinybvh::BVHContext default_ctx() {
+    tinybvh::BVHContext ctx{};
+    ctx.malloc = tinybvh::malloc64;
+    ctx.free   = tinybvh::free64;
+    ctx.userdata = nullptr;
+    return ctx;
+}
+
+// BVH4_CPU and BVH8_CPU need a matching allocator/free pair
+// Reason: BVH4_CPU and BVH8_CPU allocate with `malloc4k` when tinybvh is compiled with `BVH8_ALIGN_4K` (the default)
+// and the destructor uses context.free so if we used the default context, it would use free64 and cause heap mismatch
+static inline tinybvh::BVHContext cpu_wide_ctx() {
+    tinybvh::BVHContext ctx{};
+#if defined(BVH8_ALIGN_32K)
+    ctx.malloc = tinybvh::malloc32k;
+    ctx.free   = tinybvh::free32k;
+#elif defined(BVH8_ALIGN_4K)
+    ctx.malloc = tinybvh::malloc4k;
+    ctx.free   = tinybvh::free4k;
+#else
+    ctx.malloc = tinybvh::malloc64;
+    ctx.free   = tinybvh::free64;
+#endif
+    ctx.userdata = nullptr;
+    return ctx;
 }
 
 // Helper to extract 3 floats from a Python object (list, tuple, numpy array)
@@ -488,6 +526,24 @@ struct PyBVH {
     // Constructor
     PyBVH() = default;
 
+private:
+    void ensure_mbvh4(bool compact) {
+        if (!mbvh4_) mbvh4_ = std::make_unique<tinybvh::MBVH<4>>();
+        // Make sure the allocator is valid and current
+        if (!mbvh4_->context.malloc) mbvh4_->context = default_ctx();
+        mbvh4_->context = base_->context;
+        mbvh4_->ConvertFrom(*base_, compact);   // always refresh
+    }
+
+    void ensure_mbvh8(bool compact) {
+        if (!mbvh8_) mbvh8_ = std::make_unique<tinybvh::MBVH<8>>();
+        if (!mbvh8_->context.malloc) mbvh8_->context = default_ctx();
+        mbvh8_->context = base_->context;
+        mbvh8_->ConvertFrom(*base_, compact);   // always refresh
+    }
+
+public:
+
     // Cache policy management
 
     void set_cache_policy(CachePolicy p) { cache_policy_ = p; }
@@ -503,16 +559,26 @@ struct PyBVH {
             (active_layout_ == Layout::CWBVH)  ||
             (active_layout_ == Layout::BVH8_CPU);
 
+        if (active_layout_ != Layout::BVH4_CPU) {
+            // have to make make sure the wide CPU layouts use the wide context so their destructor frees with the right function
+            if (bvh4_cpu_) bvh4_cpu_->context = cpu_wide_ctx();
+            bvh4_cpu_.reset();
+        }
+
+        if (active_layout_ != Layout::BVH8_CPU) {
+            // have to make sure the wide CPU layouts use the wide context so their destructor frees with the right function
+            if (bvh8_cpu_) bvh8_cpu_->context = cpu_wide_ctx();
+            bvh8_cpu_.reset();
+        }
+
         if (active_layout_ != Layout::SoA)      soa_.reset();
 
         // Only drop MBVH if nothing currently depends on it
         if (!needs_m4)                           mbvh4_.reset();
         if (!needs_m8)                           mbvh8_.reset();
 
-        if (active_layout_ != Layout::BVH4_CPU)  bvh4_cpu_.reset();
         if (active_layout_ != Layout::BVH4_GPU)  bvh4_gpu_.reset();
         if (active_layout_ != Layout::CWBVH)     cwbvh_.reset();
-        if (active_layout_ != Layout::BVH8_CPU)  bvh8_cpu_.reset();
         if (active_layout_ != Layout::BVH_GPU)   bvh_gpu_.reset();
     }
 
@@ -522,6 +588,17 @@ struct PyBVH {
         if (!base_) {
             throw std::runtime_error("Cannot convert an uninitialized BVH.");
         }
+
+        auto has_alloc = [](const tinybvh::BVHBase& b){ return b.context.malloc && b.context.free; };
+        if (!has_alloc(*base_)) {
+            throw std::runtime_error("BVH context has no aligned allocator. Initialize context before conversion.");
+        }
+
+        if (active_layout_ == target && active_bvh_) {
+            // already in desired layout, nothing to do
+            return;
+        }
+
         // Always allows conversion. Enforces traversal availability only if `strict` is True
         if (strict && !supports_layout(target, /*for_traversal=*/true)) {
             throw std::runtime_error(
@@ -529,98 +606,85 @@ struct PyBVH {
                 explain_requirement(target));
         }
         switch (target) {
-            case Layout::Standard:
+            case Layout::Standard: {
                 active_bvh_ = base_.get();
+                active_bvh_->context = default_ctx();
                 active_layout_ = Layout::Standard;
                 break;
-
-            case Layout::SoA:
+            }
+            case Layout::SoA: {
                 if (!soa_) soa_ = std::make_unique<tinybvh::BVH_SoA>();
                 soa_->context = base_->context;
                 soa_->ConvertFrom(*base_, compact);
                 active_bvh_ = soa_.get();
                 active_layout_ = Layout::SoA;
                 break;
-
-            case Layout::BVH_GPU:
+            }
+            case Layout::BVH_GPU: {
                 if (!bvh_gpu_) bvh_gpu_ = std::make_unique<tinybvh::BVH_GPU>();
                 bvh_gpu_->context = base_->context;
                 bvh_gpu_->ConvertFrom(*base_, compact);
                 active_bvh_ = bvh_gpu_.get();
                 active_layout_ = Layout::BVH_GPU;
                 break;
-
-            case Layout::MBVH4:
-                if (!mbvh4_) {
-                    mbvh4_ = std::make_unique<tinybvh::MBVH<4>>();
-                    mbvh4_->context = base_->context;
-                    mbvh4_->ConvertFrom(*base_, compact);
-                }
+            }
+            case Layout::MBVH4: {
+                ensure_mbvh4(compact);
                 active_bvh_ = mbvh4_.get();
                 active_layout_ = Layout::MBVH4;
                 break;
-
-            case Layout::MBVH8:
-                if (!mbvh8_) {
-                    mbvh8_ = std::make_unique<tinybvh::MBVH<8>>();
-                    mbvh8_->context = base_->context;
-                    mbvh8_->ConvertFrom(*base_, compact);
-                }
+            }
+            case Layout::MBVH8: {
+                ensure_mbvh8(compact);
                 active_bvh_ = mbvh8_.get();
                 active_layout_ = Layout::MBVH8;
                 break;
+            }
+            case Layout::BVH4_CPU: {
+                if (!mbvh4_) mbvh4_ = std::make_unique<tinybvh::MBVH<4>>();
+                mbvh4_->context = base_->context;
+                mbvh4_->ConvertFrom(*base_, compact);
 
-            case Layout::BVH4_CPU:
-                if (!mbvh4_) { // lazily create and cache the intermediate MBVH4
-                    mbvh4_ = std::make_unique<tinybvh::MBVH<4>>();
-                    mbvh4_->context = base_->context;
-                    mbvh4_->ConvertFrom(*base_, compact);
-                }
                 if (!bvh4_cpu_) bvh4_cpu_ = std::make_unique<tinybvh::BVH4_CPU>();
-                bvh4_cpu_->context = base_->context;
+                bvh4_cpu_->context = cpu_wide_ctx();    // TODO: Why doesn't that solve the crash????
                 bvh4_cpu_->ConvertFrom(*mbvh4_);
+                bvh4_cpu_->context = cpu_wide_ctx();
                 active_bvh_ = bvh4_cpu_.get();
                 active_layout_ = Layout::BVH4_CPU;
                 break;
-
-            case Layout::BVH4_GPU:
-                if (!mbvh4_) { // lazily create and cache the intermediate MBVH4
-                    mbvh4_ = std::make_unique<tinybvh::MBVH<4>>();
-                    mbvh4_->context = base_->context;
-                    mbvh4_->ConvertFrom(*base_, compact);
-                }
+            }
+            case Layout::BVH4_GPU: {
+                ensure_mbvh4(compact);
                 if (!bvh4_gpu_) bvh4_gpu_ = std::make_unique<tinybvh::BVH4_GPU>();
                 bvh4_gpu_->context = base_->context;
                 bvh4_gpu_->ConvertFrom(*mbvh4_, compact);
                 active_bvh_ = bvh4_gpu_.get();
                 active_layout_ = Layout::BVH4_GPU;
                 break;
-
-            case Layout::CWBVH:
-                if (!mbvh8_) { // lazily create and cache the intermediate MBVH8
-                    mbvh8_ = std::make_unique<tinybvh::MBVH<8>>();
-                    mbvh8_->context = base_->context;
-                    mbvh8_->ConvertFrom(*base_, compact);
-                }
+            }
+            case Layout::CWBVH: {
+                ensure_mbvh8(compact);
                 if (!cwbvh_) cwbvh_ = std::make_unique<tinybvh::BVH8_CWBVH>();
                 cwbvh_->context = base_->context;
                 cwbvh_->ConvertFrom(*mbvh8_, compact);
                 active_bvh_ = cwbvh_.get();
                 active_layout_ = Layout::CWBVH;
                 break;
+            }
+            case Layout::BVH8_CPU: {
+                if (!mbvh8_) mbvh8_ = std::make_unique<tinybvh::MBVH<8>>();
+                mbvh8_->context = base_->context;
+                mbvh8_->ConvertFrom(*base_, compact);
 
-            case Layout::BVH8_CPU:
-                if (!mbvh8_) { // lazily create and cache the intermediate MBVH8
-                    mbvh8_ = std::make_unique<tinybvh::MBVH<8>>();
-                    mbvh8_->context = base_->context;
-                    mbvh8_->ConvertFrom(*base_, compact);
-                }
                 if (!bvh8_cpu_) bvh8_cpu_ = std::make_unique<tinybvh::BVH8_CPU>();
-                bvh8_cpu_->context = base_->context;
+                bvh8_cpu_->context = cpu_wide_ctx();
                 bvh8_cpu_->ConvertFrom(*mbvh8_);
+                bvh8_cpu_->context = cpu_wide_ctx();
                 active_bvh_ = bvh8_cpu_.get();
                 active_layout_ = Layout::BVH8_CPU;
                 break;
+            }
+
         }
         if (cache_policy_ == CachePolicy::ActiveOnly) {
             clear_cached_layouts();
@@ -629,6 +693,7 @@ struct PyBVH {
 
     // Helper for builders to finalize the wrapper
     static void finalize_build(const std::unique_ptr<PyBVH>& wrapper, std::unique_ptr<tinybvh::BVH> bvh) {
+        bvh->context = default_ctx();
         wrapper->base_ = std::move(bvh);
         wrapper->active_bvh_ = wrapper->base_.get();
         wrapper->active_layout_ = Layout::Standard;
@@ -660,6 +725,7 @@ struct PyBVH {
         auto vertices_ptr = static_cast<const tinybvh::bvhvec4*>(vertices_buf.ptr);
         const auto prim_count = static_cast<uint32_t>(vertices_buf.shape[0] / 3);
 
+        bvh->context = default_ctx();
         switch (quality) {
             case BuildQuality::Quick:
                 bvh->BuildQuick(vertices_ptr, prim_count);
@@ -711,6 +777,7 @@ struct PyBVH {
         auto indices_ptr = static_cast<const uint32_t*>(indices_buf.ptr);
         const auto prim_count = static_cast<uint32_t>(indices_buf.shape[0]);
 
+        bvh->context = default_ctx();
         switch (quality) {
             case BuildQuality::Quick:
                 // tinybvh doesn't have an indexed BuildQuick so fall back to Balanced
@@ -780,6 +847,9 @@ struct PyBVH {
 
         // Build is now safe
 
+        // Also needs the context
+        bvh->context = default_ctx();
+
         // BuildQuick and BuildHQ don't support custom AABB getters, so default to Balanced quality
         bvh->Build(aabb_build_callback, prim_count);
 
@@ -837,6 +907,8 @@ struct PyBVH {
 
         py::buffer_info vertices_buf = vertices_np.request();
         auto vertices_ptr = static_cast<const tinybvh::bvhvec4*>(vertices_buf.ptr);
+
+        bvh->context = default_ctx();
         switch (quality) {
             case BuildQuality::Quick:
                 bvh->BuildQuick(vertices_ptr, static_cast<uint32_t>(num_tris));
@@ -901,6 +973,7 @@ struct PyBVH {
         // Even though this is for spheres, the build process uses AABBs
         TlocalPointerGuard build_guard(&g_build_aabbs_ptr, aabbs_ptr);
 
+        bvh->context = default_ctx();
         bvh->Build(aabb_build_callback, static_cast<uint32_t>(num_points));
 
        finalize_build(wrapper, std::move(bvh));  // transfer ownership
@@ -1002,7 +1075,7 @@ struct PyBVH {
         const auto d_col = static_cast<size_t>(directions_np.strides(1)) / sizeof(float); // should be 1 for (N, 3) C-contiguous
 
         if (n_rays == 0)
-            return {py::dtype(py::format_descriptor<HitRecord>::format()), 0};
+            return {py::dtype::of<HitRecord>(), 0};
 
         // Optional inputs
         const float* t_max_ptr = nullptr;
@@ -1041,7 +1114,7 @@ struct PyBVH {
 
         // Early out: empty BVH
         if (!active_bvh_ || active_bvh_->triCount == 0) {
-            return {py::dtype(py::format_descriptor<HitRecord>::format()), n_rays};
+            return {py::dtype::of<HitRecord>(), n_rays};
         }
 
         const auto* origins_ptr    = origins_np.data();
@@ -1077,8 +1150,8 @@ struct PyBVH {
         // 64B-aligned ray storage for packet kernels
         // Note: using this buffer even for scalar, cost is negligible
         std::unique_ptr<tinybvh::Ray, void(*)(tinybvh::Ray*)> rays(
-            static_cast<tinybvh::Ray*>(_aligned_malloc(static_cast<size_t>(n_rays) * sizeof(tinybvh::Ray), 64)),
-            [](tinybvh::Ray* p){ if (p) _aligned_free(p); }
+            static_cast<tinybvh::Ray*>(tinybvh::malloc64(static_cast<size_t>(n_rays) * sizeof(tinybvh::Ray), nullptr)),
+            [](tinybvh::Ray* p){ if (p) tinybvh::free64(p); }
         );
         if (!rays) throw std::bad_alloc();
 
@@ -1355,8 +1428,8 @@ struct PyBVH {
 
         // 64B-aligned ray storage for packet kernels
         std::unique_ptr<tinybvh::Ray, void(*)(tinybvh::Ray*)> rays(
-            static_cast<tinybvh::Ray*>(_aligned_malloc(static_cast<size_t>(n_rays) * sizeof(tinybvh::Ray), 64)),
-            [](tinybvh::Ray* p){ if (p) _aligned_free(p); }
+            static_cast<tinybvh::Ray*>(tinybvh::malloc64(static_cast<size_t>(n_rays) * sizeof(tinybvh::Ray), nullptr)),
+            [](tinybvh::Ray* p){ if (p) tinybvh::free64(p); }
         );
         if (!rays) throw std::bad_alloc();
 
@@ -1545,6 +1618,7 @@ struct PyBVH {
         // (a TLAS is always a standard-layout tinybvh::BVH)
         auto tlas_bvh = std::make_unique<tinybvh::BVH>();
 
+        tlas_bvh->context = default_ctx();
         tlas_bvh->Build(
             wrapper->instances_data.data(),
             static_cast<uint32_t>(inst_count),
@@ -1612,11 +1686,6 @@ struct PyBVH {
         // Infer quality and set references
         wrapper->quality = bvh->refittable ? BuildQuality::Balanced : BuildQuality::High;
 
-        wrapper->source_geometry_refs.append(vertices_np);
-        if (!indices_obj.is_none()) {
-             wrapper->source_geometry_refs.append(py::cast<py::array>(indices_obj));
-        }
-
         finalize_build(wrapper, std::move(bvh));  // transfer ownership
         return wrapper;
 
@@ -1637,8 +1706,6 @@ struct PyBVH {
     // Advanced manipulation methods
 
     void optimize(unsigned int iterations, bool extreme, bool stochastic) {
-
-        // TODO: Why does this produce garbage SOMETIMES ?
 
         if (!active_bvh_ || active_bvh_->layout != tinybvh::BVHBase::LAYOUT_BVH) {
             throw std::runtime_error("Optimization is only supported for the standard BVH layout.");
@@ -1920,7 +1987,13 @@ struct PyBVH {
 
         std::string repr = "<pytinybvh.BVH (";
         repr += std::to_string(active_bvh_->triCount) + " primitives, ";
-        repr += std::to_string(active_bvh_->usedNodes) + " nodes, ";
+
+        const auto L = active_bvh_->layout;
+        const bool show_nodes = (L == tinybvh::BVHBase::LAYOUT_BVH) ||
+                                (L == tinybvh::BVHBase::LAYOUT_BVH_SOA);
+        if (show_nodes) {
+            repr += std::to_string(active_bvh_->usedNodes) + " nodes, ";
+        }
 
         switch (custom_type) {
         case CustomType::AABB:   repr += "Geometry: AABBs, "; break;
@@ -1939,8 +2012,12 @@ struct PyBVH {
             }
             repr += "Type: BLAS, Quality: " + quality_str + ", ";
         }
-        repr += "Layout: " + layout_to_string(active_bvh_->layout) + ", ";
-        repr += std::string("Status: ") + (active_bvh_->may_have_holes ? "Not compact" : "Compact");
+        repr += std::string("Layout: ") + layout_to_string(L) + ", ";
+        if (active_bvh_->layout == tinybvh::BVHBase::LAYOUT_BVH) {
+            repr += std::string("Status: ") + (active_bvh_->may_have_holes ? "Not compact" : "Compact");
+        } else {
+            repr += "Status: n/a";
+        }
         repr += ")>";
         return repr;
     }

@@ -33,8 +33,7 @@ constexpr float INV_TWO_PI = 1.0f / TWO_PI;
 // --------------------------- handy things to represent the library's capabilities ---------------------------
 
 // Packet kernels require 64B aligned rays and an array stride a multiple of 64
-constexpr bool TBVH_PACKET_SAFE =
-    (alignof(tinybvh::Ray) >= 64) && ((sizeof(tinybvh::Ray) % 64) == 0);
+constexpr bool TBVH_PACKET_SAFE = (alignof(tinybvh::Ray) >= 64) && ((sizeof(tinybvh::Ray) % 64) == 0);
 
 // Single compile-time instance of the CPU info struct to use in helpers
 constexpr CompileTimeCapabilities compiletime_caps;
@@ -187,11 +186,10 @@ nb::dict get_hardware_info() {
     return result;
 }
 
-
 // Helper to fail fast if the binary was built with an ISA the current CPU/OS can't run
 static inline void isa_compat_check() {
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
-    RuntimeCapabilities rt = get_runtime_caps();
+    const RuntimeCapabilities rt = get_runtime_caps();
     if (compiletime_caps.AVX2 && !rt.avx2)
         throw std::runtime_error("pytinybvh was built with AVX2, but this CPU/OS doesn't support AVX2. Reinstall from source on this machine (no cached wheel), or set PYTINYBVH_NO_SIMD=1 for a baseline build.");
     if (compiletime_caps.AVX && !rt.avx)
@@ -344,24 +342,62 @@ static inline tinybvh::BVHContext cpu_wide_ctx() {
     return ctx;
 }
 
-// Helper to extract 3 floats from a Python object (list, tuple, numpy array)
-tinybvh::bvhvec3 py_obj_to_vec3(const nb::object& obj) {
-    if (nb::isinstance<nb::list>(obj) || nb::isinstance<nb::tuple>(obj)) {
-        auto seq = nb::cast<nb::sequence>(obj);
-        if (nb::len(seq) != 3) {
-            throw std::runtime_error("Input sequence must have 3 elements for a 3D vector.");
+// type caster to accept tinybvh::bvhvec3 objects
+template <> struct nanobind::detail::type_caster<tinybvh::bvhvec3> {
+    NB_TYPE_CASTER(tinybvh::bvhvec3, const_name("bvhvec3"));
+
+    // Python -> C++
+    bool from_python(nb::handle src, uint8_t /*flags*/, cleanup_list* /*cleanup*/) noexcept {
+        nb::object obj = nb::borrow(src);
+
+        // Fast path: (3, ) float32 contiguous
+        nb::ndarray<const float,  nb::shape<3>, nb::c_contig> a32;
+        if (nb::try_cast(obj, a32)) {
+            value = { a32(0), a32(1), a32(2) };
+            return true;
         }
-        return { nb::cast<float>(seq[0]), nb::cast<float>(seq[1]), nb::cast<float>(seq[2]) };
-    }
-    if (nb::isinstance<nb::ndarray<>>(obj)) {
-        auto arr = nb::cast<nb::ndarray<float, nb::shape<-1>, nb::any_contig>>(obj);
-        if (arr.ndim() != 1 || arr.size() != 3) {
-            throw std::runtime_error("Input numpy array must have shape (3,) for a 3D vector.");
+        // Fast path: (3, ) float64 contiguous
+        nb::ndarray<const double, nb::shape<3>, nb::c_contig> a64;
+        if (nb::try_cast(obj, a64)) {
+            value = { static_cast<float>(a64(0)), static_cast<float>(a64(1)), static_cast<float>(a64(2)) };
+            return true;
         }
-        return { arr(0), arr(1), arr(2) };
+        // 1D ndarray of length 3: index via sequence
+        nb::ndarray<> any;
+        if (nb::try_cast(obj, any) && any.ndim() == 1 && any.size() == 3) {
+            nb::sequence s;
+            if (!nb::try_cast(obj, s)) return false;
+            float x, y, z;
+            if (!nb::try_cast(s[0], x) || !nb::try_cast(s[1], y) || !nb::try_cast(s[2], z))
+                return false;
+            value = { x, y, z };
+            return true;
+        }
+        // Generic 3-element sequence (list, tuple, etc)
+        nb::sequence s;
+        if (nb::try_cast(obj, s) && nb::len(s) == 3) {
+            float x, y, z;
+            if (!nb::try_cast(s[0], x) || !nb::try_cast(s[1], y) || !nb::try_cast(s[2], z))
+                return false;
+            value = { x, y, z };
+            return true;
+        }
+        return false;
     }
-    throw std::runtime_error("Input must be a list, tuple, or numpy array of 3 floats.");
-}
+
+    // C++ -> Python
+    static nb::handle from_cpp(const tinybvh::bvhvec3 &v, nb::rv_policy /*policy*/, cleanup_list* /*cleanup*/) noexcept {
+        // Allocate owned memory and wrap as ndarray -> Python via .cast()
+        auto *data = new (std::nothrow) float[3]{ v.x, v.y, v.z };
+        if (!data) return {};
+        nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<float *>(p); });
+
+        using Vec3 = nb::ndarray<float, nb::numpy, nb::shape<3>, nb::c_contig>;
+        Vec3 arr(data, { 3 }, owner);
+        return arr.cast().release();  // materialize numpy array
+    }
+}; // namespace nanobind::detail
+
 
 // This pointer is only for the duration of the BVH build process for AABBs (and points)
 static const float* g_build_aabbs_ptr = nullptr;
@@ -377,7 +413,7 @@ struct AABBptrGuard {
 // C-style callback for building from AABBs
 static void aabb_build_callback(unsigned int i, tinybvh::bvhvec3& bmin, tinybvh::bvhvec3& bmax) {
     const float* a = g_build_aabbs_ptr;
-    const size_t off = (size_t) i * 6;
+    const size_t off = static_cast<size_t>(i) * 6;
     bmin.x = a[off+0]; bmin.y = a[off+1]; bmin.z = a[off+2];
     bmax.x = a[off+3]; bmax.y = a[off+4]; bmax.z = a[off+5];
 }
@@ -667,7 +703,7 @@ struct PyBVH {
     // These references must be kept alive for the lifetime of any BVH representation
     nb::list source_geometry_refs;
     std::vector<tinybvh::BLASInstance> instances_data;
-    nb::ndarray<uint32_t, nb::shape<-1>, nb::c_contig> opacity_map_ref;  // ref to keep opacity maps
+    nb::ndarray<uint32_t, nb::c_contig> opacity_map_ref;  // ref to keep opacity maps
     std::vector<tinybvh::BVHBase*> blas_pointers; // raw pointers to BLASes for TLAS build
 
     // Metadata about the BVH that persists across conversions
@@ -859,7 +895,7 @@ public:
         const BuildQuality quality, const float traversal_cost, const float intersection_cost) {
 
         if (vertices_np.dtype() != nb::dtype<float>()) {
-            throw std::runtime_error("Input `vertices` must be a float32 numpy array.");
+            throw nb::type_error("Input `vertices` must be a float32 numpy array.");
         }
         if (vertices_np.ndim() != 2 || vertices_np.shape(0) % 3 != 0 || vertices_np.shape(1) != 4) {
             throw std::runtime_error("Input `vertices` must be a 2D numpy array with shape (N*3, 4)");
@@ -905,13 +941,13 @@ public:
         const BuildQuality quality, const float traversal_cost, const float intersection_cost) {
 
         if (vertices_np.dtype() != nb::dtype<float>()) {
-            throw std::runtime_error("Input `vertices` must be a float32 numpy array.");
+            throw nb::type_error("Input `vertices` must be a float32 numpy array.");
         }
         if (vertices_np.ndim() != 2 || vertices_np.shape(1) != 4) {
             throw std::runtime_error("Input `vertices` must be a 2D numpy array with shape (N, 4)");
         }
         if (indices_np.dtype() != nb::dtype<uint32_t>()) {
-            throw std::runtime_error("Input `indices` must be a uint32 numpy array.");
+            throw nb::type_error("Input `indices` must be a uint32 numpy array.");
         }
         if (indices_np.ndim() != 2 || indices_np.shape(1) != 3) {
             throw std::runtime_error("Input `indices` must be a 2D numpy array with shape (N, 3)");
@@ -963,7 +999,7 @@ public:
             throw std::runtime_error("Input `aabbs` must be a 3D numpy array with shape (N, 2, 3).");
         }
         if (aabbs_np.dtype() != nb::dtype<float>()) {
-            throw std::runtime_error("Input `aabbs` must be a float32 numpy array.");
+            throw nb::type_error("Input `aabbs` must be a float32 numpy array.");
         }
 
         auto wrapper = std::make_unique<PyBVH>();
@@ -992,8 +1028,8 @@ public:
 
         // Pre-compute reciprocal extents for faster intersection tests
         size_t rows = prim_count, cols = 3;
-        float* inv_extents_buf = new float[rows * cols];
-        nb::capsule inv_owner(inv_extents_buf, [](void* p) noexcept { delete[] (float*) p; });
+        auto* inv_extents_buf = new float[rows * cols];
+        nb::capsule inv_owner(inv_extents_buf, [](void* p) noexcept { delete[] static_cast<float *>(p); });
         nb::ndarray<float, nb::numpy, nb::c_contig> inv_extents_np(
             inv_extents_buf, { rows, cols }, inv_owner);
 
@@ -1026,7 +1062,7 @@ public:
     // Convenience builders
 
     static std::unique_ptr<PyBVH> from_triangles(
-        nb::ndarray<const float> tris_np,
+        const nb::ndarray<const float>& tris_np,
         const BuildQuality quality, const float traversal_cost, const float intersection_cost) {
 
         bool shape_ok = (tris_np.ndim() == 2 && tris_np.shape(1) == 9) ||
@@ -1054,8 +1090,8 @@ public:
         }
 
         size_t rows = num_tris * 3, cols = 4;
-        float *buf = new float[rows * cols];                   // allocate
-        nb::capsule owner(buf, [](void *p) noexcept { delete[] (float *) p; });
+        auto *buf = new float[rows * cols];                   // allocate
+        nb::capsule owner(buf, [](void *p) noexcept { delete[] static_cast<float *>(p); });
 
         // make a numpy-owned array
         nb::ndarray<float, nb::numpy, nb::c_contig> vertices_np(
@@ -1136,10 +1172,12 @@ public:
 
         // Still need to create AABBs for the build process
         size_t n = num_points;
-        float* aabbs_buf = new float[n * 2 * 3];
-        nb::capsule aabbs_owner(aabbs_buf, [](void* p) noexcept { delete[] (float*) p; });
+        auto* aabbs_buf = new float[n * 2 * 3];
+        nb::capsule aabbs_owner(aabbs_buf, [](void* p) noexcept { delete[] static_cast<float *>(p); });
         nb::ndarray<float, nb::numpy, nb::c_contig> aabbs_np(
-            aabbs_buf, { n, (size_t)2, (size_t)3 }, aabbs_owner);
+            /* data */aabbs_buf,
+            /* shape */ { n, static_cast<size_t>(2), static_cast<size_t>(3) },
+            /* owner */ aabbs_owner);
 
         float* aabbs_ptr = aabbs_buf;
         for (size_t i = 0; i < num_points; ++i) {
@@ -1268,7 +1306,7 @@ public:
         if (!t_max_obj.is_none()) {
             auto t_max_np = nb::cast<nb::ndarray<const float>>(t_max_obj);
 
-            if (t_max_np.ndim() != 1 || t_max_np.size() != (size_t)n_rays)
+            if (t_max_np.ndim() != 1 || t_max_np.size() != static_cast<size_t>(n_rays))
                 throw std::runtime_error("`t_max` must be a 1D numpy array of length N.");
 
             t_max_ptr = t_max_np.data();
@@ -1276,7 +1314,7 @@ public:
         if (!masks_obj.is_none()) {
             auto masks_np = nb::cast<nb::ndarray<const uint32_t>>(masks_obj);
 
-            if (masks_np.ndim() != 1 || masks_np.size() != (size_t)n_rays)
+            if (masks_np.ndim() != 1 || masks_np.size() != static_cast<size_t>(n_rays))
                 throw std::runtime_error("`masks` must be a 1D numpy array of length N.");
 
             masks_ptr = masks_np.data();
@@ -1285,28 +1323,35 @@ public:
         // Custom geometry context: keep source arrays alive across GIL release
         CustomGeometryContext context{};
         if (custom_type == CustomType::AABB) {
-            nb::ndarray<const float> aabbs_arr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]);
-            nb::ndarray<const float> inv_extents_arr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[1]);
+            auto aabbs_arr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]);
+            auto inv_extents_arr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[1]);
 
             context.aabbs_ptr = aabbs_arr.data();
             context.inv_extents_ptr = inv_extents_arr.data();
 
         } else if (custom_type == CustomType::Sphere) {
-            nb::ndarray<const float> points_arr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]);
+            auto points_arr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]);
             context.points_ptr = points_arr.data();
             context.sphere_radius = sphere_radius;
         }
 
         // Early out: empty BVH
         if (!active_bvh_ || active_bvh_->triCount == 0) {
-            std::vector<HitRecord> out(static_cast<size_t>(n_rays),
-                                   HitRecord{ (uint32_t)-1, (uint32_t)-1, INFINITY, 0.0f, 0.0f });
-
             nb::module_ np = nb::module_::import_("numpy");
             nb::object arr  = np.attr("empty")(nb::make_tuple(n_rays), "dtype"_a = g_hit_record_dtype);
             nb::object view = arr.attr("view")(np.attr("uint8"));
             auto bytes = nb::cast<nb::ndarray<uint8_t, nb::c_contig>>(view);
-            std::memcpy(bytes.data(), out.data(), out.size() * sizeof(HitRecord));
+
+            auto* dst = reinterpret_cast<HitRecord*>(bytes.data());
+            for (Py_ssize_t i = 0; i < n_rays; ++i) {
+                dst[i] = {
+                    /* prim_id */ static_cast<uint32_t>(-1),
+                    /* inst_id */static_cast<uint32_t>(-1),
+                    /* t */INFINITY,
+                    /* u */0.0f,
+                    /* v */0.0f
+                };
+            }
             return arr;
         }
 
@@ -1374,9 +1419,9 @@ public:
                         directions_ptr[iSd + 0 * d_col],
                         directions_ptr[iSd + 1 * d_col],
                         directions_ptr[iSd + 2 * d_col]),
-                    /* t */   t_init,
-                    /* mask */mask
+                    /* t */   t_init
                 );
+                r.mask = mask;
 
                 // if using custom geometry we also need the read-only context pointer
                 if (custom_type != CustomType::None) {
@@ -1402,7 +1447,7 @@ public:
                                     o_row, o_col, 256, same_origin_eps);
                                 const bool chunk_coherent = (packet == PacketMode::Force)
                                     ? true
-                                    : (gate.cone_ok(i, 256) && gate.tmax_ok(i, 256));
+                                    : (gate.cone_ok(i, 256) && PacketGate::tmax_ok(i, 256));
 
                                 if (chunk_same_origin && chunk_coherent) {
                             #if defined(BVH_USEAVX) && defined(BVH_USESSE)
@@ -1443,29 +1488,36 @@ public:
                 is_tlas = bvh.isTLAS();
         });
 
-        // Fill POD output
+        // Allocate final result (structured dtype)
+        nb::module_ np = nb::module_::import_("numpy");
+        nb::object arr  = np.attr("empty")(nb::make_tuple(n_rays), "dtype"_a = g_hit_record_dtype);
+
+        // Get byte view so we can treat it as HitRecord*
+        nb::object view = arr.attr("view")(np.attr("uint8"));
+        auto bytes = nb::cast<nb::ndarray<uint8_t, nb::c_contig>>(view);
+        auto* dst = reinterpret_cast<HitRecord*>(bytes.data());
+
+        // Convert rays to HitRecord directly into the output
+        #ifdef _OPENMP
+        #pragma omp parallel for schedule(dynamic)
+        #endif
         for (Py_ssize_t i = 0; i < n_rays; ++i) {
             const float t_init = t_max_ptr ? t_max_ptr[i] : 1e30f;
-            if (rays.get()[i].hit.t < t_init) {
-            #if INST_IDX_BITS == 32
+
+            if (rays.get()[i].hit.t <= t_init) {
+                #if INST_IDX_BITS == 32
                 const uint32_t prim = rays.get()[i].hit.prim;
                 const uint32_t inst = is_tlas ? rays.get()[i].hit.inst : static_cast<uint32_t>(-1);
-            #else
+                #else
                 const uint32_t prim = rays.get()[i].hit.prim & PRIM_IDX_MASK;
-                const uint32_t inst = is_tlas ? (rays.get()[i].hit.prim >> INST_IDX_SHFT) : (uint32_t)-1;
-            #endif
-                out[i] = { prim, inst, rays.get()[i].hit.t, rays.get()[i].hit.u, rays.get()[i].hit.v };
+                const uint32_t inst = is_tlas ? (rays.get()[i].hit.prim >> INST_IDX_SHFT) : static_cast<uint32_t>(-1);
+                #endif
+                dst[i] = { prim, inst, rays.get()[i].hit.t, rays.get()[i].hit.u, rays.get()[i].hit.v };
             } else {
-                out[i] = { static_cast<uint32_t>(-1), static_cast<uint32_t>(-1), INFINITY, 0.0f, 0.0f };
+                dst[i] = { static_cast<uint32_t>(-1), static_cast<uint32_t>(-1), INFINITY, 0.0f, 0.0f };
             }
         }
 
-        // Materialize numpy array and copy once    // TODO: should avoid copy here too
-        nb::module_ np = nb::module_::import_("numpy");
-        nb::object arr  = np.attr("empty")(nb::make_tuple(n_rays), "dtype"_a = g_hit_record_dtype);
-        nb::object view = arr.attr("view")(np.attr("uint8"));
-        auto bytes = nb::cast<nb::ndarray<uint8_t, nb::c_contig>>(view);
-        std::memcpy(bytes.data(), out.data(), out.size() * sizeof(HitRecord));
         return arr;
     }
 
@@ -1558,7 +1610,7 @@ public:
         if (!t_max_obj.is_none()) {
             auto t_max_np = nb::cast<nb::ndarray<const float>>(t_max_obj);
 
-            if (t_max_np.ndim() != 1 || t_max_np.size() != (size_t)n_rays)
+            if (t_max_np.ndim() != 1 || t_max_np.size() != static_cast<size_t>(n_rays))
                 throw std::runtime_error("`t_max` must be a 1D float array of length N.");
 
             t_max_ptr = t_max_np.data();
@@ -1566,7 +1618,7 @@ public:
         if (!masks_obj.is_none()) {
             auto masks_np = nb::cast<nb::ndarray<const uint32_t>>(masks_obj);
 
-            if (masks_np.ndim() != 1 || masks_np.size() != (size_t)n_rays)
+            if (masks_np.ndim() != 1 || masks_np.size() != static_cast<size_t>(n_rays))
                 throw std::runtime_error("`masks` must be a 1D uint32 array of length N.");
 
             masks_ptr = masks_np.data();
@@ -1577,23 +1629,25 @@ public:
         nb::object result_obj = np.attr("empty")(nb::make_tuple(n_rays), "dtype"_a = np.attr("bool_"));
         auto result = nb::cast<nb::ndarray<bool>>(result_obj);
 
+        // Ensure initial state (False for all)
+        auto* outp = result.data();
+        std::fill_n(outp, n_rays, false);
+
         // Custom geometry context: keep source arrays alive across GIL release
         CustomGeometryContext context{};
         if (custom_type == CustomType::AABB) {
-            nb::ndarray<const float> aabbs_arr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]);
-            nb::ndarray<const float> inv_extents_arr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[1]);
+            auto aabbs_arr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]);
+            auto inv_extents_arr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[1]);
             context.aabbs_ptr = aabbs_arr.data();
             context.inv_extents_ptr = inv_extents_arr.data();
         } else if (custom_type == CustomType::Sphere) {
-            nb::ndarray<const float> points_arr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]);
+            auto points_arr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]);
             context.points_ptr = points_arr.data();
             context.sphere_radius = sphere_radius;
         }
 
         // Early out: empty BVH
         if (!active_bvh_ || active_bvh_->triCount == 0) {
-            auto* outp = result.data();
-            for (Py_ssize_t i = 0; i < n_rays; ++i) outp[i] = false;
             return result;
         }
 
@@ -1652,17 +1706,19 @@ public:
 
                 tinybvh::Ray& r = rays.get()[i];
                 r = tinybvh::Ray(
-                    tinybvh::bvhvec3(
+                    /* origin */ tinybvh::bvhvec3(
                         origins_ptr[iSo + 0 * o_col],
                         origins_ptr[iSo + 1 * o_col],
-                        origins_ptr[iSo + 2 * o_col]),
-                    tinybvh::bvhvec3(
+                        origins_ptr[iSo + 2 * o_col]
+                        ),
+                    /* direction */ tinybvh::bvhvec3(
                         directions_ptr[iSd + 0 * d_col],
                         directions_ptr[iSd + 1 * d_col],
-                        directions_ptr[iSd + 2 * d_col]),
-                    /* t */   t_init,
-                    /* mask */mask
+                        directions_ptr[iSd + 2 * d_col]
+                        ),
+                    /* t */ t_init
                 );
+                r.mask = mask;
 
                 // if using custom geometry we also need the read-only context pointer
                 if (custom_type != CustomType::None) {
@@ -1672,7 +1728,8 @@ public:
 
             dispatch_bvh_call(active_bvh_, [&](auto& bvh) {
                 using BVHType = std::decay_t<decltype(bvh)>;
-                if constexpr (std::is_same_v<BVHType, tinybvh::BVH>) {  // BLAS only
+
+                if constexpr (std::is_same_v<BVHType, tinybvh::BVH>) { // BLAS only
                     if (want_packets) {
                         #ifdef _OPENMP
                         #pragma omp parallel for schedule(dynamic)
@@ -1680,13 +1737,14 @@ public:
                         for (Py_ssize_t i = 0; i < n_rays; i += 256) {
                             const Py_ssize_t end = std::min(i + 256, n_rays);
                             bool used_packet = false;
+
                             if (end - i == 256) {
                                 const bool chunk_same_origin = same_origin_ok(
                                     origins_ptr + static_cast<size_t>(i) * o_row,
                                     o_row, o_col, 256, same_origin_eps);
                                 const bool chunk_coherent = (packet == PacketMode::Force)
                                     ? true
-                                    : (gate.cone_ok(i, 256) && gate.tmax_ok(i, 256));
+                                    : (gate.cone_ok(i, 256) && PacketGate::tmax_ok(i, 256));
 
                                 if (chunk_same_origin && chunk_coherent) {
                                 #if defined(BVH_USEAVX) && defined(BVH_USESSE)
@@ -1694,49 +1752,42 @@ public:
                                 #else
                                     bvh.Intersect256Rays(&rays.get()[i]);
                                 #endif
-                                // Convert to occlusion flags
-                                for (Py_ssize_t j = i; j < end; ++j) {
-                                    const float t_init = t_max_ptr ? t_max_ptr[j] : 1e30f;
-                                    if (rays.get()[j].hit.t < t_init) occluded[static_cast<size_t>(j)] = 1;
-                                }
-                                used_packet = true;
+                                    for (Py_ssize_t j = i; j < end; ++j) {
+                                        const float t_init = t_max_ptr ? t_max_ptr[j] : 1e30f;
+                                        if (rays.get()[j].hit.t <= t_init) outp[j] = true;
+                                    }
+                                    used_packet = true;
                                 }
                             }
                             if (!used_packet) {
                                 // Fallback: scalar occlusion for this chunk
-                                for (Py_ssize_t j = i; j < end; ++j) {
-                                    if (bvh.IsOccluded(rays.get()[j])) occluded[static_cast<size_t>(j)] = 1;
-                                }
+                                for (Py_ssize_t j = i; j < end; ++j)
+                                    if (bvh.IsOccluded(rays.get()[j])) outp[j] = true;
                             }
                         }
                     } else {
-                        // scalar occlusion
+                        // Scalar occlusion
                         #ifdef _OPENMP
                         #pragma omp parallel for schedule(dynamic)
                         #endif
-                        for (Py_ssize_t i = 0; i < n_rays; ++i) {
-                            if (bvh.IsOccluded(rays.get()[i])) occluded[static_cast<size_t>(i)] = 1;
-                        }
+                        for (Py_ssize_t j = 0; j < n_rays; ++j)
+                            if (bvh.IsOccluded(rays.get()[j])) outp[j] = true;
                     }
                 } else {
-                    // Non-standard layouts: scalar-only
+                    // Non-standard layouts (scalar path only)
                     #ifdef _OPENMP
                     #pragma omp parallel for schedule(dynamic)
                     #endif
-                    for (Py_ssize_t i = 0; i < n_rays; ++i) {
-                        if (bvh.IsOccluded(rays.get()[i])) occluded[static_cast<size_t>(i)] = 1;
-                    }
+                    for (Py_ssize_t j = 0; j < n_rays; ++j)
+                        if (bvh.IsOccluded(rays.get()[j])) outp[j] = true;
                 }
             });
         } // GIL re-acquired
 
-        // Pack Python bools
-        auto* outp = result.data();
-        for (Py_ssize_t i = 0; i < n_rays; ++i) outp[i] = (occluded[static_cast<size_t>(i)] != 0);
         return result;
     }
 
-    [[nodiscard]] bool intersect_sphere(const nb::object& center_obj, float radius) const {
+    [[nodiscard]] bool intersect_sphere(const tinybvh::bvhvec3& center, float radius) const {
         if (!active_bvh_ || active_bvh_->triCount == 0) {
             return false;
         }
@@ -1746,7 +1797,6 @@ public:
         // This static_cast is safe because the layout has just been checked
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
         const auto* bvh = static_cast<const tinybvh::BVH*>(active_bvh_);
-        tinybvh::bvhvec3 center = py_obj_to_vec3(center_obj);
         return bvh->IntersectSphere(center, radius);
     }
 
@@ -1767,7 +1817,8 @@ public:
     }
 
     static std::unique_ptr<PyBVH> build_tlas(const nb::object& instances_obj, const nb::list& blases_py) {
-        nb::module_ np = nb::module_::import_("numpy");
+
+        const nb::module_ np = nb::module_::import_("numpy");
 
         // Validate dtype is structured and has the fields we need
         nb::object dtype_obj  = instances_obj.attr("dtype");
@@ -1775,14 +1826,22 @@ public:
         if (fields_obj.is_none())
             throw std::runtime_error("Input `instances` must be a 1D structured numpy array.");
 
-        nb::dict fields = nb::cast<nb::dict>(fields_obj);
+        nb::dict fields;
+        if (nb::isinstance<nb::dict>(fields_obj)) {
+            fields = nb::cast<nb::dict>(fields_obj);
+        } else {
+            // Make a real dict from any mapping-like object
+            auto builtins = nb::module_::import_("builtins");
+            fields = nb::cast<nb::dict>(builtins.attr("dict")(fields_obj));
+        }
+
         if (!fields.contains("transform") || !fields.contains("blas_id"))
             throw std::runtime_error("Instance dtype must contain 'transform' and 'blas_id'.");
 
         if (nb::cast<int>(instances_obj.attr("ndim")) != 1)
             throw std::runtime_error("Instances must be a 1D array.");
 
-        Py_ssize_t inst_count = nb::cast<Py_ssize_t>(instances_obj.attr("shape")[0]);
+        auto inst_count = nb::cast<Py_ssize_t>(instances_obj.attr("shape")[0]);
 
         if (inst_count == 0)
             return std::make_unique<PyBVH>(); // empty TLAS
@@ -1793,16 +1852,17 @@ public:
 
         // Get info for manual structured array traversal
         const char* base_ptr = reinterpret_cast<const char*>(bytes.data());
-        const size_t itemsize = nb::cast<size_t>(dtype_obj.attr("itemsize"));
+        const auto itemsize = nb::cast<size_t>(dtype_obj.attr("itemsize"));
 
         // Get field offsets from the dtype
         auto get_offset = [&](const char* name) {
-            nb::tuple info = nb::cast<nb::tuple>(fields[name]);
+            auto info = nb::cast<nb::tuple>(fields[name]);
             return nb::cast<size_t>(info[1]);
         };
+
         const size_t transform_offset = get_offset("transform");
-        const size_t blas_id_offset   = get_offset("blas_id");
-        const size_t mask_offset      = fields.contains("mask") ? get_offset("mask") : (size_t)-1;
+        const size_t blas_id_offset = get_offset("blas_id");
+        const size_t mask_offset = fields.contains("mask") ? get_offset("mask") : (size_t)-1;
 
         // Create wrapper that will hold the TLAS
         auto wrapper = std::make_unique<PyBVH>();
@@ -1814,6 +1874,7 @@ public:
         // Extract the BVHBase* pointers from the BLASes
         for (const auto& blas_obj : blases_py) {
             auto& py_blas = nb::cast<PyBVH&>(blas_obj);
+
             if (!py_blas.active_bvh_) {
                 throw std::runtime_error("One of the provided BLASes is uninitialized.");
             }
@@ -1825,11 +1886,10 @@ public:
         for (Py_ssize_t i = 0; i < inst_count; ++i) {
             const char* record_ptr = base_ptr + i * itemsize;
 
-            const float* transform_ptr = reinterpret_cast<const float*>(record_ptr + transform_offset);
+            const auto* transform_ptr = reinterpret_cast<const float*>(record_ptr + transform_offset);
             const uint32_t blas_id = *reinterpret_cast<const uint32_t*>(record_ptr + blas_id_offset);
 
             wrapper->instances_data[i].blasIdx = blas_id;
-
             if (mask_offset != (size_t)-1) {
                 wrapper->instances_data[i].mask = *reinterpret_cast<const uint32_t*>(record_ptr + mask_offset);
             }
@@ -1858,56 +1918,76 @@ public:
 
     // Load / save
 
-    static std::unique_ptr<PyBVH> load(const nb::object& filepath_obj,
-        nb::ndarray<const float, nb::shape<-1, 4>, nb::c_contig, nb::device::cpu> vertices_np, const nb::object& indices_obj) {
+    static std::unique_ptr<PyBVH> load(
+        const nb::object& filepath_obj,
+        const nb::object& vertices_obj_in,
+        const nb::object& indices_obj)
+    {
+        const nb::module_ np = nb::module_::import_("numpy");
+        const auto filepath = nb::cast<std::string>(nb::str(filepath_obj));
 
-        auto filepath = nb::cast<std::string>(filepath_obj);
+        // Normalize vertices to float32, C-contig (V, 4)
+        nb::object vertices_obj = np.attr("ascontiguousarray")(vertices_obj_in, "dtype"_a = np.attr("float32"));
+        auto verts = nb::cast<nb::ndarray<>>(vertices_obj);
+        if (verts.ndim() != 2 || verts.shape(1) != 4)
+            throw std::runtime_error("Input `vertices` must have shape (V, 4) and dtype float32.");
+
         auto wrapper = std::make_unique<PyBVH>();
-
-        // create a temporary BVH to load into
-        auto bvh = std::make_unique<tinybvh::BVH>();
+        auto bvh     = std::make_unique<tinybvh::BVH>();
         bool success = false;
 
+        // Keep vertices alive
+        wrapper->source_geometry_refs.append(vertices_obj);
+
+        // Pointer to vertex data
+        const auto* vptr = reinterpret_cast<const tinybvh::bvhvec4*>(verts.data());
+        const auto V = static_cast<uint32_t>(verts.shape(0));
+
         if (indices_obj.is_none()) {
+            // Non-indexed geometry
 
-            // Case: non-indexed geometry
-            wrapper->source_geometry_refs.append(vertices_np);
+            if (V % 3 != 0)
+                throw std::runtime_error("Loading for non-indexed geometry expects vertex count to be divisible by 3.");
 
-            auto vertices_ptr = reinterpret_cast<const tinybvh::bvhvec4*>(vertices_np.data());
-            const auto prim_count = static_cast<uint32_t>(vertices_np.shape(0) / 3);
-
-            success = bvh->Load(filepath.c_str(), vertices_ptr, prim_count);
-
+            const uint32_t prim_count = V / 3;
+            success = bvh->Load(filepath.c_str(), vptr, prim_count);
         } else {
+            // Indexed geometry: normalize to uint32, C-contig (N, 3)
 
-            // Case: indexed geometry
-            auto indices_np = nb::cast<nb::ndarray<const uint32_t, nb::shape<-1, 3>, nb::c_contig, nb::device::cpu>>(indices_obj);
+            nb::object indices_norm = np.attr("ascontiguousarray")(indices_obj, "dtype"_a = np.attr("uint32"));
+            auto idx = nb::cast<nb::ndarray<>>(indices_norm);
+            if (idx.ndim() != 2 || idx.shape(1) != 3)
+                throw std::runtime_error("Input `indices` must have shape (N, 3) and dtype uint32.");
 
-            wrapper->source_geometry_refs.append(vertices_np);
-            wrapper->source_geometry_refs.append(indices_np);
+            // Cheap safety: bounds check
+            {
+                const auto* ip = static_cast<const uint32_t*>(idx.data());
+                const size_t n3 = static_cast<size_t>(idx.shape(0)) * 3;
+                for (size_t k = 0; k < n3; ++k)
+                    if (ip[k] >= V)
+                        throw std::runtime_error("Input `indices` contains an out-of-range vertex index.");
+            }
 
-            auto vertices_ptr = reinterpret_cast<const tinybvh::bvhvec4*>(vertices_np.data());
-            auto indices_ptr = static_cast<const uint32_t*>(indices_np.data());
-            const auto prim_count = static_cast<uint32_t>(indices_np.shape(0));
-            success = bvh->Load(filepath.c_str(), vertices_ptr, indices_ptr, prim_count);
+            // Keep indices alive
+            wrapper->source_geometry_refs.append(indices_norm);
+
+            const auto* iptr = static_cast<const uint32_t*>(idx.data());
+            const auto prim_count = static_cast<uint32_t>(idx.shape(0));
+            success = bvh->Load(filepath.c_str(), vptr, iptr, prim_count);
         }
 
-        if (!success) {
-            throw std::runtime_error(
-                "Failed to load BVH from file. Check file integrity, version, and that "
-                "you provided the correct geometry layout (indexed vs. non-indexed)."
-            );
-        }
+        if (!success)
+            throw std::runtime_error("Failed to load BVH (file incompatible or geometry mismatch).");
 
-        // Infer quality and set references
+        // Infer quality
         wrapper->quality = bvh->refittable ? BuildQuality::Balanced : BuildQuality::High;
 
-        finalize_build(wrapper, std::move(bvh));  // transfer ownership
+        finalize_build(wrapper, std::move(bvh));
         return wrapper;
-
     }
 
     void save(const nb::object& filepath_obj) const {
+
         if (!active_bvh_ || active_bvh_->layout != tinybvh::BVHBase::LAYOUT_BVH) {
             throw std::runtime_error("Saving is only supported for the standard BVH layout.");
         }
@@ -1915,7 +1995,8 @@ public:
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
         auto* bvh = static_cast<tinybvh::BVH*>(active_bvh_);
 
-        auto filepath = nb::cast<std::string>(filepath_obj);
+        // Accept str / Path / anything with __fspath__
+        auto filepath = nb::cast<std::string>(nb::str(filepath_obj));
         bvh->Save(filepath.c_str());
     }
 
@@ -1945,14 +2026,13 @@ public:
         quality = bvh->refittable ? BuildQuality::Balanced : BuildQuality::High;
     }
 
-    void set_opacity_maps(const nb::ndarray<uint32_t, nb::shape<-1>, nb::c_contig>& map_data, uint32_t N) {
+    void set_opacity_maps(const nb::ndarray<uint32_t, nb::c_contig>& map_data, uint32_t N) {
         // tinybvh expects a specific size: N*N bits per triangle
         // The array should contain (triCount * N * N) / 32 uint32_t values
         const size_t expected_size = (active_bvh_->triCount * N * N + 31) / 32;
         if (map_data.size() != expected_size) {
             throw std::runtime_error("Opacity map data has incorrect size for the given N and primitive count.");   // TODO this is not a very helpful error
         }
-
         opacity_map_ref = map_data; // Keep reference
         active_bvh_->SetOpacityMicroMaps(opacity_map_ref.data(), N);
     }
@@ -2013,7 +2093,8 @@ public:
 
         // if no BVH or not standard layout: return empty structured array
         if (!self.active_bvh_ || self.active_bvh_->layout != tinybvh::BVHBase::LAYOUT_BVH) {
-            nb::object empty = np.attr("empty")(nb::make_tuple(0), "dtype"_a = g_bvh_node_dtype);
+            nb::object empty = np
+                .attr("empty")(nb::make_tuple(0), "dtype"_a = g_bvh_node_dtype);
             empty.attr("setflags")("write"_a = false);
             return empty;
         }
@@ -2021,7 +2102,12 @@ public:
         // This static_cast is safe because the layout has just been checked
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
         const auto* bvh = static_cast<const tinybvh::BVH*>(self.active_bvh_);
-        if (!bvh) return nb::none();
+        if (!bvh) {
+            nb::object empty = np
+                .attr("empty")(nb::make_tuple(0), "dtype"_a = g_bvh_node_dtype);
+            empty.attr("setflags")("write"_a = false);
+            return empty;
+        }
 
         size_t n = bvh->usedNodes;
         auto itemsize = nb::cast<size_t>(g_bvh_node_dtype.attr("itemsize"));
@@ -2040,18 +2126,24 @@ public:
             .attr("view")(g_bvh_node_dtype)
             .attr("reshape")(nb::make_tuple(n));
 
+        arr.attr("setflags")("write"_a = false);    // just to be sure
+
         return arr;
     }
 
-    static nb::ndarray<const uint32_t, nb::numpy, nb::c_contig> get_prims_indices(const PyBVH &self) {
+    static nb::ndarray<const uint32_t, nb::numpy, nb::c_contig, nb::ro> get_prims_indices(const PyBVH &self) {
+
+        // if no BVH or not standard layout: return empty uint32 array
         if (!self.active_bvh_ || self.active_bvh_->layout != tinybvh::BVHBase::LAYOUT_BVH)
             return {};
 
+        // This static_cast is safe because the layout has just been checked
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
         const auto* bvh = static_cast<const tinybvh::BVH*>(self.active_bvh_);
         if (!bvh->primIdx || bvh->idxCount == 0)
             return {};
 
-        auto arr = nb::ndarray<const uint32_t, nb::numpy, nb::c_contig>(
+        auto arr = nb::ndarray<const uint32_t, nb::numpy, nb::c_contig, nb::ro>(
             bvh->primIdx,
             { static_cast<size_t>(bvh->idxCount) },
             nb::find(&self)
@@ -2060,13 +2152,16 @@ public:
     }
 
     [[nodiscard]] nb::dict get_buffers() const {
+
         if (!active_bvh_) {
             throw std::runtime_error("BVH is not initialized.");
         }
+
         nb::dict buffers;
         const PyBVH& self = *this;
 
         // Get buffers for the BVH structure itself
+        // all read only, all as float32 (or uint32, for prim_indices)
         dispatch_bvh_call(active_bvh_, [&](auto& bvh) {
             using BvhType = std::decay_t<decltype(bvh)>;
 
@@ -2074,16 +2169,16 @@ public:
             if constexpr (std::is_same_v<BvhType, tinybvh::BVH>) {
                 if (bvh.bvhNode) {
                     // exposes nodes as a raw float array. Each is 32 bytes (8 floats)
-                    buffers["nodes"] = nb::ndarray<const float>(
+                    buffers["nodes"] = nb::ndarray<const float, nb::ro>(
                         reinterpret_cast<const float*>(bvh.bvhNode),
-                        { (size_t)bvh.usedNodes * 8 },
+                        { static_cast<size_t>(bvh.usedNodes) * 8 },
                         nb::find(&self)
                     );
                 }
                 if (bvh.primIdx) {
-                    buffers["prim_indices"] = nb::ndarray<const uint32_t>(
+                    buffers["prim_indices"] = nb::ndarray<const uint32_t, nb::ro>(
                         bvh.primIdx,
-                        {(size_t)bvh.idxCount},
+                        { static_cast<size_t>(bvh.idxCount) },
                         nb::find(&self)
                     );
                 }
@@ -2092,9 +2187,9 @@ public:
             else if constexpr (std::is_same_v<BvhType, tinybvh::BVH_GPU>) { // NOLINT(*-branch-clone) Reason: being explicit is better here
                 if (bvh.bvhNode) {
                     // Each node is 64 bytes (16 floats)
-                    buffers["nodes"] = nb::ndarray<const float>(
+                    buffers["nodes"] = nb::ndarray<const float, nb::ro>(
                         reinterpret_cast<const float*>(bvh.bvhNode),
-                        { (size_t)bvh.usedNodes * 16 },
+                        { static_cast<size_t>(bvh.usedNodes) * 16 },
                         nb::find(&self)
                     );
                 }
@@ -2102,9 +2197,9 @@ public:
             else if constexpr (std::is_same_v<BvhType, tinybvh::BVH4_GPU>) {
                 if (bvh.bvh4Data) {
                     // usedBlocks is in units of 16 bytes (a bvhvec4). Total floats = usedBlocks * 4
-                    buffers["packed_data"] = nb::ndarray<const float>(
+                    buffers["packed_data"] = nb::ndarray<const float, nb::ro>(
                         reinterpret_cast<const float*>(bvh.bvh4Data),
-                        { (size_t)bvh.usedBlocks * 4 },
+                        { static_cast<size_t>(bvh.usedBlocks) * 4 },
                         nb::find(&self)
                     );
                 }
@@ -2112,9 +2207,9 @@ public:
             else if constexpr (std::is_same_v<BvhType, tinybvh::BVH8_CWBVH>) {
                 if (bvh.bvh8Data) {
                     // usedBlocks is in units of 16 bytes
-                    buffers["nodes"] = nb::ndarray<const float>(
+                    buffers["nodes"] = nb::ndarray<const float, nb::ro>(
                         reinterpret_cast<const float*>(bvh.bvh8Data),
-                        { (size_t)bvh.usedBlocks * 4 },
+                        { static_cast<size_t>(bvh.usedBlocks) * 4 },
                         nb::find(&self)
                     );
                 }
@@ -2125,9 +2220,9 @@ public:
                     #else
                         size_t elements_per_tri = 3 * 4; // 3 vec4s
                     #endif
-                    buffers["triangles"] = nb::ndarray<const float>(
+                    buffers["triangles"] = nb::ndarray<const float, nb::ro>(
                         reinterpret_cast<const float*>(bvh.bvh8Tris),
-                        { (size_t)bvh.triCount * elements_per_tri },
+                        { static_cast<size_t>(bvh.triCount) * elements_per_tri },
                         nb::find(&self)
                     );
                 }
@@ -2136,9 +2231,9 @@ public:
             else if constexpr (std::is_same_v<BvhType, tinybvh::BVH4_CPU>) {
                 if (bvh.bvh4Data) {
                     // usedBlocks is in units of 64 bytes (CacheLine). Total floats = usedBlocks * 16
-                    buffers["packed_data"] = nb::ndarray<const float>(
+                    buffers["packed_data"] = nb::ndarray<const float, nb::ro>(
                         reinterpret_cast<const float*>(bvh.bvh4Data),
-                        { (size_t)bvh.usedBlocks * 16 },
+                        { static_cast<size_t>(bvh.usedBlocks) * 16 },
                         nb::find(&self)
                     );
                 }
@@ -2146,9 +2241,9 @@ public:
             else if constexpr (std::is_same_v<BvhType, tinybvh::BVH8_CPU>) {
                 if (bvh.bvh8Data) {
                     // usedBlocks is in units of 64 bytes (CacheLine). Total floats = usedBlocks * 16
-                    buffers["packed_data"] = nb::ndarray<const float>(
+                    buffers["packed_data"] = nb::ndarray<const float, nb::ro>(
                         reinterpret_cast<const float*>(bvh.bvh8Data),
-                        { (size_t)bvh.usedBlocks * 16 },
+                        { static_cast<size_t>(bvh.usedBlocks) * 16 },
                         nb::find(&self)
                     );
                 }
@@ -2157,10 +2252,10 @@ public:
             else if constexpr (std::is_same_v<BvhType, tinybvh::MBVH<4>> || std::is_same_v<BvhType, tinybvh::MBVH<8>>) {
                  if (bvh.mbvhNode) {
                     // MBVH<4> node is 48 bytes (12 floats). MBVH<8> is 64 bytes (16 floats)
-                    constexpr size_t node_size_in_floats = sizeof(typename BvhType::MBVHNode) / sizeof(float);
-                    buffers["nodes"] = nb::ndarray<const float>(
+                    constexpr size_t node_size_in_floats = sizeof(BvhType::MBVHNode) / sizeof(float);
+                    buffers["nodes"] = nb::ndarray<const float, nb::ro>(
                         reinterpret_cast<const float*>(bvh.mbvhNode),
-                        { (size_t)bvh.usedNodes * node_size_in_floats },
+                        { static_cast<size_t>(bvh.usedNodes) * node_size_in_floats },
                         nb::find(&self)
                     );
                 }
@@ -2168,9 +2263,9 @@ public:
             else if constexpr (std::is_same_v<BvhType, tinybvh::BVH_SoA>) {
                 if (bvh.bvhNode) {
                     // Each node is 64 bytes (16 floats)
-                    buffers["nodes"] = nb::ndarray<const float>(
+                    buffers["nodes"] = nb::ndarray<const float, nb::ro>(
                         reinterpret_cast<const float*>(bvh.bvhNode),
-                        { (size_t)bvh.usedNodes * 16 },
+                        { static_cast<size_t>(bvh.usedNodes) * 16 },
                         nb::find(&self)
                     );
                 }
@@ -2266,7 +2361,6 @@ public:
 
 NB_MAKE_OPAQUE(TLASInstance);
 NB_MAKE_OPAQUE(HitRecord);
-NB_MAKE_OPAQUE(tinybvh::bvhvec3);   // TODO: Can probably get rid of this one
 
 NB_MODULE(_pytinybvh, m) {
     isa_compat_check();
@@ -2335,10 +2429,10 @@ NB_MODULE(_pytinybvh, m) {
     // Main Python classes
     nb::class_<PyRay>(m, "Ray", "Represents a ray for intersection queries.")
 
-        .def("__init__", [](PyRay *self, const nb::object& origin_obj, const nb::object& direction_obj, float t, uint32_t mask) {
+        .def("__init__", [](PyRay *self, const tinybvh::bvhvec3& origin, const tinybvh::bvhvec3& direction, float t, uint32_t mask) {
            new (self) PyRay{
-               py_obj_to_vec3(origin_obj),
-               py_obj_to_vec3(direction_obj),
+               origin,
+               direction,
                t,
                0.0f, // u
                0.0f, // v
@@ -2351,12 +2445,12 @@ NB_MODULE(_pytinybvh, m) {
 
         .def_prop_rw("origin",
             [](const PyRay &r) { return nb::make_tuple(r.origin.x, r.origin.y, r.origin.z); },
-            [](PyRay &r, const nb::object& obj) { r.origin = py_obj_to_vec3(obj); },
+            [](PyRay &r, const tinybvh::bvhvec3& orig) { r.origin = orig; },
             "The origin point of the ray (list, tuple, or numpy array).")
 
         .def_prop_rw("direction",
             [](const PyRay &r) { return nb::make_tuple(r.direction.x, r.direction.y, r.direction.z); },
-            [](PyRay &r, const nb::object& obj) { r.direction = py_obj_to_vec3(obj); },
+            [](PyRay &r, const tinybvh::bvhvec3& dir) { r.direction = dir; },
             "The direction vector of the ray (list, tuple, or numpy array).")
 
         .def_rw("t", &PyRay::t, "The maximum distance for intersection. Updated with hit distance.")
@@ -2444,7 +2538,7 @@ NB_MODULE(_pytinybvh, m) {
                     BVH: A new BVH instance.
             ))",
             nb::rv_policy::move,
-            nb::arg("vertices"), nb::arg("quality") = BuildQuality::Balanced,
+            nb::arg("vertices").noconvert(), nb::arg("quality") = BuildQuality::Balanced,
             nb::arg("traversal_cost") = C_TRAV, nb::arg("intersection_cost") = C_INT)
 
         .def_static("from_indexed_mesh", &PyBVH::from_indexed_mesh,
@@ -2466,7 +2560,7 @@ NB_MODULE(_pytinybvh, m) {
                     BVH: A new BVH instance.
             ))",
             nb::rv_policy::move,
-            nb::arg("vertices"), nb::arg("indices"),
+            nb::arg("vertices").noconvert(), nb::arg("indices").noconvert(),
             nb::arg("quality") = BuildQuality::Balanced,
             nb::arg("traversal_cost") = C_TRAV, nb::arg("intersection_cost") = C_INT)
 
@@ -2487,7 +2581,7 @@ NB_MODULE(_pytinybvh, m) {
                     BVH: A new BVH instance.
             ))",
             nb::rv_policy::move,
-            nb::arg("aabbs"), nb::arg("quality") = BuildQuality::Balanced,
+            nb::arg("aabbs").noconvert(), nb::arg("quality") = BuildQuality::Balanced,
             nb::arg("traversal_cost") = C_TRAV, nb::arg("intersection_cost") = C_INT)
 
         // Convenience builders (with copying)
@@ -2510,7 +2604,7 @@ NB_MODULE(_pytinybvh, m) {
             nb::arg("traversal_cost") = C_TRAV, nb::arg("intersection_cost") = C_INT)
 
         .def_static("from_points", &PyBVH::from_points,
-             R"((
+            R"((
                 Builds a BVH from a point cloud. This is a convenience method that creates an
                 axis-aligned bounding box for each point and builds the BVH from those.
 
@@ -2522,7 +2616,7 @@ NB_MODULE(_pytinybvh, m) {
                 Returns:
                     BVH: A new BVH instance.
             ))",
-             nb::rv_policy::move,
+            nb::rv_policy::move,
             nb::arg("points"), nb::arg("radius") = 1e-5f, nb::arg("quality") = BuildQuality::Balanced,
             nb::arg("traversal_cost") = C_TRAV, nb::arg("intersection_cost") = C_INT)
 
@@ -2550,7 +2644,7 @@ NB_MODULE(_pytinybvh, m) {
             nb::arg("ray"))
 
         .def("intersect_batch", &PyBVH::intersect_batch,
-           R"((
+            R"((
                 Performs intersection queries for a batch of rays.
 
                 This method is highly parallelized using multi-core processing for all geometry types
@@ -2576,7 +2670,7 @@ NB_MODULE(_pytinybvh, m) {
                         For misses, prim_id and inst_id are -1 and t is infinity.
                         For TLAS hits, inst_id is the instance index and prim_id is the primitive
                         index within that instance's BLAS.
-           ))",
+            ))",
             nb::arg("origins"), nb::arg("directions"),
             nb::arg("t_max") = nb::none(), nb::arg("masks") = nb::none(),
             nb::arg("packet") = PacketMode::Never,
@@ -2661,7 +2755,8 @@ NB_MODULE(_pytinybvh, m) {
                 return self.source_geometry_refs[0];
             }
             return nb::none();
-            }, "The source vertex buffer as a numpy array, or None.")
+            },
+            "The source vertex buffer as a numpy array, or None.")
 
         .def_prop_ro("source_indices", [](const PyBVH& self) -> nb::object {
             if (self.custom_type == PyBVH::CustomType::None && self.source_geometry_refs.size() > 1) {
@@ -2720,7 +2815,7 @@ NB_MODULE(_pytinybvh, m) {
              ))")
 
         .def_static("build_tlas", &PyBVH::build_tlas,
-           R"((
+            R"((
                 Builds a Top-Level Acceleration Structure (TLAS) from a list of BVH instances.
 
                 Args:
@@ -2732,8 +2827,7 @@ NB_MODULE(_pytinybvh, m) {
                 Returns:
                     BVH: A new BVH instance representing the TLAS.
             ))",
-
-           nb::arg("instances"), nb::arg("BLASes"))
+            nb::arg("instances"), nb::arg("BLASes"))
 
         // Load / save
 
@@ -2836,50 +2930,59 @@ NB_MODULE(_pytinybvh, m) {
         // Read-only properties
 
         .def_prop_ro("traversal_cost",
-            [](const PyBVH &self) {
+            [](const PyBVH &self) -> float {
                 if (!self.active_bvh_) throw std::runtime_error("BVH is not initialized.");
                 return self.active_bvh_->c_trav;
             },
             "The traversal cost used in the Surface Area Heuristic (SAH) calculation during the build.")
 
         .def_prop_ro("intersection_cost",
-            [](const PyBVH &self) {
+            [](const PyBVH &self) -> float {
                 if (!self.active_bvh_) throw std::runtime_error("BVH is not initialized.");
                 return self.active_bvh_->c_int;
             },
             "The intersection cost used in the Surface Area Heuristic (SAH) calculation during the build.")
 
-        .def_prop_ro("node_count", [](const PyBVH &self){ return self.active_bvh_->usedNodes; }, "Total number of nodes in the BVH.")
+        .def_prop_ro("node_count",
+            [](const PyBVH &self) -> uint32_t { return self.active_bvh_->usedNodes; },
+            "Total number of nodes in the BVH.")
 
-        .def_prop_ro("prim_count", [](const PyBVH &self){ return self.active_bvh_->triCount; }, "Total number of primitives in the BVH.")
+        .def_prop_ro("prim_count",
+            [](const PyBVH &self) -> uint32_t { return self.active_bvh_->triCount; },
+            "Total number of primitives in the BVH.")
 
-        .def_prop_ro("aabb_min", [](PyBVH &self) -> nb::ndarray<const float> {
+        .def_prop_ro("aabb_min",
+            [](PyBVH &self) -> nb::ndarray<const float, nb::numpy, nb::c_contig, nb::ro> {
             if (!self.active_bvh_) return {};
             // Create a 1D array of shape (3,) that is a view into the bvh.aabbMin data
-            auto arr = nb::ndarray<const float, nb::numpy, nb::c_contig>(
+            auto arr = nb::ndarray<const float, nb::numpy, nb::c_contig, nb::ro>(
                 &self.active_bvh_->aabbMin.x,
                 { 3 },
                 nb::find(&self)
             );
-            return arr.data();
+            return arr;
         }, "The minimum corner of the root axis-aligned bounding box.")
 
-        .def_prop_ro("aabb_max", [](PyBVH &self) -> nb::ndarray<const float> {
+        .def_prop_ro("aabb_max",
+            [](PyBVH &self) -> nb::ndarray<const float, nb::numpy, nb::c_contig, nb::ro> {
             if (!self.active_bvh_) return {};
             // Create a 1D array of shape (3,) that is a view into the bvh.aabbMax data
-            auto arr = nb::ndarray<const float, nb::numpy, nb::c_contig>(
+            auto arr = nb::ndarray<const float, nb::numpy, nb::c_contig, nb::ro>(
                 &self.active_bvh_->aabbMax.x,
                 { 3 },
                 nb::find(&self)
             );
-            return arr.data();
+            return arr;
         }, "The maximum corner of the root axis-aligned bounding box.")
 
-        .def_prop_ro("quality", [](const PyBVH &self) { return self.quality; },
+        .def_prop_ro("quality",
+            [](const PyBVH &self) -> BuildQuality { return self.quality; },
            "The build quality level used to construct the BVH.")
 
-        .def_prop_ro("leaf_count", [](const PyBVH &self) {
-            if (!self.active_bvh_) return 0;
+        .def_prop_ro("leaf_count", [](const PyBVH &self) -> int {
+            if (!self.active_bvh_) {
+                return 0;
+            }
             return dispatch_bvh_call(self.active_bvh_, [](auto& bvh) {
                 // Use a compile-time if to check if the method exists for the concrete type
                 // We know it exists on tinybvh::BVH. It also exists on MBVH<M>
@@ -2893,7 +2996,7 @@ NB_MODULE(_pytinybvh, m) {
             });
             }, "The total number of leaf nodes (only for standard layout).")
 
-        .def_prop_ro("sah_cost", [](const PyBVH &self) {
+        .def_prop_ro("sah_cost", [](const PyBVH &self) -> float {
             if (!self.active_bvh_ || self.active_bvh_->triCount == 0) {
                 return INFINITY;
             }
@@ -2904,8 +3007,11 @@ NB_MODULE(_pytinybvh, m) {
             });
             }, R"((Calculates the Surface Area Heuristic (SAH) cost of the BVH.))")
 
-        .def_prop_ro("epo_cost", [](const PyBVH &self) {
-            if (!self.active_bvh_ || self.active_bvh_->triCount == 0) return 0.0f;
+        .def_prop_ro("epo_cost", [](const PyBVH &self) -> float {
+            if (!self.active_bvh_ || self.active_bvh_->triCount == 0) {
+                return 0.0f;
+            }
+
             return dispatch_bvh_call(self.active_bvh_, [](auto& bvh) {
                 using BvhType = std::decay_t<decltype(bvh)>;
                 if constexpr (std::is_same_v<BvhType, tinybvh::BVH>) {
@@ -2916,18 +3022,18 @@ NB_MODULE(_pytinybvh, m) {
             });
             }, "Calculates the Expected Projected Overlap (EPO) cost of the BVH (only for standard layout).")
 
-        .def_prop_ro("layout", [](const PyBVH &self) {
+        .def_prop_ro("layout", [](const PyBVH &self) -> Layout {
             return self.active_layout_;
             }, "The current active memory layout of the BVH.")
 
         .def_prop_ro("is_tlas", &PyBVH::is_tlas,
             "Returns True if the BVH is a Top-Level Acceleration Structure (TLAS).")
 
-        .def_prop_ro("is_blas", [](const PyBVH& self) {
+        .def_prop_ro("is_blas", [](const PyBVH& self) -> bool {
             return !self.is_tlas();
         }, "Returns True if the BVH is a Bottom-Level Acceleration Structure (BLAS).")
 
-        .def_prop_ro("geometry_type", [](const PyBVH &self) {
+        .def_prop_ro("geometry_type", [](const PyBVH &self) -> GeometryType {
             switch (self.custom_type) {
                 case PyBVH::CustomType::AABB:   return GeometryType::AABBs;
                 case PyBVH::CustomType::Sphere: return GeometryType::Spheres;
@@ -2935,12 +3041,12 @@ NB_MODULE(_pytinybvh, m) {
             }
         }, "The type of underlying geometry the BVH was built on.")
 
-        .def_prop_ro("is_compact", [](const PyBVH &self) {
+        .def_prop_ro("is_compact", [](const PyBVH &self) -> bool {
             // may_have_holes is true when it's *not* compact
             return self.active_bvh_ ? !self.active_bvh_->may_have_holes : true;
         }, "Returns True if the BVH is contiguous in memory.")
 
-        .def_prop_ro("is_refittable", [](const PyBVH &self) {
+        .def_prop_ro("is_refittable", [](const PyBVH &self) -> bool {
             if (!self.active_bvh_) return false;
             // refittable status is determined by the base BVH
             return self.base_ ? self.base_->refittable : false;

@@ -3,8 +3,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 from typing import Union
-import sys
-sys.path.extend('/Users/florent/Development/pytinybvh/build/cp313-cp313-macosx_15_0_arm64')
 from pytinybvh import BVH, Ray, BuildQuality, Layout, CachePolicy, hardware_info
 import trimesh
 import warnings
@@ -548,19 +546,27 @@ class TestRobustness:
         """Tests that builders raise appropriate errors for invalid input shapes and dtypes"""
 
         # Convenience builders should raise RuntimeError for bad shapes
-        with pytest.raises(RuntimeError): BVH.from_triangles(np.zeros((5, 8)))
-        with pytest.raises(RuntimeError): BVH.from_points(np.zeros((5, 4)))
+        with pytest.raises(RuntimeError):
+            BVH.from_triangles(np.zeros((5, 8)))
+
+        with pytest.raises(RuntimeError):
+            BVH.from_points(np.zeros((5, 4)))
 
         # Core builders expect specific dtypes and will fail with TypeError from pybind11
-        with pytest.raises(TypeError): BVH.from_vertices(np.zeros((6, 4)))  # float64
         with pytest.raises(TypeError):
-            BVH.from_indexed_mesh(np.zeros((4, 4)), np.zeros((2, 3), dtype=np.uint32))  # float64
+            BVH.from_vertices(np.zeros((6, 4), dtype=np.float64))  # float64 instead of float32
+
+        with pytest.raises(TypeError):
+            BVH.from_indexed_mesh(np.zeros((4, 4), dtype=np.float64), np.zeros((2, 3), dtype=np.float32))  # float64 and float32 instead of float32 and uint32
 
         # Core builders should raise RuntimeError for bad shapes if dtype is correct
         with pytest.raises(RuntimeError):
-            BVH.from_vertices(np.zeros((7, 4), dtype=np.float32))  # Not multiple of 3
+            # Not multiple of 3
+            BVH.from_vertices(np.zeros((7, 4), dtype=np.float32))
+
         with pytest.raises(RuntimeError):
-            BVH.from_indexed_mesh(np.zeros((4, 3), np.float32), np.zeros((2, 3), np.uint32))  # Verts not (V, 4)
+            # Verts not (V, 4)
+            BVH.from_indexed_mesh(np.zeros((4, 3), np.float32), np.zeros((2, 3), np.uint32))
 
     def test_invalid_parameters(self):
         """Tests for invalid scalar parameters."""
@@ -937,5 +943,5 @@ def plot_aabb(ax, aabb_min, aabb_max, **kwargs):
 
 if __name__ == "__main__":
     print("Running visualization demo...")
-    view_test_scene()
+    # view_test_scene()
     print("\nTo run the automated test suite, use 'pytest'")

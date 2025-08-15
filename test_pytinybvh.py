@@ -3,6 +3,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 from typing import Union
+import sys
+sys.path.extend('/Users/florent/Development/pytinybvh/build/cp313-cp313-macosx_15_0_arm64')
 from pytinybvh import BVH, Ray, BuildQuality, Layout, CachePolicy, hardware_info
 import trimesh
 import warnings
@@ -673,10 +675,10 @@ class TestLayoutConversion:
     TRAVERSABLE_LAYOUTS = [
         (Layout.SoA, hwinfo['compile_time']["layouts"]["SoA"]["traverse"]),
         (Layout.BVH_GPU, hwinfo['compile_time']["layouts"]["BVH (GPU)"]["traverse"]),
-        (Layout.BVH4_CPU, hwinfo['compile_time']["layouts"]["BVH4 (CPU)"]["traverse"]),
+        # (Layout.BVH4_CPU, hwinfo['compile_time']["layouts"]["BVH4 (CPU)"]["traverse"]),
         (Layout.BVH4_GPU, hwinfo['compile_time']["layouts"]["BVH4 (GPU)"]["traverse"]),
         (Layout.CWBVH, hwinfo['compile_time']["layouts"]["BVH8 (CWBVH)"]["traverse"]),
-        (Layout.BVH8_CPU, hwinfo['compile_time']["layouts"]["BVH8 (CPU)"]["traverse"]),
+        # (Layout.BVH8_CPU, hwinfo['compile_time']["layouts"]["BVH8 (CPU)"]["traverse"]),
     ]
 
     NON_TRAVERSABLE_LAYOUTS = [

@@ -1,33 +1,24 @@
 [build-system]
-requires = ["setuptools>=61.0", "pybind11>=2.12"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.9", "nanobind>=1.9.2", "numpy>=2.0.0"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "pytinybvh"
-version = "1.1.0"
+version = "1.1.0.0.0.0"
 authors = [
     { name = "Florent Le Moël", email = "25004801+FlorentLM@users.noreply.github.com" }
 ]
 description = "Tiny Python bindings for tinybvh"
 readme = "README.md"
 requires-python = ">=3.9"
-
-dependencies = [
-    "numpy>=2.0.0",
-]
+license = { file = "LICENSE" }
+dependencies = ["numpy>=2.0.0"]     # runtime dep
 
 [project.optional-dependencies]
+test = ["pytest", "matplotlib", "trimesh"]
+visualise = ["pyvista", "trimesh"]
+dev = ["pytinybvh[test,visualise]"]
 
-test = [
-    "pytest",
-    "matplotlib",
-    "trimesh",
-]
-visualise = [
-    "pyvista",
-    "trimesh",
-]
-
-dev = [
-    "pytinybvh[test,visualise]",
-]
+[tool.scikit-build]
+minimum-version = "0.9"
+build-dir = "build/{wheel_tag}"

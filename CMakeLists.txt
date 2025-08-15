@@ -17,8 +17,10 @@ execute_process(
         OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 
-# Remove -I prefix from each path and add include_directories
-string(REPLACE "-I" "" PYBIND11_INCLUDES_LIST ${PYBIND11_INCLUDES_RAW})
+if(!WIN32)
+    # Remove -I prefix from each path and add include_directories
+    string(REPLACE "-I" "" PYBIND11_INCLUDES_LIST ${PYBIND11_INCLUDES_RAW})
+endif()
 separate_arguments(PYBIND11_INCLUDES_LIST)
 
 foreach(dir IN LISTS PYBIND11_INCLUDES_LIST)

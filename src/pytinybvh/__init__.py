@@ -1,4 +1,4 @@
-from pytinybvh._pytinybvh import (
+from ._pytinybvh import (
     # Main class
     BVH,
     Ray,

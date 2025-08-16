@@ -132,7 +132,7 @@ install(TARGETS _pytinybvh
 )
 
 # Python stub file (.pyi) for IDE support and type checking
-install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/src/pytinybvh.pyi"
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/src/_pytinybvh.pyi"
         DESTINATION pytinybvh
 )
 

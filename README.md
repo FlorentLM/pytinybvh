@@ -394,7 +394,7 @@ There are others, optimised for GPU traversal.
 
 When you convert a BVH, intermediate layouts can be cached. You can control this with `bvh.set_cache_policy(CachePolicy.All)` (to keep all conversions) or `CachePolicy.ActiveOnly` (default, keeps only the active layout).
 
-**Note:** Converting *from* BVH4_CPU or BVH8_CPU currently causes crashes. I'm investigating.
+**Note:** Converting *from* BVH4_CPU or BVH8_CPU may cause crashes on some platforms. I'm investigating.
 
 #### Directly Accessing Internal Data
 

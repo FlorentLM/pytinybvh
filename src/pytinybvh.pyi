@@ -458,7 +458,7 @@ class BVH:
                         directions: np.ndarray,
                         t_max: Optional[np.ndarray] = None,
                         masks: Optional[np.ndarray] = None,
-                        packet: PacketMode = PacketMode.Never,
+                        packet: PacketMode = PacketMode.Auto,
                         same_origin_eps: float = 1e-6,
                         max_spread: float = 1.0,
                         warn_on_incoherent: bool = True) -> np.ndarray:
@@ -489,7 +489,7 @@ class BVH:
                                              For a ray to test an instance for intersection, the bitwise
                                              AND of the ray's mask and the instance's mask must be non-zero.
                                              If not provided, rays default to mask 0xFFFF (intersect all instances).
-            packet (PacketMode, optional): Choose packet usage strategy. Defaults to Never.
+            packet (PacketMode, optional): Choose packet usage strategy. Defaults to Auto.
             same_origin_eps (float, optional): Epsilon for same-origin test. Default 1e-6.
             max_spread (float, optional): Max spread allowed for a batch (cone angle, in degrees). Default 1.0.
             warn_on_incoherent (bool, optional): Warn when rays differ in origin. Default True.
@@ -523,7 +523,7 @@ class BVH:
                           directions: np.ndarray,
                           t_max: Optional[np.ndarray] = None,
                           masks: Optional[np.ndarray] = None,
-                          packet: PacketMode = PacketMode.Never,
+                          packet: PacketMode = PacketMode.Auto,
                           same_origin_eps: float = 1e-6,
                           max_spread: float = 1.0,
                           warn_on_incoherent: bool = True) -> np.ndarray:
@@ -553,7 +553,7 @@ class BVH:
                                              For a ray to test an instance for intersection, the bitwise
                                              AND of the ray's mask and the instance's mask must be non-zero.
                                              If not provided, rays default to mask 0xFFFF (intersect all instances).
-            packet (PacketMode, optional): Choose packet usage strategy. Defaults to Never.
+            packet (PacketMode, optional): Choose packet usage strategy. Defaults to Auto.
             same_origin_eps (float, optional): Epsilon for same-origin test. Default 1e-6.
             max_spread (float, optional): Max spread allowed for a batch (cone angle, in degrees). Default 1.0.
             warn_on_incoherent (bool, optional): Warn when rays differ in origin. Default True.

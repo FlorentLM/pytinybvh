@@ -22,9 +22,9 @@ See [Features](#Features) and [Roadmap](#Roadmap) below for more details.
 Before installing, you need a few tools on your system:
 
 1.  **A C++20 Compatible Compiler:**
-    -   **Windows:** MSVC (Visual Studio 2019 or newer with the "Desktop development with C++" workload)
-    -   **Linux:** GCC 10+ or Clang 11+
-    -   **macOS:** Xcode with modern Clang
+    *   **Windows:** MSVC (Visual Studio 2019 or newer with the "Desktop development with C++" workload)
+    *   **Linux:** GCC 10+ or Clang 11+
+    *   **macOS:** Xcode with modern Clang
 2.  **Python 3.9+**
 3.  **Git:** Required for cloning the repository and its dependencies
 
@@ -50,14 +50,14 @@ The C++ dependency (`tinybvh`) is included as a Git submodule.
     ```
 
 3.  **Compile and install:**
-    This command will automatically download Python dependencies (if any) and compile the C++ extension module.
+    This command will automatically download Python dependencies and compile the C++ extension module.
 
     ```bash
     uv pip install .
     ```
-    
+
     This installs the core `pytinybvh` library. To include packages for testing and visualisation, you can install "extras":
-    
+
     ```bash
     # Install everything needed for development (testing, visualisation)
     uv pip install .[dev]
@@ -67,11 +67,9 @@ The C++ dependency (`tinybvh`) is included as a Git submodule.
     uv pip install .[visualise]
     ```
 
-If the process completes without errors, the `pytinybvh` module is now installed and ready to be used in your virtual environment.
-
 4. **Use in other projects:**
-    From the virtual environment of your other project:
-    
+   From the virtual environment of your other project:
+
    ```bash
     uv pip install /path/to/pytinybvh
     ```
@@ -82,40 +80,28 @@ For users building from source who want maximum performance on their specific ma
 
 ### 1. Parallelization
 
-The batch intersection and occlusion methods (`intersect_batch`, `is_occluded_batch`) are parallelized (using OpenMP) to take advantage of multiple CPU cores. The setup script should automatically detect if your compiler supports OpenMP and enable it.
-
--   **GCC/Clang:** Requires `-fopenmp`.
--   **MSVC:** Requires `/openmp`.
+The batch intersection and occlusion methods (`intersect_batch`, `is_occluded_batch`) take advantage of multiple CPU cores. The build script automatically detects if your compiler supports OpenMP and enables it.
 
 If your compiler does not support OpenMP, `pytinybvh` will compile and run in serial (single-threaded) mode. You will see a message during installation indicating whether parallelization is enabled.
 
-### 2. SIMD acceleration
+### 2. SIMD Acceleration (AVX2, NEON, etc.)
 
-`tinybvh` also includes highly optimized code paths that use AVX2 and FMA instructions for significant speedups in BVH traversal on CPU.
+`tinybvh` includes highly optimized code paths that use SIMD (Single Instruction, Multiple Data) instructions for significant speedups in BVH traversal. The build script automatically detects the best available instruction set at **compile time**.
 
-On x86-64, `pytinybvh` will automatically enable the highest available SIMD target:
+On **x86-64**, it checks for and enables the highest supported level:
+- 1. **AVX2** (with FMA)
+- 2. **SSE4.2**
+- 3. Baseline scalar code (if neither is supported)
 
-- AVX2 (with FMA) if supported by your compiler/CPU target 
-- AVX if AVX2 is not available 
-- Baseline scalar code otherwise
+On **ARM** (aarch64/armv7), it checks for and enables **NEON**.
 
-On ARM platforms:
+**IMPORTANT:** SIMD detection happens at **build time**. A binary wheel built with AVX2 will not run on a machine that does not support AVX2. `pytinybvh` includes a runtime check that will raise an error on startup if it detects such an incompatibility.
 
-- ARM64 (aarch64): NEON/ASIMD is part of the baseline ISA and is enabled automatically, no special flags are required.
-- ARMv7 (32-bit): If supported by your toolchain/OS, the build will try to enable NEON. Some environments also require a matching float-ABI flag (e.g. `-mfloat-abi=hard` or `-mfloat-abi=softfp`).
-If you need a specific ABI, set it via CFLAGS, for instance:
-
-```bash
-CFLAGS="-mfpu=neon -mfloat-abi=hard" uv pip install .
-```
-
-Alernatively, you can also disable SIMD (AVX, AVX2, NEON) entirely by setting the `PYTINYBVH_NO_SIMD` environment variable:
+To force a baseline build without any SIMD optimizations, set the `PYTINYBVH_NO_SIMD` environment variable before installing:
 
 ```bash
 PYTINYBVH_NO_SIMD=1 uv pip install .
 ```
-
-**IMPORTANT:** SIMD detection happens at **build time**, so the built wheel _won't_ work on a machine with _different_ capabilities.
 
 ## Usage examples
 
@@ -197,9 +183,7 @@ aabbs_np = np.array([
 # This is a zero-copy operation.
 bvh = BVH.from_aabbs(aabbs_np)
 ```
-
-**Note:** When using a BVH built from AABBs, intersection tests are performed directly against the bounding boxes.
-The hit record will contain the primitive ID of the AABB, and the `u` and `v` coordinates will contain 2D position of the hit on the specific face of the box that was intersected.
+**Note:** When using a BVH built from AABBs, intersection tests are performed directly against the boxes. The hit record's `u` and `v` coordinates will contain the 2D position of the hit on the intersected face of the box.
 
 ---
 
@@ -214,7 +198,7 @@ The easiest way to build a BVH from a list of triangles.
 import numpy as np
 from pytinybvh import BVH
 
-# An array of shape (N, 3, 3), or an array of shape (N, 9)
+# An array of shape (N, 3, 3) or (N, 9)
 triangles_np = np.array([
     [[0, 0, 0], [1, 0, 0], [0, 1, 0]],
     [[2, 2, 2], [3, 2, 2], [2, 3, 2]],
@@ -235,12 +219,11 @@ from pytinybvh import BVH
 
 points_np = np.random.rand(1000, 3).astype(np.float32)
 
-# This creates AABBs and then builds the BVH.
+# This creates AABBs for the build, but uses ray-sphere tests at query time.
 bvh = BVH.from_points(points_np, radius=0.01)
 
 ```
-
-**Note:** Since the primitives are spheres, the `u` and `v` coordinates represent the spherical coordinates (lat, lon) of the intersection point.
+**Note:** For sphere primitives, the hit record's `u` and `v` coordinates represent the spherical texture coordinates of the intersection point.
 
 ---
 
@@ -266,6 +249,8 @@ if ray.prim_id != -1:
 
 #### Batch of Rays
 
+For high performance, tracing rays in a batch is recommended. `pytinybvh` provides fine-grained control over how batches are traversed.
+
 ```python
 import numpy as np
 from pytinybvh import BVH, BuildQuality, PacketMode
@@ -275,15 +260,15 @@ origins = np.array([[0.5, 0.2, -5], [10, 10, -5]], dtype=np.float32)
 directions = np.array([[0, 0, 1], [0, 0, 1]], dtype=np.float32)
 
 # Returns a structured numpy array with hit records
-# By default (PacketMode.Never), pytinybvh does not use 256-ray packet traversal.
+#
+# PacketMode.Never: Always use scalar traversal. Safest and always correct.
 hits = bvh.intersect_batch(origins, directions, packet=PacketMode.Never)
-
-# PacketMode.Auto enables it only when safe/beneficial (rays share the same origin on a standard triangle BVH).
-# NOTE: It doesn't currently enforce your rays to form a frustum (they should! see note at the bottom of the README)
-# hits = bvh.intersect_batch(origins, directions, packet=PacketMode.Auto)
-
-# Or force packet traversal (this is unsafe if rays origins differ and will warn unless disabled):
-# hits = bvh.intersect_batch(origins, directions, packet=PacketMode.Force, same_origin_eps=1e-6, warn_on_incoherent=True)
+#
+# PacketMode.Auto (default): Use 256-ray packet traversal only when safe and beneficial
+# (e.g. for standard triangle BVHs where rays in a chunk share the same origin).
+#
+# PacketMode.Force: Force packet traversal. Can be faster but is unsafe if rays are not
+# coherent (e.g. different origins, wide spread of directions).
 
 # You can access columns like a dictionary
 hit_distances = hits['t']
@@ -320,47 +305,48 @@ occluded = bvh.is_occluded_batch(origins, directions, packet=PacketMode.Auto)
 
 # Useful derived mask:
 visible = ~occluded
-print("Visible rays:", np.where(visible)[0].tolist())
+print("Visible rays:", np.where(visible).tolist())
 ```
 ---
 
-### Advanced Usage: Building a Scene with TLAS
+### Advanced Usage
 
-A Top-Level Acceleration Structure (TLAS) is a BVH built over other BVHs (called Bottom-Level Acceleration Structures, or BLASes). This is the standard method for creating complex scenes with multiple objects, each with its own transformation (position, rotation, scale).
+#### Building a Scene with TLAS
+
+A Top-Level Acceleration Structure (TLAS) is a BVH built over other BVHs (called Bottom-Level Acceleration Structures, or BLASes). This is the standard method for creating complex scenes with multiple transformed objects.
 
 ```python
 import numpy as np
 from pytinybvh import BVH, BuildQuality, instance_dtype
 
 # Create your BLASes (individual object BVHs)
-cube_tris = load_cube_triangles()
-sphere_tris = load_sphere_triangles()
+cube_tris, sphere_tris = some_function_to_load_geometries() # example
 
 bvh_cube = BVH.from_triangles(cube_tris)
 bvh_sphere = BVH.from_triangles(sphere_tris)
-
 blases = [bvh_cube, bvh_sphere]
 
-# Create an instance array
-# This structured array tells the TLAS where to place each BLAS.
+# Create a structured array describing each instance.
 instances = np.zeros(3, dtype=instance_dtype)
 
 # Instance 0: A cube at the origin
-instances[0]['blas_id'] = 0  # Index into the `blases` list
-instances[0]['transform'] = np.eye(4, dtype=np.float32)
+instances['blas_id'] = 0  # Index into the `blases` list
+instances['transform'] = np.eye(4, dtype=np.float32)    # Identity matrix
+instances['mask'] = 0b0001 # Assign a mask for filtering
 
 # Instance 1: Another cube, moved to the right
-transform_b = np.eye(4, dtype=np.float32)
-transform_b[3, 0] = 5.0 # Translate 5 units on X
+transform_b = np.eye(4, dtype=np.float32)   # Identity matrix
+transform_b[3, 0] = 5.0     # translation in x
 instances[1]['blas_id'] = 0
 instances[1]['transform'] = transform_b
+instances[1]['mask'] = 0b0001
 
 # Instance 2: A sphere, scaled up and moved left
-transform_c = np.eye(4, dtype=np.float32)
-transform_c[0,0] = transform_c[1,1] = transform_c[2,2] = 2.0 # Scale by 2
-transform_c[3, 0] = -5.0 # Translate -5 units on X
+transform_c = np.diag([2.0, 2.0, 2.0, 1.0]).astype(np.float32) # Scaling matrix
+transform_c[3, 0] = -5.0    # translation in x
 instances[2]['blas_id'] = 1
 instances[2]['transform'] = transform_c
+instances[2]['mask'] = 0b0010
 
 # Build the TLAS
 tlas = BVH.build_tlas(instances, blases)
@@ -370,146 +356,76 @@ ray = Ray(origin=[-10, 0, 0], direction=[1, 0, 0])
 tlas.intersect(ray)
 
 if ray.prim_id != -1:
-    print(f"Hit instance {ray.inst_id} (BLAS {blases[ray.inst_id].prim_count} tris)")
+    print(f"Hit instance {ray.inst_id} (BLAS with {blases[ray.inst_id].prim_count} tris)")
     print(f"Hit primitive {ray.prim_id} within that instance.")
 ```
 
-### Advanced Usage: Memory Layouts and Performance
+#### Memory Layouts and Performance
 
 `pytinybvh` exposes `tinybvh`'s conversion system. This allows you to convert the internal memory structure of the BVH to different layouts, each optimized for specific hardware instructions (like AVX or NEON). Converting to a supported layout can significantly speed up batch intersection queries.
 
-#### Converting a BVH
-
-You can convert a BVH in-place using the `convert_to()` method.
-
 ```python
-from pytinybvh import BVH, Layout, BuildQuality
+from pytinybvh import BVH, Layout, BuildQuality, hardware_info
 
 # Build a BVH as usual
 bvh = BVH.from_vertices(vertices_4d, quality=BuildQuality.Balanced)
 print(f"Initial layout: {bvh.layout}")
 
-# Convert to a Structure-of-Arrays (SoA) layout, which is faster for
-# batch traversal on CPUs with AVX or NEON support.
-try:
-    bvh.convert_to(Layout.SoA, strict=True)
-    print(f"Successfully converted to: {bvh.layout}")
-except RuntimeError as e:
-    print(f"Could not convert to SoA: {e}")
-```
-
-#### Example layouts
-
--   `Layout.Standard`: The default. Well-balanced and required for certain operations like `refit()` and `optimize()`.
--   `Layout.SoA`: **Structure of Arrays.** Optimized for SIMD traversal on CPU. Requires AVX or NEON support.
--   `Layout.BVH4_CPU`: A 4-wide BVH layout. Requires SSE.
--   `Layout.BVH8_CPU`: An 8-wide BVH layout. Offers the highest performance for batch traversal on modern CPUs. Requires AVX2 and FMA.
-
-#### Checking Hardware Support
-
-You can programmatically check what your system's CPU supports at both compile-time and runtime. This is useful for selecting the best layout or debugging issues.
-
-```python
-from pytinybvh import hardware_info
-
+# Programmatically check hardware support and convert
 info = hardware_info()
-print("Compile-time AVX2 support:", info['compile_time']['simd']['AVX2'])
-print("Runtime AVX2 support:", info['runtime']['simd']['AVX2'])
 
-# You can use this to dynamically choose a layout
 if info['runtime']['simd']['AVX2']:
+    print("AVX2 supported, converting to BVH8_CPU for best performance.")
     bvh.convert_to(Layout.BVH8_CPU)
-elif info['runtime']['simd']['AVX']:
+    
+elif info['runtime']['simd']['AVX'] or info['runtime']['simd']['NEON']:
+    print("AVX/NEON supported, converting to SoA.")
     bvh.convert_to(Layout.SoA)
+
+print(f"New layout: {bvh.layout}")
 ```
+Some example layouts:
+-   `Layout.Standard`: The default. Required for operations like `refit()` and `optimize()`.
+-   `Layout.SoA`: Structure of Arrays. Optimized for SIMD traversal. Requires AVX or NEON.
+-   `Layout.BVH4_CPU`: A 4-wide BVH layout. Requires SSE.
+-   `Layout.BVH8_CPU`: An 8-wide BVH layout. Offers the highest performance for batch traversal on modern CPUs. Requires AVX2.
 
-#### Caching Converted Layouts
+There are others, optimised for GPU traversal.
 
-When you convert a BVH, `pytinybvh` can cache the intermediate structures to make subsequent conversions faster. You can control this behavior:
+When you convert a BVH, intermediate layouts can be cached. You can control this with `bvh.set_cache_policy(CachePolicy.All)` (to keep all conversions) or `CachePolicy.ActiveOnly` (default, keeps only the active layout).
 
-```python
-from pytinybvh import CachePolicy
+**Note:** Converting *from* BVH4_CPU or BVH8_CPU currently causes crashes. I'm investigating.
 
-# Policy: All - Keep all generated layouts in memory
-bvh.set_cache_policy(CachePolicy.All)
-bvh.convert_to(Layout.BVH8_CPU)     # Creates MBVH8 and BVH8_CPU internally
-print(bvh.cached_layouts)           # Shows [Layout.MBVH8, Layout.BVH8_CPU]
+#### Directly Accessing Internal Data
 
-# Policy: ActiveOnly (default) - Discard all layouts except the active one and the base standard layout
-bvh.set_cache_policy(CachePolicy.ActiveOnly)
-bvh.convert_to(Layout.SoA)
-print(bvh.cached_layouts)           # Shows [Layout.SoA]
-
-# You can also manually clear the cache
-bvh.clear_cached_layouts()
-```
-
-### Advanced usage: directly access internal BVH data and source geometry
-
-#### Access individual arrays
+For advanced applications like uploading BVH data to a GPU, you can get zero-copy views of all internal buffers.
 
 ```python
 import numpy as np
 from pytinybvh import BVH
 
-vertices = np.array([
-    [0, 0, 0, 0],
-    [1, 0, 0, 0],
-    [1, 1, 0, 0],
-    [0, 1, 0, 0],
-], dtype=np.float32)
-
-indices = np.array([
-    [0, 1, 3],
-    [1, 2, 3],
-], dtype=np.uint32)
-
+# Example with an indexed mesh
+vertices = np.random.rand(100, 4).astype(np.float32)
+indices = np.random.randint(0, 100, (50, 3), dtype=np.uint32)
 bvh = BVH.from_indexed_mesh(vertices, indices)
 
-print(id(vertices))
-# prints: 1811321650896 (example address)
-print(id(bvh.source_vertices))
-# prints: 1811321650896 (same address)
-print(bvh.source_indices is indices)
-# prints: True  (it is the same object)
-```
+# These properties are direct aliases to the original arrays
+assert bvh.source_vertices is vertices
+assert bvh.source_indices is indices
 
-
-#### Access everything with `get_buffers()`
-
-```python
-import numpy as np
-from pytinybvh import BVH
-
-# Example with AABBs
-aabbs = np.random.rand(100, 2, 3).astype(np.float32)
-bvh_aabbs = BVH.from_aabbs(aabbs)
-
-buffers = bvh_aabbs.get_buffers()
+# Get all internal buffers for the current layout
+buffers = bvh.get_buffers()
 print(buffers.keys())
-# Expected output: dict_keys(['nodes', 'prim_indices', 'aabbs', 'inv_extents'])
-# buffers['aabbs'] is a zero-copy reference to the original `aabbs` numpy array
+# dict_keys(['nodes', 'prim_indices', 'vertices', 'indices'])
 
-# Example with Spheres
-points = np.random.rand(50, 3).astype(np.float32)
-bvh_spheres = BVH.from_points(points, radius=0.1)
+# The 'nodes' and 'prim_indices' are read-only numpy views into the C++ BVH data
+bvh_nodes = buffers['nodes']
 
-buffers = bvh_spheres.get_buffers()
-print(buffers.keys())
-# Expected output: dict_keys(['nodes', 'prim_indices', 'points', 'sphere_radius'])
-# buffers['points'] is a zero-copy reference to the original `points` numpy array
-# buffers['sphere_radius'] is 0.1
-
-# Example with Triangles
-triangles = np.array([
-    [[0, 0, 0], [1, 0, 0], [0, 1, 0]],
-    [[2, 2, 2], [3, 2, 2], [2, 3, 2]],
-], dtype=np.float32)
-bvh_tris = BVH.from_triangles(triangles)
-
-buffers = bvh_tris.get_buffers()
-print(buffers.keys())
-# Expected output: dict_keys(['nodes', 'prim_indices', 'vertices'])
+# If we convert the layout, the available buffers change
+bvh.convert_to(Layout.BVH8_CPU)
+buffers_bvh8 = bvh.get_buffers()
+print(buffers_bvh8.keys())
+# dict_keys(['packed_data', 'vertices', 'indices'])
 ```
 
 ---
@@ -518,19 +434,10 @@ print(buffers.keys())
 
 The test suite uses `pytest`.
 
-1.  **Install test dependencies:**
+1.  **Install test dependencies:** `uv pip install .[test]`
+2.  **Run the test suite:** `pytest`
 
-    ```bash
-    # Install with the [test] extra if you haven't already
-    uv pip install .[test]
-    ```
-   
-2.  **Run the test suite:**
-
-    ```bash
-    pytest
-    ```
-    The tests include a visualisation of the test scene which can be run by executing `test_pytinybvh.py` directly (`python test_pytinybvh.py`). This requires the `visualise` dependencies.
+The tests include a visualiser which can be run by executing `test_pytinybvh.py` directly. This requires the `visualise` dependencies.
 
 ## Running the demo viewer
 
@@ -538,25 +445,8 @@ I also included a simple `visualise.py` script that opens a 3D viewer.
 
 1.  **Install visualisation dependencies:**
 
-    ```bash
-    # Install with the [visualise] extra if you haven't already
-    uv pip install .[visualise]
-    ```
-   
-2.  **Configure the script:**
-    Open `visualise.py` and modify the configuration at the top:
-
-    ```python
-    TEST_SCENE_FILE = Path('sneks.ply')  # File to load
-    POINTS_ONLY = False                  # Set True for points, False for triangles
-    VISUALISE_DEPTH = 7                  # Max BVH depth to display
-    ```
-
-3.  **Run it:**
-
-    ```bash
-    python visualise.py
-    ```
+1.  **Install visualisation dependencies:** `uv pip install .[visualise]`
+2.  **Configure and run the script:** Edit the file paths at the top of `visualise.py` and run it with `python visualise.py`.
 
 ## Project Structure
 
@@ -569,6 +459,8 @@ pytinybvh/
 ├── img/                    # Images used in this README
 │   └── screenshot.png
 ├── src/
+│   ├── pytinybvh/
+│   │   └── __init__.py
 │   ├── pytinybvh.cpp       # C++ wrapper source
 │   ├── capabilities.h      # C++ header to detect hardware capabilities
 │   └── pytinybvh.pyi       # Python stub file
@@ -576,7 +468,6 @@ pytinybvh/
 ├── .gitattributes
 ├── .gitmodules             # Git submodule configuration
 ├── pyproject.toml          # Python build configuration
-├── setup.py                # Build script for the C++ extension
 ├── test_pytinybvh.py       # Demo and tests
 ├── visualise.py            # View the BVH with the geometry in 3D
 ├── LICENSE                 # MIT License
@@ -605,23 +496,15 @@ Current design choices might evolve
 
 ## Roadmap
 
-Immediate priorities:
-
-- [ ] Investigate and fix instability with very large batch intersections
-- [ ] Add mutexes for concurrent access to a single BVH object from multiple Python threads
-- [ ] Properly time in real life scenario whether using `Intersect256()` in occlusion queries is useful
-
+- [ ] Investigate and fix rare instability with very large batch intersections on certain layouts.
+- [ ] Add mutexes to ensure thread-safety for concurrent access to a single BVH object from multiple Python threads.
 
 ## Remarks
 
-### A Note on performance and concurrency (Another update! v1.1.0)
-
-- **Multi-core:** Both `intersect_batch` and `is_occluded_batch` run in parallel on all geometry types (using OpenMP when available).
-- **Packet traversal:** For standard triangle BVHs (BLAS), both methods can use 256-ray packet traversal when rays share the same origin. This is controlled via `PacketMode`. For now it is **Never** by default.
-- **Occlusion specifics:** `is_occluded_batch` uses the packet *intersection* kernel internally (when eligible) and reduces to booleans. For TLAS builds or custom geometry (AABBs / spheres), it falls back to scalar.
-- **Alignment:** You don't need to do anything special, pytinybvh builds a 64-byte aligned internal ray buffer so SIMD loads are always safe. Since it's for a batched call, this one-time cost is negligible anyway.
-- **Shared origin:** If rays don't share the same origin, `Auto` mode falls back to scalar and emits a warning (once). You can silence it with `warn_on_incoherent=False` or force packets with `PacketMode.Force` (unsafe).
-- **Coherence**: Currently, `tinybvh` assumes the rays must be coherent and form a frustum! If you pass rays with a same origin but random directions... things might break :D
+A note on performance for batch queries:
+- **Multi-core:** `intersect_batch` and `is_occluded_batch` run in parallel on all geometry types.
+- **Packet Traversal:** For standard triangle BLASes, you can disable 256-ray packet traversal using `PacketMode.Never` or force it with `PacketMode.Force`. The `Auto` and `Force` modes still include safety checks to ensure rays in a packet chunk share an origin.
+- **Coherence:** `tinybvh`'s packet kernels assume rays are coherent (i.e. they form a frustum). Passing rays with a shared origin but random directions may lead to incorrect results or poor performance in `Force` mode. `Auto` mode will appropriately avoid packets in such case.
 
 ## Acknowledgements
 
@@ -629,9 +512,9 @@ Immediate priorities:
 
 ## Test Assets
 
-The `sneks` model included in this repository is an original model. Feel free to reuse it. :)
+The `sneks.ply` model included in this repository is an original model. Feel free to reuse it. :)
 
 -   **Source:** [here](https://github.com/FlorentLM/pytinybvh/blob/main/assets/sneks.ply)
 -   **Size:** 9.37 Mb
--   **Vertices:** 169 678
--   **Triangles:** 338 120
+-   **Vertices:** 169,678
+-   **Triangles:** 338,120

@@ -1271,7 +1271,7 @@ public:
         const nb::ndarray<const float>& origins_np,
         const nb::ndarray<const float>& directions_np,
         const nb::object& t_max_obj, const nb::object& masks_obj,
-        PacketMode packet = PacketMode::Never,
+        PacketMode packet = PacketMode::Auto,
         float same_origin_eps = 1e-6f,
         float max_cone_deg = 1.0f,
         // float tmax_band_ratio = 8.0f,
@@ -1566,7 +1566,7 @@ public:
         const nb::ndarray<const float>& origins_np,
         const nb::ndarray<const float>& directions_np,
         const nb::object& t_max_obj, const nb::object& masks_obj,
-        PacketMode packet = PacketMode::Never,
+        PacketMode packet = PacketMode::Auto,
         float same_origin_eps = 1e-6f,
         float max_cone_deg = 1.0f,
         // float tmax_band_ratio = 8.0f,
@@ -2670,7 +2670,7 @@ NB_MODULE(_pytinybvh, m) {
                                                      For a ray to test an instance for intersection, the bitwise
                                                      AND of the ray's mask and the instance's mask must be non-zero.
                                                      If not provided, rays default to mask 0xFFFF (intersect all instances).
-                    packet (PacketMode, optional): Choose packet usage strategy. Defaults to Never.
+                    packet (PacketMode, optional): Choose packet usage strategy. Defaults to Auto.
                     same_origin_eps (float, optional): Epsilon for same-origin test. Default 1e-6.
                     max_spread (float, optional): Max spread allowed for a batch (cone angle, in degrees). Default 1.0.
                     warn_on_incoherent (bool, optional): Warn when rays differ in origin. Default True.
@@ -2684,7 +2684,7 @@ NB_MODULE(_pytinybvh, m) {
             ))",
             nb::arg("origins"), nb::arg("directions"),
             nb::arg("t_max") = nb::none(), nb::arg("masks") = nb::none(),
-            nb::arg("packet") = PacketMode::Never,
+            nb::arg("packet") = PacketMode::Auto,
             nb::arg("same_origin_eps") = 1e-6f,
             nb::arg("max_spread") = 1.0f,
             nb::arg("warn_on_incoherent") = true)
@@ -2719,7 +2719,7 @@ NB_MODULE(_pytinybvh, m) {
                                                      For a ray to test an instance for intersection, the bitwise
                                                      AND of the ray's mask and the instance's mask must be non-zero.
                                                      If not provided, rays default to mask 0xFFFF (intersect all instances).
-                    packet (PacketMode, optional): Choose packet usage strategy. Defaults to Never.
+                    packet (PacketMode, optional): Choose packet usage strategy. Defaults to Auto.
                     same_origin_eps (float, optional): Epsilon for same-origin test. Default 1e-6.
                     max_spread (float, optional): Max spread allowed for a batch (cone angle, in degrees). Default 1.0.
                     warn_on_incoherent (bool, optional): Warn when rays differ in origin. Default True.
@@ -2729,7 +2729,7 @@ NB_MODULE(_pytinybvh, m) {
            ))",
             nb::arg("origins"), nb::arg("directions"),
             nb::arg("t_max") = nb::none(), nb::arg("masks") = nb::none(),
-            nb::arg("packet") = PacketMode::Never,
+            nb::arg("packet") = PacketMode::Auto,
             nb::arg("same_origin_eps") = 1e-6f,
             nb::arg("max_spread") = 1.0f,
             nb::arg("warn_on_incoherent") = true)

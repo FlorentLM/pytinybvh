@@ -492,11 +492,10 @@ Some things are still a little bit unstable for now:
 - Occasional crashes when intersecting a large number of rays after layout conversion. Investigating this.
 
 Current design choices might evolve
-- I might be dropping the use of `Intersect256()` in occlusion tests, as I am not sure it's actually faster in a real-life situation
+- I might be dropping the use of `Intersect256()` in batched occlusion tests, as I am not sure it's actually faster in a real-life situation
 
 ## Roadmap
 
-- [ ] Investigate and fix rare instability with very large batch intersections on certain layouts.
 - [ ] Add mutexes to ensure thread-safety for concurrent access to a single BVH object from multiple Python threads.
 
 ## Remarks

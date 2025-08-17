@@ -2473,6 +2473,61 @@ public:
 };
 
 
+// Thin C++ class to wrap the tinybvh::BVHVerbose object
+struct PyBVHVerbose {
+    std::unique_ptr<tinybvh::BVH_Verbose> bvhverbose;
+
+    PyBVHVerbose() : bvhverbose(std::make_unique<tinybvh::BVH_Verbose>()) {}
+
+    static std::unique_ptr<PyBVHVerbose> from_bvh(const PyBVH& src, bool compact=true) {
+        if (!src.base_) throw nb::value_error("empty BVH");
+
+        auto out = std::make_unique<PyBVHVerbose>();
+        out->bvhverbose->context = src.base_->context;
+        out->bvhverbose->ConvertFrom(*src.base_, compact);
+        return out;
+    }
+
+    [[nodiscard]] float sah_cost(const uint32_t node=0) const {
+        return bvhverbose->SAHCost(node);
+    }
+
+    [[nodiscard]] int32_t node_count() const {
+        return bvhverbose->NodeCount();
+    }
+
+    // [[nodiscard]] int32_t prim_count(const uint32_t node=0) const {
+    //     return bvhverbose->PrimCount(node);
+    // }
+
+    void refit(const uint32_t node=0, const bool skip_leafs=false) const {
+        bvhverbose->Refit(node, skip_leafs);
+    }
+
+    void compact() const {
+        bvhverbose->Compact();
+    }
+    void sort_indices() const {
+        bvhverbose->SortIndices();
+    }
+
+    void optimize(const uint32_t iters=25, const bool extreme=false, const bool stochastic=false) const {
+        bvhverbose->Optimize(iters, extreme, stochastic);
+    }
+
+    // Convert back to a standard BVH object (deep copy)
+    [[nodiscard]] std::unique_ptr<PyBVH> to_bvh(const bool compact=true) const {
+        auto dst = std::make_unique<PyBVH>();
+        dst->base_ = std::make_unique<tinybvh::BVH>();
+        dst->base_->context = bvhverbose->context;
+        dst->base_->ConvertFrom(*bvhverbose, compact);
+        dst->active_bvh_ = dst->base_.get();
+        dst->active_layout_ = Layout::Standard;
+        return dst;
+    }
+};
+
+
 // =============================================== nanobind module =====================================================
 
 NB_MAKE_OPAQUE(TLASInstance);
@@ -2581,6 +2636,7 @@ NB_MODULE(_pytinybvh, m) {
         nb::arg("layout"), nb::arg("for_traversal") = true);
 
     // Main Python classes
+
     nb::class_<PyRay>(m, "Ray", "Represents a ray for intersection queries.")
 
         .def("__init__", [](PyRay *self, const tinybvh::bvhvec3& origin, const tinybvh::bvhvec3& direction, float t, uint32_t mask) {
@@ -2636,6 +2692,115 @@ NB_MODULE(_pytinybvh, m) {
             return "<pytinybvh.Ray (origin=" + origin_s + " dir=" + dir_s + ", Miss)>";
         });
 
+    nb::class_<PyBVHVerbose>(m, "BVHVerbose", R"((
+        Editable/inspectable BVH representation.
+
+        This layout exposes explicit nodes and indices for diagnostics, SAH analysis,
+        local optimizations, and maintenance (refit / compaction).
+
+        Convert from/to the compact `BVH` with `from_bvh()` and `to_bvh()`.
+        ))")
+
+        .def(nb::init<>())
+
+        .def_static("from_bvh", &PyBVHVerbose::from_bvh,
+            R"((
+            Creates a verbose BVH from a compact `BVH`.
+
+            Args:
+                bvh (BVH): Source BVH to convert.
+                compact (bool): If True (default), compacts nodes during conversion.
+
+            Returns:
+                BVHVerbose: New verbose tree (deep copy).
+            ))",
+            nb::arg("bvh"),
+            nb::arg("compact") = true)
+
+        .def("sah_cost_at", &PyBVHVerbose::sah_cost,
+            R"((
+            Computes the Surface Area Heuristic (SAH) cost for a node or the whole tree.
+
+            Args:
+                node (int): Node index to evaluate (0 = root).
+
+            Returns:
+                int
+            ))",
+            nb::arg("node") = 0)
+
+        .def_prop_ro("node_count", &PyBVHVerbose::node_count,
+            "Total number of nodes in the verbose tree.")
+
+        // .def_prop_ro("prim_count",[](const PyBVHVerbose& self) -> int {
+        //     return self.prim_count(0);
+        // }, "Total number of primitives in the verbose tree.")
+
+        .def_prop_ro("sah_cost",[](const PyBVHVerbose& self) -> float {
+            return self.sah_cost(0);
+        }, "Computes the Surface Area Heuristic (SAH) cost of the verbose tree.")
+
+//         .def("prim_count_at", &PyBVHVerbose::prim_count,
+//             R"((
+//             Number of primitives referenced under a node.
+//
+//             Args:
+//                 node (int): Node index (0 = root).
+//
+//             Returns:
+//                 int
+//             ))",
+//             nb::arg("node") = 0)
+
+        .def("refit", &PyBVHVerbose::refit,
+            R"((
+            Refits the AABBs starting at `node`.
+
+            Args:
+                node (int): Subtree root to refit (0 = entire tree).
+                skip_leaves (bool): If True, leaf bounds are assumed up to date and are not recomputed (default False).
+            ))",
+            nb::arg("node") = 0,
+            nb::arg("skip_leaves") = false)
+
+        .def("compact", &PyBVHVerbose::compact,
+            R"((
+            Removes dead/degenerate nodes and pack arrays tightly.
+
+            Useful after structural edits to ensure a compact representation.
+            ))")
+
+        .def("sort_indices", &PyBVHVerbose::sort_indices,
+            R"((
+            Reorders primitive indices to improve spatial/streaming coherence.
+
+            This can improve downstream cache behaviour.
+            ))")
+
+        .def("optimize", &PyBVHVerbose::optimize,
+            R"((
+            Runs local BVH optimizations to reduce SAH cost.
+
+            Args:
+                iterations (int): Number of improvement passes (default 25).
+                extreme (bool): Enables more aggressive (but slower) transformations. Default False.
+                stochastic (bool): Adds randomness to escape local minima. Default False.
+            ))",
+            nb::arg("iterations") = 25,
+            nb::arg("extreme") = false,
+            nb::arg("stochastic") = false)
+
+        .def("to_bvh", &PyBVHVerbose::to_bvh,
+            R"((
+            Converts this verbose BVH back to a compact `BVH`.
+
+            Args:
+                compact (bool): Compacts the resulting BVH layout.
+
+            Returns:
+                A new compact BVH (deep copy).
+            ))",
+            nb::arg("compact") = true);
 
     nb::class_<PyBVH>(m, "BVH", "A Bounding Volume Hierarchy for fast ray intersections.")
 

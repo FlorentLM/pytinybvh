@@ -880,3 +880,116 @@ class BVH:
     def cached_layouts(self) -> List[Layout]:
         """A list of the BVH layouts currently held in the cache."""
         ...
+
+class BVHVerbose:
+    """
+    Editable/inspectable BVH representation.
+
+    This layout exposes explicit nodes and indices for diagnostics, SAH analysis,
+    local optimizations, and maintenance (refit / compaction).
+
+    Convert from/to the compact `BVH` with `from_bvh()` and `to_bvh()`.
+    """
+
+    @staticmethod
+    def from_bvh(bvh: BVH, compact: bool = True) -> BVHVerbose:
+        """
+        Creates a verbose BVH from a compact `BVH`.
+
+        Args:
+            bvh (BVH): Source BVH to convert.
+            compact (bool): If True (default), compacts nodes during conversion.
+
+        Returns:
+            BVHVerbose: New verbose tree (deep copy).
+        """
+        ...
+
+    @staticmethod
+    def to_bvh(compact: bool = True) -> BVH:
+        """
+        Converts this verbose BVH back to a compact `BVH`.
+
+        Args:
+            compact (bool): Compacts the resulting BVH layout.
+
+        Returns:
+            A new compact BVH (deep copy).
+        """
+        ...
+
+    def sah_cost_at(self, node: int = 0) -> int:
+        """
+        Computes the Surface Area Heuristic (SAH) cost for a node or the whole tree.
+
+        Args:
+            node (int): Node index to evaluate (0 = root).
+
+        Returns:
+            int
+        """
+        ...
+
+    @property
+    def node_count(self) -> int:
+        """Total number of nodes in the verbose tree."""
+        ...
+
+    # @property
+    # def prim_count(self) -> int:
+    #     """Total number of nodes in the verbose tree."""
+    #     ...
+
+    @property
+    def sah_cost(self) -> int:
+        """Computes the Surface Area Heuristic (SAH) cost of the verbose tree."""
+        ...
+
+    # def prim_count_at(self, node: int = 0) -> int:
+    #     """
+    #     Number of primitives referenced under a node.
+    #
+    #     Args:
+    #         node (int): Node index (0 = root).
+    #
+    #     Returns:
+    #         int
+    #     """
+    #     ...
+
+    def refit(self, node: int = 0, skip_leaves: bool = False) -> None:
+        """
+        Refits the AABBs starting at `node`.
+
+        Args:
+            node (int): Subtree root to refit (0 = entire tree).
+            skip_leaves (bool): If True, leaf bounds are assumed up to date and are not recomputed (default False).
+        """
+        ...
+
+    def compact(self) -> None:
+        """
+        Removes dead/degenerate nodes and pack arrays tightly.
+
+        Useful after structural edits to ensure a compact representation.
+        """
+        ...
+
+    def sort_indices(self) -> None:
+        """
+        Reorders primitive indices to improve spatial/streaming coherence.
+
+        This can improve downstream cache behaviour.
+        """
+        ...
+
+    def optimize(self, iterations: int = 0, extreme: bool = False, stochastic: bool = False) -> None:
+        """
+        Runs local BVH optimizations to reduce SAH cost.
+
+        Args:
+            iterations (int): Number of improvement passes (default 25).
+            extreme (bool): Enables more aggressive (but slower) transformations. Default False.
+            stochastic (bool): Adds randomness to escape local minima. Default False.
+        """
+        ...

@@ -2370,6 +2370,67 @@ public:
         return cached;
     }
 
+    void set_instance_transform(size_t i, nb::ndarray<const float, nb::shape<4,4>, nb::c_contig> M) {
+        if (!is_tlas()) throw nb::value_error("Not a TLAS");
+
+        if (i >= instances_data.size()) throw nb::index_error("instance index out of range");
+
+        // copy 4x4 row-major float matrix into tiny_bvh's 16-float array
+        std::memcpy(instances_data[i].transform.cell, M.data(), 16*sizeof(float));
+
+        // recompute inverse + worldspace aabb from BLAS bounds
+        const uint32_t b = instances_data[i].blasIdx;
+        if (b >= blas_pointers.size()) throw nb::value_error("invalid BLAS index on instance");
+        nb::gil_scoped_release rel;
+        instances_data[i].Update(blas_pointers[b]);  // updates invTransform + aabbMin/aabbMax
+    }
+
+    void set_instance_mask(size_t i, uint32_t mask) {
+        if (!is_tlas()) throw nb::value_error("Not a TLAS");
+
+        if (i >= instances_data.size()) throw nb::index_error("instance index out of range");
+
+        instances_data[i].mask = mask;
+    }
+
+    void refit_tlas() {
+        if (!is_tlas()) throw nb::value_error("Not a TLAS");
+
+        // ensure every instance AABB reflects the latest transform
+        for (auto& inst : instances_data) {
+            const uint32_t b = inst.blasIdx;
+            if (b >= blas_pointers.size()) throw nb::value_error("invalid BLAS index on instance");
+            inst.Update(blas_pointers[b]);  // recomputes AABBs
+        }
+
+        // Rebuild the TLAS using the pre-updated instance AABBs
+        // Passing 'nullptr' for the BLAS list means "use existing per-instance AABBs" (see tiny_bvh BVH::Build note)
+        nb::gil_scoped_release rel;
+        base_->Build(instances_data.data(),
+                     (uint32_t)instances_data.size(),
+                     /*blasses*/ nullptr, /*blasCount*/ 0);
+
+        // keep active layout in sync
+        active_bvh_ = base_.get();
+        active_layout_ = Layout::Standard;
+    }
+
+    [[nodiscard]] bool has_opacity_maps() const {
+        return active_bvh_ && active_bvh_->hasOpacityMicroMaps();
+    }
+
+    [[nodiscard]] uint32_t opacity_map_level() const {
+        if (!active_bvh_) return 0;
+        return active_bvh_->opmapN;  // public in BVHBase
+    }
+
+    void clear_opacity_maps() {
+        if (!active_bvh_) return;
+        // Drop Python owner first then clear BVH pointers
+        opacity_map_ref = nb::ndarray<uint32_t, nb::c_contig>(); // empty
+        active_bvh_->SetOpacityMicroMaps(nullptr, 0);
+    }
+
     [[nodiscard]] std::string get_repr() const {
         if (!active_bvh_) return "<pytinybvh.BVH (uninitialized)>";
 
@@ -3165,31 +3226,88 @@ NB_MODULE(_pytinybvh, m) {
         .def_prop_ro("is_tlas", &PyBVH::is_tlas,
             "Returns True if the BVH is a Top-Level Acceleration Structure (TLAS).")
 
-        .def_prop_ro("is_blas", [](const PyBVH& self) -> bool {
-            return !self.is_tlas();
+        .def_prop_ro("is_blas",
+            [](const PyBVH& self) -> bool {
+                return !self.is_tlas();
         }, "Returns True if the BVH is a Bottom-Level Acceleration Structure (BLAS).")
 
-        .def_prop_ro("geometry_type", [](const PyBVH &self) -> GeometryType {
-            switch (self.custom_type) {
-                case PyBVH::CustomType::AABB:   return GeometryType::AABBs;
-                case PyBVH::CustomType::Sphere: return GeometryType::Spheres;
-                default:                        return GeometryType::Triangles;
-            }
+        .def_prop_ro("geometry_type",
+            [](const PyBVH &self) -> GeometryType {
+                switch (self.custom_type) {
+                    case PyBVH::CustomType::AABB:   return GeometryType::AABBs;
+                    case PyBVH::CustomType::Sphere: return GeometryType::Spheres;
+                    default:                        return GeometryType::Triangles;
+                }
         }, "The type of underlying geometry the BVH was built on.")
 
-        .def_prop_ro("is_compact", [](const PyBVH &self) -> bool {
-            // may_have_holes is true when it's *not* compact
-            return self.active_bvh_ ? !self.active_bvh_->may_have_holes : true;
+        .def_prop_ro("is_compact",
+            [](const PyBVH &self) -> bool {
+                // may_have_holes is true when it's *not* compact
+                return self.active_bvh_ ? !self.active_bvh_->may_have_holes : true;
         }, "Returns True if the BVH is contiguous in memory.")
 
-        .def_prop_ro("is_refittable", [](const PyBVH &self) -> bool {
-            if (!self.active_bvh_) return false;
-            // refittable status is determined by the base BVH
-            return self.base_ ? self.base_->refittable : false;
+        .def_prop_ro("is_refittable",
+            [](const PyBVH &self) -> bool {
+                if (!self.active_bvh_) return false;
+                // refittable status is determined by the base BVH
+                return self.base_ ? self.base_->refittable : false;
         }, "Returns True if the BVH can be refitted.")
 
         .def_prop_ro("cached_layouts", &PyBVH::get_cached_layouts,
             "A list of the BVH layouts currently held in the cache.")
+
+        .def_prop_ro("instance_count",
+            [](const PyBVH &self) -> size_t {
+                return self.instances_data.size();
+        }, "Total number of instances in this TLAS. Only meaningful if TLAS.")
+
+        .def("set_instance_transform", &PyBVH::set_instance_transform,
+            R"((
+            Update the transform of one TLAS instance and recompute its world-space AABB.
+
+            Args:
+                i (int): Index of the instance to update (0-based).
+                m4x4 (numpy.ndarray): Row-major object-to-world transform.
+                                      he inverse is computed internally.
+
+            Notes: - This does not rebuild the TLAS. You must call `refit_tlas()` after a batch of updates.
+                   - Raises `IndexError` if `i` is out of range, `ValueError` if called on a BLAS.
+            ))",
+            nb::arg("i"), nb::arg("m4x4"))
+
+        .def("set_instance_mask", &PyBVH::set_instance_mask,
+            R"((
+            Set the 32-bit visibility mask for an instance.
+
+            Args:
+                i (int): Instance index (0-based).
+                mask (int): Bitmask to AND with ray masks during traversal.
+            ))",
+            nb::arg("i"), nb::arg("mask"))
+
+        .def("refit_tlas", &PyBVH::refit_tlas,
+            R"((
+            Refit / rebuild the TLAS using the current per-instance AABBs.
+
+            Call this after one or more `set_instance_transform` / `set_instance_mask`
+            updates. Faster than rebuilding BLASes. Does not change instance order.
+
+            Raises ValueError if called on a BLAS (non-TLAS) BVH.
+            ))")
+
+        .def_prop_ro("has_opacity_maps", &PyBVH::has_opacity_maps,
+            "Returns True is opacity micromaps are attached to this BVH.")
+
+        .def_prop_ro("opacity_map_level", &PyBVH::opacity_map_level,
+            "Opacity micromap subdivision level `N` (0 if none).")
+
+        .def("clear_opacity_maps", &PyBVH::clear_opacity_maps,
+            R"((
+            Detach opacity micromaps from this BVH.
+
+            After calling this, ray tests ignore per-triangle alpha coverage.
+            Safe to call when no micromaps are present (no-op).
+            ))")
 
         .def("__repr__", &PyBVH::get_repr)
 

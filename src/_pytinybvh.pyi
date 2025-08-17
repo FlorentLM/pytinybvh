@@ -670,6 +670,41 @@ class BVH:
         """
         ...
 
+    def refit_tlas(self) -> None:
+        """
+        Refit / rebuild the TLAS using the current per-instance AABBs.
+
+        Call this after one or more `set_instance_transform` / `set_instance_mask`
+        updates. Faster than rebuilding BLASes. Does not change instance order.
+
+        Raises ValueError if called on a BLAS (non-TLAS) BVH.
+        """
+        ...
+
+    def set_instance_transform(self, i: int, m4x4: np.ndarray) -> None:
+        """
+        Update the transform of one TLAS instance and recompute its world-space AABB.
+
+        Args:
+            i (int): Index of the instance to update (0-based).
+            m4x4 (numpy.ndarray): Row-major object-to-world transform.
+                                  he inverse is computed internally.
+
+        Notes: - This does not rebuild the TLAS. You must call `refit_tlas()` after a batch of updates.
+               - Raises `IndexError` if `i` is out of range, `ValueError` if called on a BLAS.
+        """
+        ...
+
+    def set_instance_mask(self, i: int, mask: int) -> None:
+        """
+        Set the 32-bit visibility mask for an instance.
+
+        Args:
+            i (int): Instance index (0-based).
+            mask (int): Bitmask to AND with ray masks during traversal.
+        """
+        ...
+
     def set_opacity_maps(self, map_data: np.ndarray, N: int) -> None:
         """
         Sets the opacity micro-maps for alpha testing during intersection.
@@ -683,6 +718,25 @@ class BVH:
                                       (tri_count * N * N + 31) // 32
             N (int): The resolution of the micro-map per triangle (e.g., 8 for an 8x8 grid).
         """
+        ...
+
+    def clear_opacity_maps(self) -> None:
+        """
+        Detach opacity micromaps from this BVH.
+
+        After calling this, ray tests ignore per-triangle alpha coverage.
+        Safe to call when no micromaps are present (no-op).
+        """
+        ...
+
+    @property
+    def has_opacity_maps(self) -> bool:
+        """Returns True is opacity micromaps are attached to this BVH."""
+        ...
+
+    @property
+    def opacity_map_level(self) -> int:
+        """Opacity micromap subdivision level `N` (0 if none)."""
         ...
 
     @property
@@ -750,6 +804,11 @@ class BVH:
     @property
     def prim_count(self) -> int:
         """Total number of primitives in the BVH."""
+        ...
+
+    @property
+    def instance_count(self) -> int:
+        """Total number of instances in this TLAS. Only meaningful if TLAS."""
         ...
 
     @property

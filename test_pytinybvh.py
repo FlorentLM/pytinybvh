@@ -538,7 +538,7 @@ class TestRobustness:
 
         assert np.isinf(bvh.intersect(ray))
 
-        hits = bvh.intersect_batch(np.empty((0, 3)), np.empty((0, 3)))
+        hits = bvh.intersect_batch(np.empty((0, 3), dtype=np.float32), np.empty((0, 3), dtype=np.float32))
 
         assert len(hits) == 0
 
@@ -681,10 +681,10 @@ class TestLayoutConversion:
     TRAVERSABLE_LAYOUTS = [
         (Layout.SoA, hwinfo['compile_time']["layouts"]["SoA"]["traverse"]),
         (Layout.BVH_GPU, hwinfo['compile_time']["layouts"]["BVH (GPU)"]["traverse"]),
-        # (Layout.BVH4_CPU, hwinfo['compile_time']["layouts"]["BVH4 (CPU)"]["traverse"]),
+        (Layout.BVH4_CPU, hwinfo['compile_time']["layouts"]["BVH4 (CPU)"]["traverse"]),
         (Layout.BVH4_GPU, hwinfo['compile_time']["layouts"]["BVH4 (GPU)"]["traverse"]),
         (Layout.CWBVH, hwinfo['compile_time']["layouts"]["BVH8 (CWBVH)"]["traverse"]),
-        # (Layout.BVH8_CPU, hwinfo['compile_time']["layouts"]["BVH8 (CPU)"]["traverse"]),
+        (Layout.BVH8_CPU, hwinfo['compile_time']["layouts"]["BVH8 (CPU)"]["traverse"]),
     ]
 
     NON_TRAVERSABLE_LAYOUTS = [
@@ -943,5 +943,5 @@ def plot_aabb(ax, aabb_min, aabb_max, **kwargs):
 
 if __name__ == "__main__":
     print("Running visualization demo...")
-    # view_test_scene()
+    view_test_scene()
     print("\nTo run the automated test suite, use 'pytest'")

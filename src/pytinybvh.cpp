@@ -119,8 +119,11 @@ static inline std::string explain_requirement(Layout L) {
 
 // -------------------------------- some other internal helpers and things ---------------------------------
 
-// Cached imported numpy
-static nb::module_& np() { static nb::module_ m = nb::module_::import_("numpy"); return m; }
+// Cached imported modules (and intentionally "leak" them so no destructor runs during interpreter shutdown)
+static nb::module_& np() { static auto* m = new nb::module_(nb::module_::import_("numpy")); return *m; }
+static nb::module_& warnings() { static auto* w = new nb::module_(nb::module_::import_("warnings")); return *w; }
+static nb::module_& userwarning() { static auto* u = new nb::module_(nb::module_::import_("UserWarning")); return *u; }
+static nb::module_& builtins() { static auto* b = new nb::module_(nb::module_::import_("builtins")); return *b; }
 
 // helper function to build the hardware info dict
 
@@ -899,7 +902,10 @@ public:
 
     static std::unique_ptr<PyBVH> from_vertices(
         nb::ndarray<const float, nb::c_contig> vertices_np,
-        const BuildQuality quality, const float traversal_cost, const float intersection_cost) {
+        const BuildQuality quality,
+        const float traversal_cost,
+        const float intersection_cost,
+        const int hq_bins = HQBVHBINS) {
 
         if (vertices_np.dtype() != nb::dtype<float>()) {
             throw nb::type_error("Input `vertices` must be a float32 numpy array.");
@@ -915,6 +921,7 @@ public:
         wrapper->quality = quality;
         bvh->c_trav = traversal_cost;
         bvh->c_int = intersection_cost;
+        bvh->hqbvhbins = hq_bins;
 
         if (vertices_np.shape(0) == 0) {
             finalize_build(wrapper, std::move(bvh));
@@ -925,19 +932,21 @@ public:
         const auto prim_count = static_cast<uint32_t>(vertices_np.shape(0) / 3);
 
         bvh->context = default_ctx();
-        switch (quality) {
-            case BuildQuality::Quick:
-                bvh->BuildQuick(vertices_ptr, prim_count);
-                break;
-            case BuildQuality::High:
-                bvh->BuildHQ(vertices_ptr, prim_count);
-                break;
-            case BuildQuality::Balanced:
-            default:
-                bvh->Build(vertices_ptr, prim_count);
-                break;
+        {
+            nb::gil_scoped_release release;
+            switch (quality) {
+                case BuildQuality::Quick:
+                    bvh->BuildQuick(vertices_ptr, prim_count);
+                    break;
+                case BuildQuality::High:
+                    bvh->BuildHQ(vertices_ptr, prim_count);
+                    break;
+                case BuildQuality::Balanced:
+                default:
+                    bvh->Build(vertices_ptr, prim_count);
+                    break;
+            }
         }
-
         finalize_build(wrapper, std::move(bvh)); // transfer ownership
         return wrapper;
     }
@@ -945,7 +954,10 @@ public:
     static std::unique_ptr<PyBVH> from_indexed_mesh(
         nb::ndarray<const float, nb::c_contig> vertices_np,
         nb::ndarray<const uint32_t, nb::c_contig> indices_np,
-        const BuildQuality quality, const float traversal_cost, const float intersection_cost) {
+        const BuildQuality quality,
+        const float traversal_cost,
+        const float intersection_cost,
+        const int hq_bins = HQBVHBINS) {
 
         if (vertices_np.dtype() != nb::dtype<float>()) {
             throw nb::type_error("Input `vertices` must be a float32 numpy array.");
@@ -969,6 +981,7 @@ public:
 
         bvh->c_trav = traversal_cost;
         bvh->c_int = intersection_cost;
+        bvh->hqbvhbins = hq_bins;
 
         if (vertices_np.shape(0) == 0  || indices_np.shape(0) == 0) {
             finalize_build(wrapper, std::move(bvh));  // transfer ownership
@@ -980,33 +993,46 @@ public:
         const auto prim_count = static_cast<uint32_t>(indices_np.shape(0));
 
         bvh->context = default_ctx();
-        switch (quality) {
-            case BuildQuality::Quick:
-                // tinybvh doesn't have an indexed BuildQuick so fall back to Balanced
-                bvh->Build(vertices_ptr, indices_ptr, prim_count);
-                break;
-            case BuildQuality::High:
-                bvh->BuildHQ(vertices_ptr, indices_ptr, prim_count);
-                break;
-            case BuildQuality::Balanced:
-            default:
-                bvh->Build(vertices_ptr, indices_ptr, prim_count);
-                break;
+        {
+            nb::gil_scoped_release release;
+            switch (quality) {
+                case BuildQuality::Quick:
+                    // tinybvh doesn't have an indexed BuildQuick so fall back to Balanced
+                    bvh->Build(vertices_ptr, indices_ptr, prim_count);
+                    break;
+                case BuildQuality::High:
+                    bvh->BuildHQ(vertices_ptr, indices_ptr, prim_count);
+                    break;
+                case BuildQuality::Balanced:
+                default:
+                    bvh->Build(vertices_ptr, indices_ptr, prim_count);
+                    break;
+            }
         }
-
         finalize_build(wrapper, std::move(bvh));  // transfer ownership
         return wrapper;
     }
 
     static std::unique_ptr<PyBVH> from_aabbs(
         nb::ndarray<const float, nb::c_contig> aabbs_np,
-        const BuildQuality quality, const float traversal_cost, const float intersection_cost) {
+        const BuildQuality quality,
+        const float traversal_cost,
+        const float intersection_cost,
+        const int hq_bins = HQBVHBINS) {
 
         if (aabbs_np.ndim() != 3 || aabbs_np.shape(1) != 2 || aabbs_np.shape(2) != 3) {
             throw std::runtime_error("Input `aabbs` must be a 3D numpy array with shape (N, 2, 3).");
         }
         if (aabbs_np.dtype() != nb::dtype<float>()) {
             throw nb::type_error("Input `aabbs` must be a float32 numpy array.");
+        }
+
+        if (quality == BuildQuality::High) {
+            warnings().attr("warn")(
+                "BuildQuality.High (SBVH) is not supported for AABB-based BVHs. "
+                "Falling back to the standard 'Balanced' quality build.",
+                userwarning()
+            );
         }
 
         auto wrapper = std::make_unique<PyBVH>();
@@ -1058,8 +1084,10 @@ public:
         AABBptrGuard guard(aabbs_ptr);
 
         bvh->context = default_ctx();
-        bvh->Build(aabb_build_callback, prim_count);
-
+        {
+            nb::gil_scoped_release release;
+            bvh->Build(aabb_build_callback, prim_count);
+        }
         finalize_build(wrapper, std::move(bvh));  // transfer ownership
         return wrapper;
 
@@ -1070,7 +1098,10 @@ public:
 
     static std::unique_ptr<PyBVH> from_triangles(
         const nb::ndarray<const float>& tris_np,
-        const BuildQuality quality, const float traversal_cost, const float intersection_cost) {
+        const BuildQuality quality,
+        const float traversal_cost,
+        const float intersection_cost,
+        const int hq_bins = HQBVHBINS) {
 
         bool shape_ok = (tris_np.ndim() == 2 && tris_np.shape(1) == 9) ||
                         (tris_np.ndim() == 3 && tris_np.shape(1) == 3 && tris_np.shape(2) == 3);
@@ -1090,6 +1121,7 @@ public:
 
         bvh->c_trav = traversal_cost;
         bvh->c_int = intersection_cost;
+        bvh->hqbvhbins = hq_bins;
 
         if (num_tris == 0) {
             finalize_build(wrapper, std::move(bvh));  // transfer ownership
@@ -1127,25 +1159,32 @@ public:
         auto vertices_ptr = reinterpret_cast<const tinybvh::bvhvec4*>(vertices_np.data());
 
         bvh->context = default_ctx();
-        switch (quality) {
-            case BuildQuality::Quick:
-                bvh->BuildQuick(vertices_ptr, static_cast<uint32_t>(num_tris));
-                break;
-            case BuildQuality::High:
-                bvh->BuildHQ(vertices_ptr, static_cast<uint32_t>(num_tris));
-                break;
-            case BuildQuality::Balanced:
-            default:
-                bvh->Build(vertices_ptr, static_cast<uint32_t>(num_tris));
-                break;
+        {
+            nb::gil_scoped_release release;
+            switch (quality) {
+                case BuildQuality::Quick:
+                    bvh->BuildQuick(vertices_ptr, static_cast<uint32_t>(num_tris));
+                    break;
+                case BuildQuality::High:
+                    bvh->BuildHQ(vertices_ptr, static_cast<uint32_t>(num_tris));
+                    break;
+                case BuildQuality::Balanced:
+                default:
+                    bvh->Build(vertices_ptr, static_cast<uint32_t>(num_tris));
+                    break;
+            }
         }
-
         finalize_build(wrapper, std::move(bvh));  // transfer ownership
         return wrapper;
     }
 
-    static std::unique_ptr<PyBVH> from_points(const nb::ndarray<const float, nb::c_contig>& points_np,
-        const float radius, BuildQuality quality, const float traversal_cost, const float intersection_cost) {
+    static std::unique_ptr<PyBVH> from_points(
+        const nb::ndarray<const float, nb::c_contig>& points_np,
+        const float radius,
+        BuildQuality quality,
+        const float traversal_cost,
+        const float intersection_cost,
+        const int hq_bins = HQBVHBINS) {
 
         if (points_np.ndim() != 2 || points_np.shape(1) != 3)
             throw std::runtime_error("Input `points` must be a 2D numpy array with shape (N, 3).");
@@ -1154,6 +1193,14 @@ public:
         }
         if (radius <= 0.0f) {
             throw std::runtime_error("Point radius must be positive.");
+        }
+
+        if (quality == BuildQuality::High) {
+            warnings().attr("warn")(
+                "BuildQuality.High (SBVH) is not supported for points-based BVHs. "
+                "Falling back to the standard 'Balanced' quality build.",
+                userwarning()
+            );
         }
 
         auto wrapper = std::make_unique<PyBVH>();
@@ -1201,8 +1248,10 @@ public:
         AABBptrGuard guard(aabbs_ptr);
 
         bvh->context = default_ctx();
-        bvh->Build(aabb_build_callback, static_cast<uint32_t>(num_points));
-
+        {
+            nb::gil_scoped_release release;
+            bvh->Build(aabb_build_callback, static_cast<uint32_t>(num_points));
+        }
        finalize_build(wrapper, std::move(bvh));  // transfer ownership
         return wrapper;
     }
@@ -1210,7 +1259,6 @@ public:
     // Interseciton methods
 
     float intersect(PyRay &py_ray) const {
-
         // Guards
         if (!supports_layout(active_layout_, /*for_traversal=*/true)) {
             throw std::runtime_error(
@@ -1252,19 +1300,22 @@ public:
             }
         });
 
-        if (ray.hit.t < py_ray.t) {
-            py_ray.t = ray.hit.t; py_ray.u = ray.hit.u; py_ray.v = ray.hit.v;
+        {
+            nb::gil_scoped_release release;
+            if (ray.hit.t < py_ray.t) {
+                py_ray.t = ray.hit.t; py_ray.u = ray.hit.u; py_ray.v = ray.hit.v;
 #if INST_IDX_BITS == 32
-            py_ray.prim_id = ray.hit.prim;
-            py_ray.inst_id = is_tlas ? ray.hit.inst : static_cast<uint32_t>(-1);
+                py_ray.prim_id = ray.hit.prim;
+                py_ray.inst_id = is_tlas ? ray.hit.inst : static_cast<uint32_t>(-1);
 #else
-            const uint32_t inst = ray.hit.prim >> INST_IDX_SHFT;
-            py_ray.prim_id = ray.hit.prim & PRIM_IDX_MASK;
-            py_ray.inst_id = is_tlas ? inst : (uint32_t)-1;
+                const uint32_t inst = ray.hit.prim >> INST_IDX_SHFT;
+                py_ray.prim_id = ray.hit.prim & PRIM_IDX_MASK;
+                py_ray.inst_id = is_tlas ? inst : static_cast<uint32_t>(-1);
 #endif
-            return ray.hit.t;
+                return ray.hit.t;
+            }
+            return INFINITY;
         }
-        return INFINITY;
     }
 
     [[nodiscard]] nb::object intersect_batch(
@@ -1368,7 +1419,7 @@ public:
             return arr;
         }
 
-        const auto* origins_ptr    = origins_np.data();
+        const auto* origins_ptr = origins_np.data();
         const auto* directions_ptr = directions_np.data();
 
         // Decide base eligibility for packets (global capability / layout)
@@ -1382,7 +1433,7 @@ public:
         // Warn if the whole batch mixes origins. We still decide per 256-chunk below
         if (want_packets && !same_origin_ok(origins_ptr, o_row, o_col, n_rays, same_origin_eps)) {
             if (warn_on_incoherent && packet != PacketMode::Never) {
-                nb::module_::import_("warnings").attr("warn")(
+                warnings().attr("warn")(
                     packet == PacketMode::Force ?
                     "pytinybvh: Forcing packet traversal, but ray origins differ. "
                     "Packet kernels assume a shared origin per 16x16 tile. Only rays that satisfy it will be packet-chunked."
@@ -1557,9 +1608,13 @@ public:
             ray.hit.auxData = &context;
         }
 
-        return dispatch_bvh_call(active_bvh_, [&](auto& bvh) {
-            return bvh.IsOccluded(ray);
-        });
+        {
+            nb::gil_scoped_release release;
+
+            return dispatch_bvh_call(active_bvh_, [&](auto& bvh) {
+                return bvh.IsOccluded(ray);
+            });
+        }
     }
 
     [[nodiscard]] nb::ndarray<bool> is_occluded_batch(
@@ -1663,7 +1718,7 @@ public:
         // Warn if the whole batch mixes origins. We still decide per 256-chunk below
         if (want_packets && !same_origin_ok(origins_ptr, o_row, o_col, n_rays, same_origin_eps)) {
             if (warn_on_incoherent && packet != PacketMode::Never) {
-                nb::module_::import_("warnings").attr("warn")(
+                warnings().attr("warn")(
                     packet == PacketMode::Force ?
                     "pytinybvh: Forcing packet traversal, but ray origins differ. "
                     "Packet kernels assume a shared origin per 16x16 tile. Only rays that satisfy it will be packet-chunked."
@@ -1831,8 +1886,7 @@ public:
             fields = nb::cast<nb::dict>(fields_obj);
         } else {
             // Make a real dict from any mapping-like object
-            auto builtins = nb::module_::import_("builtins");
-            fields = nb::cast<nb::dict>(builtins.attr("dict")(fields_obj));
+            fields = nb::cast<nb::dict>(builtins().attr("dict")(fields_obj));
         }
 
         if (!fields.contains("transform") || !fields.contains("blas_id"))
@@ -1905,12 +1959,16 @@ public:
         auto tlas_bvh = std::make_unique<tinybvh::BVH>();
 
         tlas_bvh->context = default_ctx();
-        tlas_bvh->Build(
-            wrapper->instances_data.data(),
-            static_cast<uint32_t>(inst_count),
-            wrapper->blas_pointers.data(),
-            static_cast<uint32_t>(wrapper->blas_pointers.size())
-        );
+
+        {
+            nb::gil_scoped_release release;
+            tlas_bvh->Build(
+                wrapper->instances_data.data(),
+                static_cast<uint32_t>(inst_count),
+                wrapper->blas_pointers.data(),
+                static_cast<uint32_t>(wrapper->blas_pointers.size())
+            );
+        }
 
         finalize_build(wrapper, std::move(tlas_bvh)); // transfer ownership
         return wrapper;
@@ -2388,12 +2446,13 @@ NB_MODULE(_pytinybvh, m) {
         .value("BVH8_CPU",   Layout::BVH8_CPU);
 
     m.def("hardware_info", &get_hardware_info,
-        "Get architecture, compile-time, and runtime hardware capabilities.");
+        "Returns a dictionary detailing the compile-time and runtime capabilities of the library.");
 
     m.def("layout_to_string", [](Layout L){ return std::string(layout_to_string(L)); });
 
     m.def("supports_layout",
           [](Layout L, bool for_traversal) { return supports_layout(L, for_traversal); },
+          "Checks if the current system supports a given BVH layout.",
           nb::arg("layout"), nb::arg("for_traversal") = true);
 
     m.def("require_layout",
@@ -2404,6 +2463,7 @@ NB_MODULE(_pytinybvh, m) {
                       explain_requirement(L));
               }
           },
+          "Asserts that a given BVH layout is supported, raising a RuntimeError if not.",
           nb::arg("layout"), nb::arg("for_traversal") = true);
 
     // Build quality, Geometry type, BVH Layout, Packet Mode, and Cache Policy enums exposed to Python
@@ -2412,19 +2472,19 @@ NB_MODULE(_pytinybvh, m) {
         .value("Balanced", BuildQuality::Balanced, "Balanced build time and query performance (default).")
         .value("High", BuildQuality::High, "Slowest build (uses spatial splits), highest quality queries.");
 
-    nb::enum_<GeometryType>(m, "GeometryType")
+    nb::enum_<GeometryType>(m, "GeometryType", "Enum for the underlying geometry type used by the BVH.")
         .value("Triangles", GeometryType::Triangles, "The BVH was built over a triangle mesh.")
         .value("AABBs", GeometryType::AABBs, "The BVH was built over custom Axis-Aligned Bounding Boxes.")
         .value("Spheres", GeometryType::Spheres, "The BVH was built over a point cloud with a radius (spheres).");
 
-    nb::enum_<CachePolicy>(m, "CachePolicy")
-        .value("ActiveOnly", CachePolicy::ActiveOnly)
-        .value("All", CachePolicy::All);
+    nb::enum_<CachePolicy>(m, "CachePolicy", "Enum for managing cached BVH layouts after conversion.")
+        .value("ActiveOnly", CachePolicy::ActiveOnly, "(Default) Free memory of any non-active layouts after a conversion.")
+        .value("All", CachePolicy::All, "Keep all generated layouts in memory for fast switching.");
 
-    nb::enum_<PacketMode>(m, "PacketMode")
-        .value("Auto",  PacketMode::Auto,  "Use packets only if rays have a shared origin. Assumes coherent directions.")
+    nb::enum_<PacketMode>(m, "PacketMode", "Enum for controlling SIMD packet traversal in batched queries.")
+        .value("Auto",  PacketMode::Auto,  "Use packets for coherent rays with a shared origin.")
         .value("Never", PacketMode::Never, "Always use scalar traversal. Safest for non-coherent rays.")
-        .value("Force", PacketMode::Force, "Force packet traversal. This can provide a speedup, but is unsafe if rays are not coherent (even if they have the same origin).");
+        .value("Force", PacketMode::Force, "Force packet traversal. Unsafe for non-coherent rays.");
 
     // Main Python classes
     nb::class_<PyRay>(m, "Ray", "Represents a ray for intersection queries.")
@@ -2533,6 +2593,9 @@ NB_MODULE(_pytinybvh, m) {
                 Args:
                     vertices (numpy.ndarray): A float32 array of shape (M, 4).
                     quality (BuildQuality): The desired quality of the BVH.
+                    traversal_cost (float, optional): The traversal cost for the SAH builder. Defaults to 1.
+                    intersection_cost (float, optional): The intersection cost for the SAH builder. Defaults to 1.
+                    hq_bins (int, optional): The number of bins to use for the high-quality build algorithm (SBVH).
 
                 Returns:
                     BVH: A new BVH instance.
@@ -2540,6 +2603,7 @@ NB_MODULE(_pytinybvh, m) {
             nb::rv_policy::move,
             nb::arg("vertices").noconvert(), nb::arg("quality") = BuildQuality::Balanced,
             nb::arg("traversal_cost") = C_TRAV, nb::arg("intersection_cost") = C_INT,
+            nb::arg("hq_bins") = HQBVHBINS,
             nb::keep_alive<0,1>()  // result keeps vertices
             )
 
@@ -2552,11 +2616,12 @@ NB_MODULE(_pytinybvh, m) {
                 The BVH will hold a reference to both provided numpy arrays.
 
                 Args:
-                    vertices (numpy.ndarray): A float32 array of shape (V, 4), where V is the
-                                              number of unique vertices.
-                    indices (numpy.ndarray): A uint32 array of shape (N, 3), where N is the
-                                             number of triangles.
+                    vertices (numpy.ndarray): A float32 array of shape (V, 4), where V is the number of unique vertices.
+                    indices (numpy.ndarray): A uint32 array of shape (N, 3), where N is the number of triangles.
                     quality (BuildQuality): The desired quality of the BVH.
+                    traversal_cost (float, optional): The traversal cost for the SAH builder. Defaults to 1.
+                    intersection_cost (float, optional): The intersection cost for the SAH builder. Defaults to 1.
+                    hq_bins (int, optional): The number of bins to use for the high-quality build algorithm (SBVH).
 
                 Returns:
                     BVH: A new BVH instance.
@@ -2565,6 +2630,7 @@ NB_MODULE(_pytinybvh, m) {
             nb::arg("vertices").noconvert(), nb::arg("indices").noconvert(),
             nb::arg("quality") = BuildQuality::Balanced,
             nb::arg("traversal_cost") = C_TRAV, nb::arg("intersection_cost") = C_INT,
+            nb::arg("hq_bins") = HQBVHBINS,
             nb::keep_alive<0,1>(),  // result keeps vertices
             nb::keep_alive<0,2>()   // result keeps indices
             )
@@ -2581,6 +2647,9 @@ NB_MODULE(_pytinybvh, m) {
                     aabbs (numpy.ndarray): A float32, C-contiguous array of shape (N, 2, 3),
                                            where each item is a pair of [min_corner, max_corner].
                     quality (BuildQuality): The desired quality of the BVH.
+                    traversal_cost (float, optional): The traversal cost for the SAH builder. Defaults to 1.
+                    intersection_cost (float, optional): The intersection cost for the SAH builder. Defaults to 1.
+                    hq_bins (int, optional): The number of bins to use for the high-quality build algorithm (SBVH).
 
                 Returns:
                     BVH: A new BVH instance.
@@ -2588,6 +2657,7 @@ NB_MODULE(_pytinybvh, m) {
             nb::rv_policy::move,
             nb::arg("aabbs").noconvert(), nb::arg("quality") = BuildQuality::Balanced,
             nb::arg("traversal_cost") = C_TRAV, nb::arg("intersection_cost") = C_INT,
+            nb::arg("hq_bins") = HQBVHBINS,
             nb::keep_alive<0,1>()  // result keeps aabbs
             )
 
@@ -2599,9 +2669,11 @@ NB_MODULE(_pytinybvh, m) {
                 copies and reformats the data into the layout required by the BVH.
 
                 Args:
-                    triangles (numpy.ndarray): A float32 array of shape (N, 3, 3) or (N, 9)
-                                               representing N triangles.
+                    triangles (numpy.ndarray): A float32 array of shape (N, 3, 3) or (N, 9) representing N triangles.
                     quality (BuildQuality): The desired quality of the BVH.
+                    traversal_cost (float, optional): The traversal cost for the SAH builder. Defaults to 1.
+                    intersection_cost (float, optional): The intersection cost for the SAH builder. Defaults to 1.
+                    hq_bins (int, optional): The number of bins to use for the high-quality build algorithm (SBVH).
 
                 Returns:
                     BVH: A new BVH instance.
@@ -2609,6 +2681,7 @@ NB_MODULE(_pytinybvh, m) {
             nb::rv_policy::move,
             nb::arg("triangles"), nb::arg("quality") = BuildQuality::Balanced,
             nb::arg("traversal_cost") = C_TRAV, nb::arg("intersection_cost") = C_INT,
+            nb::arg("hq_bins") = HQBVHBINS,
             nb::keep_alive<0,1>()  // result keeps triangles
             )
 
@@ -2621,6 +2694,9 @@ NB_MODULE(_pytinybvh, m) {
                     points (numpy.ndarray): A float32 array of shape (N, 3) representing N points.
                     radius (float): The radius used to create an AABB for each point.
                     quality (BuildQuality): The desired quality of the BVH.
+                    traversal_cost (float, optional): The traversal cost for the SAH builder. Defaults to 1.
+                    intersection_cost (float, optional): The intersection cost for the SAH builder. Defaults to 1.
+                    hq_bins (int, optional): The number of bins to use for the high-quality build algorithm (SBVH).
 
                 Returns:
                     BVH: A new BVH instance.
@@ -2628,6 +2704,7 @@ NB_MODULE(_pytinybvh, m) {
             nb::rv_policy::move,
             nb::arg("points"), nb::arg("radius") = 1e-5f, nb::arg("quality") = BuildQuality::Balanced,
             nb::arg("traversal_cost") = C_TRAV, nb::arg("intersection_cost") = C_INT,
+            nb::arg("hq_bins") = HQBVHBINS,
             nb::keep_alive<0,1>()  // result keeps points
             )
 
@@ -2682,8 +2759,8 @@ NB_MODULE(_pytinybvh, m) {
                         For TLAS hits, inst_id is the instance index and prim_id is the primitive
                         index within that instance's BLAS.
             ))",
-            nb::arg("origins"), nb::arg("directions"),
-            nb::arg("t_max") = nb::none(), nb::arg("masks") = nb::none(),
+            nb::arg("origins").noconvert(), nb::arg("directions").noconvert(),
+            nb::arg("t_max").noconvert() = nb::none(), nb::arg("masks").noconvert() = nb::none(),
             nb::arg("packet") = PacketMode::Auto,
             nb::arg("same_origin_eps") = 1e-6f,
             nb::arg("max_spread") = 1.0f,
@@ -2727,8 +2804,8 @@ NB_MODULE(_pytinybvh, m) {
                 Returns:
                     numpy.ndarray: A boolean array of shape (N,) where `True` indicates occlusion.
            ))",
-            nb::arg("origins"), nb::arg("directions"),
-            nb::arg("t_max") = nb::none(), nb::arg("masks") = nb::none(),
+            nb::arg("origins").noconvert(), nb::arg("directions").noconvert(),
+            nb::arg("t_max").noconvert() = nb::none(), nb::arg("masks").noconvert() = nb::none(),
             nb::arg("packet") = PacketMode::Auto,
             nb::arg("same_origin_eps") = 1e-6f,
             nb::arg("max_spread") = 1.0f,

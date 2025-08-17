@@ -18,6 +18,44 @@ A type hint for objects that can be interpreted as a 3D vector,
 including lists, tuples, and numpy arrays of 3 floats.
 """
 
+# numpy dtypes
+
+bvh_node_dtype: np.dtype
+"""
+A hint for the structured dtype of the BVH.nodes array.
+
+bvh_node_dtype = np.dtype([
+    ('aabb_min', ('<f4', (3,))),
+    ('left_first', '<u4'),
+    ('aabb_max', ('<f4', (3,))),
+    ('prim_count', '<u4')
+])
+"""
+
+hit_record_dtype: np.dtype
+"""
+A hint for the structured dtype of the intersect_batch return array.
+
+hit_record_dtype = np.dtype([
+    ('prim_id', '<u4'),
+    ('inst_id', '<u4'),
+    ('t', '<f4'),
+    ('u', '<f4'),
+    ('v', '<f4')
+])
+"""
+
+instance_dtype: np.dtype
+"""
+A hint for the structured dtype of the TLAS instances array.
+
+instance_dtype = np.dtype([
+    ('transform', '<f4', (4, 4)),
+    ('blas_id', '<u4'),
+    ('mask', '<u4')
+])
+"""
+
 
 # Top-level functions
 
@@ -63,46 +101,6 @@ def require_layout(layout: Layout, for_traversal: bool = True) -> None:
         RuntimeError: If the layout is not supported on the current system.
     """
     ...
-
-
-
-# numpy dtypes
-
-bvh_node_dtype: np.dtype
-"""
-A hint for the structured dtype of the BVH.nodes array.
-
-bvh_node_dtype = np.dtype([
-    ('aabb_min', ('<f4', (3,))),
-    ('left_first', '<u4'),
-    ('aabb_max', ('<f4', (3,))),
-    ('prim_count', '<u4')
-])
-"""
-
-hit_record_dtype: np.dtype
-"""
-A hint for the structured dtype of the intersect_batch return array.
-
-hit_record_dtype = np.dtype([
-    ('prim_id', '<u4'),
-    ('inst_id', '<u4'),
-    ('t', '<f4'),
-    ('u', '<f4'),
-    ('v', '<f4')
-])
-"""
-
-instance_dtype: np.dtype
-"""
-A hint for the structured dtype of the TLAS instances array.
-
-instance_dtype = np.dtype([
-    ('transform', '<f4', (4, 4)),
-    ('blas_id', '<u4'),
-    ('mask', '<u4')
-])
-"""
 
 
 # Enums
@@ -681,6 +679,38 @@ class BVH:
         """
         ...
 
+    @property
+    def instances(self) -> np.ndarray:
+        """
+        A writable 1D structured numpy view of the TLAS instances (zero-copy). Only meaningful on a TLAS.
+
+        Notes:
+            - Modify `transform` and/or `mask` in-place, then call `refit_tlas()`.
+            - Changing `blas_id` is possible but advanced: it must reference an existing
+              BLAS captured at TLAS build time. After changing it, call `update_instances`
+              with `recompute_aabbs=True` (or call it once for all changed instances)
+              before `refit_tlas()`, so AABBs are re-derived from the new BLAS.
+        """
+        ...
+
+    def update_instances(self, instances: Optional[np.ndarray] = None, recompute_aabbs = True) -> None:
+        """
+        Bulk-updates TLAS instances from a structured array (zero extra copies in Python). Only useable on a TLAS.
+
+        Args:
+            instances (numpy.ndarray, optional): Structured array with dtype `instance_dtype`
+                Must contain fields:
+                  - 'transform' : (4, 4) float32, row-major
+                  - 'blas_id'   : uint32
+                  - 'mask'      : uint32 (Optional. Defaults preserved if omitted)
+            recompute_aabbs (bool): If True (default), recomputes each instance's inverse transform and world-space AABB.
+
+        Notes:
+            - After updates, call `refit_tlas()` to rebuild the TLAS over the updated AABBs.
+            - The array length must match the existing TLAS instance count.
+        """
+        ...
+
     def set_instance_transform(self, i: int, m4x4: np.ndarray) -> None:
         """
         Update the transform of one TLAS instance and recompute its world-space AABB.
@@ -692,6 +722,24 @@ class BVH:
 
         Notes: - This does not rebuild the TLAS. You must call `refit_tlas()` after a batch of updates.
                - Raises `IndexError` if `i` is out of range, `ValueError` if called on a BLAS.
+        """
+        ...
+
+    def set_traversal_cost(self, cost: float) -> None:
+        """
+        Sets the SAH traversal cost used by metrics/optimizers.
+
+        This does not rebuild the BVH. It simply updates the cost used by SAH reporting
+        and any subsequent optimization passes that consult it.
+        """
+        ...
+
+    def set_intersection_cost(self, cost: float) -> None:
+        """
+        Sets the SAH intersection cost used by metrics/optimizers.
+
+        This does not rebuild the BVH. It simply updates the cost used by SAH reporting
+        and any subsequent optimization passes that consult it.
         """
         ...
 
@@ -880,6 +928,8 @@ class BVH:
     def cached_layouts(self) -> List[Layout]:
         """A list of the BVH layouts currently held in the cache."""
         ...
+
+
 
 class BVHVerbose:
     """

@@ -306,8 +306,11 @@ namespace {
     }
 
     nb::object make_instance_dtype() {
+        // Writable fields:
+        //  - transform : (4x4) float32 row-major object->world
+        //  - blas_id   : uint32
+        //  - mask      : uint32
         nb::dict spec;
-
         spec["names"]   = nb::make_tuple("transform", "blas_id", "mask");
         spec["formats"] = nb::make_tuple(
             nb::make_tuple(np().attr("float32"), nb::make_tuple(4, 4)),
@@ -315,13 +318,14 @@ namespace {
             np().attr("uint32")
         );
         spec["offsets"] = nb::make_tuple(
-            nb::int_(offsetof(TLASInstance, transform)),
-            nb::int_(offsetof(TLASInstance, blas_id)),
-            nb::int_(offsetof(TLASInstance, mask))
+            nb::int_(offsetof(tinybvh::BLASInstance, transform)),
+            nb::int_(offsetof(tinybvh::BLASInstance, blasIdx)),
+            nb::int_(offsetof(tinybvh::BLASInstance, mask))
         );
-        spec["itemsize"] = nb::int_(sizeof(TLASInstance));
+        spec["itemsize"] = nb::int_(sizeof(tinybvh::BLASInstance));
         return np().attr("dtype")(spec);
     }
+
 }
 
 // Small default context for building a BVH
@@ -1293,9 +1297,9 @@ public:
 
         // Determine TLAS vs BLAS (only standard BVH exposes isTLAS())
         bool is_tlas = false;
-        dispatch_bvh_call(active_bvh_, [&](auto& bvh) {
+        dispatch_bvh_call(active_bvh_, [&]<typename T0>(T0& bvh) {
             bvh.Intersect(ray);
-            if constexpr (std::is_same_v<std::decay_t<decltype(bvh)>, tinybvh::BVH>) {
+            if constexpr (std::is_same_v<std::decay_t<T0>, tinybvh::BVH>) {
                 is_tlas = bvh.isTLAS();
             }
         });
@@ -1481,8 +1485,8 @@ public:
                 }
             }
 
-            dispatch_bvh_call(active_bvh_, [&](auto& bvh) {
-                using BVHType = std::decay_t<decltype(bvh)>;
+            dispatch_bvh_call(active_bvh_, [&]<typename T0>(T0& bvh) {
+                using BVHType = std::decay_t<T0>;
 
                 if constexpr (std::is_same_v<BVHType, tinybvh::BVH>) {
                     // Standard layout: we may use packet traversal
@@ -1537,8 +1541,8 @@ public:
 
         // Determine TLAS vs BLAS (only standard BVH exposes isTLAS())
         bool is_tlas = false;
-        dispatch_bvh_call(active_bvh_, [&](auto& bvh) {
-            if constexpr (std::is_same_v<std::decay_t<decltype(bvh)>, tinybvh::BVH>)
+        dispatch_bvh_call(active_bvh_, [&]<typename T0>(T0& bvh) {
+            if constexpr (std::is_same_v<std::decay_t<T0>, tinybvh::BVH>)
                 is_tlas = bvh.isTLAS();
         });
 
@@ -1778,8 +1782,8 @@ public:
                 }
             }
 
-            dispatch_bvh_call(active_bvh_, [&](auto& bvh) {
-                using BVHType = std::decay_t<decltype(bvh)>;
+            dispatch_bvh_call(active_bvh_, [&]<typename T0>(T0& bvh) {
+                using BVHType = std::decay_t<T0>;
 
                 if constexpr (std::is_same_v<BVHType, tinybvh::BVH>) { // BLAS only
                     if (want_packets) {
@@ -1997,7 +2001,7 @@ public:
         wrapper->source_geometry_refs.append(vertices_obj);
 
         // Pointer to vertex data
-        const auto* vptr = reinterpret_cast<const tinybvh::bvhvec4*>(verts.data());
+        const auto* vptr = static_cast<const tinybvh::bvhvec4*>(verts.data());
         const auto V = static_cast<uint32_t>(verts.shape(0));
 
         if (indices_obj.is_none()) {
@@ -2132,8 +2136,8 @@ public:
     [[nodiscard]] bool is_tlas() const {
         if (!active_bvh_) return false;
 
-        return dispatch_bvh_call(active_bvh_, [](auto& bvh){
-            using BvhType = std::decay_t<decltype(bvh)>;
+        return dispatch_bvh_call(active_bvh_, []<typename T0>(T0& bvh){
+            using BvhType = std::decay_t<T0>;
             // Only the standard BVH layout can be a TLAS
             if constexpr (std::is_same_v<BvhType, tinybvh::BVH>) {
                 return bvh.isTLAS();
@@ -2206,6 +2210,156 @@ public:
         return arr;
     }
 
+    void set_traversal_cost(const float cost) const {
+        auto apply = [&](tinybvh::BVHBase* b){ if (b) b->c_trav = cost; };
+        apply(active_bvh_);
+        apply(base_.get()); apply(soa_.get()); apply(bvh4_cpu_.get());
+        apply(bvh4_gpu_.get()); apply(cwbvh_.get()); apply(bvh8_cpu_.get());
+        apply(mbvh4_.get()); apply(mbvh8_.get()); apply(bvh_gpu_.get());
+    }
+
+    void set_intersection_cost(const float cost) const {
+        auto apply = [&](tinybvh::BVHBase* b){ if (b) b->c_int = cost; };
+        apply(active_bvh_);
+        apply(base_.get()); apply(soa_.get()); apply(bvh4_cpu_.get());
+        apply(bvh4_gpu_.get()); apply(cwbvh_.get()); apply(bvh8_cpu_.get());
+        apply(mbvh4_.get()); apply(mbvh8_.get()); apply(bvh_gpu_.get());
+    }
+
+    nb::object instances() {
+        if (!active_bvh_) throw std::runtime_error("BVH is not initialized.");
+
+        if (instances_data.empty()) {
+            return np().attr("empty")(nb::make_tuple(0), "dtype"_a = INSTANCE_DTYPE());
+        }
+
+        const size_t n = instances_data.size();
+        const auto itemsize = nb::cast<size_t>(INSTANCE_DTYPE().attr("itemsize"));
+
+        // Alias the underlying std::vector<BLASInstance> storage as a byte array
+        auto bytes = nb::ndarray<uint8_t, nb::numpy, nb::c_contig>(
+            reinterpret_cast<uint8_t*>(instances_data.data()),
+            /*shape*/ { n * itemsize },
+            /*owner*/ nb::find(this)  // tie lifetime to PyBVH
+        );
+
+        nb::object arr = bytes.cast()
+            .attr("view")(INSTANCE_DTYPE())
+            .attr("reshape")(nb::make_tuple(n));
+
+        // Explicitly make the view writable
+        arr.attr("setflags")("write"_a = true);
+        return arr;
+    }
+
+    void update_instances(nb::object instances_obj = nb::none(), const bool recompute_aabbs = true) {
+
+        if (!active_bvh_)
+            throw std::runtime_error("BVH is not initialized.");
+        if (instances_data.empty())
+            throw nb::value_error("This BVH is not a TLAS (no instances).");
+
+        // Path A: external buffer provided (bulk replace)
+        if (!instances_obj.is_none()) {
+            // Ensure contiguous array with the canonical dtype
+            nb::object arr = np().attr("ascontiguousarray")(instances_obj, "dtype"_a = INSTANCE_DTYPE());
+
+            // Must be 1D structured array
+            if (nb::cast<int>(arr.attr("ndim")) != 1)
+                throw std::runtime_error("`instances` must be a 1D structured array.");
+
+            const auto n = nb::cast<Py_ssize_t>(arr.attr("shape")[0]);
+            if (static_cast<size_t>(n) != instances_data.size())
+                throw std::runtime_error("Shape mismatch: different number of instances.");
+
+            nb::object dtype_obj = arr.attr("dtype");
+            nb::object fields_obj = dtype_obj.attr("fields");
+            if (fields_obj.is_none())
+                throw std::runtime_error("`instances` must be a structured dtype.");
+
+            nb::dict fields = nb::isinstance<nb::dict>(fields_obj)
+                ? nb::cast<nb::dict>(fields_obj)
+                : nb::cast<nb::dict>(builtins().attr("dict")(fields_obj));
+
+            // Required fields
+            for (const char* name : {"transform", "blas_id"})
+                if (!fields.contains(name))
+                    throw std::runtime_error("Instance dtype must contain 'transform' and 'blas_id'.");
+
+            // Validate 'transform' subdtype: float32 with shape (4,4)
+            auto tinfo = nb::cast<nb::tuple>(fields["transform"]);
+            nb::object t_dt = tinfo[0];
+            nb::object sd = t_dt.attr("subdtype");
+            if (sd.is_none())
+                throw std::runtime_error("'transform' field must be a (4,4) subarray.");
+
+            const auto sd_tuple = nb::cast<nb::tuple>(sd);
+            nb::object base = sd_tuple[0];
+            auto shape = nb::cast<nb::tuple>(sd_tuple[1]);
+            if (nb::cast<int>(base.attr("itemsize")) != 4 || nb::cast<int>(shape[0]) != 4 || nb::cast<int>(shape[1]) != 4)
+                throw std::runtime_error("'transform' must be float32 with shape (4,4).");
+
+            // Offsets + itemsize
+            const auto transform_offset = nb::cast<size_t>(tinfo[1]);
+            const auto blas_id_offset = nb::cast<size_t>(nb::cast<nb::tuple>(fields["blas_id"])[1]);
+            const size_t mask_offset = fields.contains("mask") ? nb::cast<size_t>(nb::cast<nb::tuple>(fields["mask"])[1]) : static_cast<size_t>(-1);
+            const auto itemsize = nb::cast<size_t>(dtype_obj.attr("itemsize"));
+
+            // Byte view for pointer math
+            const nb::object view_u8 = arr.attr("view")(np().attr("uint8"));
+            const auto bytes = nb::cast<nb::ndarray<uint8_t, nb::c_contig>>(view_u8);
+            const auto base_ptr = reinterpret_cast<const char*>(bytes.data());
+
+            // Pre-validate all blas_id's with GIL held
+            for (size_t i = 0; i < static_cast<size_t>(n); ++i) {
+                const char* rec = base_ptr + i * itemsize;
+                const uint32_t bid = *reinterpret_cast<const uint32_t*>(rec + blas_id_offset);
+                if (bid >= blas_pointers.size())
+                    throw std::runtime_error("Invalid blas_id in instances array.");
+            }
+
+            // Copy + optional recompute with GIL released
+            {
+                nb::gil_scoped_release rel;
+                for (size_t i = 0; i < static_cast<size_t>(n); ++i) {
+                    const char* rec = base_ptr + i * itemsize;
+                    const uint32_t bid = *reinterpret_cast<const uint32_t*>(rec + blas_id_offset);
+                    const auto* T = reinterpret_cast<const float*>(rec + transform_offset);
+
+                    tinybvh::BLASInstance& dst = instances_data[i];
+                    dst.blasIdx = bid;
+                    if (mask_offset != static_cast<size_t>(-1))
+                        dst.mask = *reinterpret_cast<const uint32_t*>(rec + mask_offset);
+
+                    std::memcpy(dst.transform.cell, T, 16 * sizeof(float));
+                    if (recompute_aabbs)
+                        dst.Update(blas_pointers[bid]);
+                }
+            }
+
+            // keep a ref to the (possibly contiguous-cast) array
+            source_geometry_refs.append(arr);
+            return;
+        }
+
+        // Path B: no external array (sync derived data for in-place edits)
+        if (!recompute_aabbs)
+            return;
+
+        // Validate current in-memory blasIdx's before recompute
+        for (const auto& inst : instances_data) {
+            if (inst.blasIdx >= blas_pointers.size())
+                throw std::runtime_error("Invalid blas_id in TLAS memory.");
+        }
+
+        // Recompute inverse transforms + AABBs for all instances
+        {
+            nb::gil_scoped_release rel;
+            for (auto& inst : instances_data)
+                inst.Update(blas_pointers[inst.blasIdx]);
+        }
+    }
+
     [[nodiscard]] nb::dict get_buffers() const {
 
         if (!active_bvh_) {
@@ -2217,8 +2371,8 @@ public:
 
         // Get buffers for the BVH structure itself
         // all read only, all as float32 (or uint32, for prim_indices)
-        dispatch_bvh_call(active_bvh_, [&](auto& bvh) {
-            using BvhType = std::decay_t<decltype(bvh)>;
+        dispatch_bvh_call(active_bvh_, [&]<typename T0>(T0& bvh) {
+            using BvhType = std::decay_t<T0>;
 
             // Standard layout
             if constexpr (std::is_same_v<BvhType, tinybvh::BVH>) {
@@ -2370,7 +2524,7 @@ public:
         return cached;
     }
 
-    void set_instance_transform(size_t i, nb::ndarray<const float, nb::shape<4,4>, nb::c_contig> M) {
+    void set_instance_transform(size_t i, const nb::ndarray<const float, nb::shape<4,4>, nb::c_contig>& M) {
         if (!is_tlas()) throw nb::value_error("Not a TLAS");
 
         if (i >= instances_data.size()) throw nb::index_error("instance index out of range");
@@ -2407,7 +2561,7 @@ public:
         // Passing 'nullptr' for the BLAS list means "use existing per-instance AABBs" (see tiny_bvh BVH::Build note)
         nb::gil_scoped_release rel;
         base_->Build(instances_data.data(),
-                     (uint32_t)instances_data.size(),
+                     static_cast<uint32_t>(instances_data.size()),
                      /*blasses*/ nullptr, /*blasCount*/ 0);
 
         // keep active layout in sync
@@ -3164,6 +3318,36 @@ NB_MODULE(_pytinybvh, m) {
             return nb::none();
             }, "The radius for sphere geometry, or None.")
 
+        .def_prop_ro("instances", &PyBVH::instances,
+            R"((
+            A writable 1D structured numpy view of the TLAS instances (zero-copy). Only meaningful on a TLAS.
+
+            Notes:
+                - Modify `transform` and/or `mask` in-place, then call `refit_tlas()`.
+                - Changing `blas_id` is possible but advanced: it must reference an existing
+                  BLAS captured at TLAS build time. After changing it, call `update_instances`
+                  with `recompute_aabbs=True` (or call it once for all changed instances)
+                  before `refit_tlas()`, so AABBs are re-derived from the new BLAS.
+            ))")
+
+        .def("update_instances", &PyBVH::update_instances,
+            R"((
+            Bulk-updates TLAS instances from a structured array (zero extra copies in Python). Only useable on a TLAS.
+
+            Args:
+                instances (numpy.ndarray): Structured array with dtype `instance_dtype`
+                    Must contain fields:
+                      - 'transform' : (4, 4) float32, row-major
+                      - 'blas_id'   : uint32
+                      - 'mask'      : uint32 (Optional. Defaults preserved if omitted.)
+                recompute_aabbs (bool): If True (default), recomputes each instance's inverse transform and world-space AABB.
+
+            Notes:
+                - After updates, call `refit_tlas()` to rebuild the TLAS over the updated AABBs.
+                - The array length must match the existing TLAS instance count.
+            ))",
+            nb::arg("instances"), nb::arg("recompute_aabbs") = true)
+
         .def("get_buffers", &PyBVH::get_buffers,
             R"((
             Returns a dictionary of raw, zero-copy numpy arrays for all current BVH's internal data and geometry.
@@ -3345,10 +3529,10 @@ NB_MODULE(_pytinybvh, m) {
             if (!self.active_bvh_) {
                 return 0;
             }
-            return dispatch_bvh_call(self.active_bvh_, [](auto& bvh) {
+            return dispatch_bvh_call(self.active_bvh_, []<typename T0>(T0& bvh) {
                 // Use a compile-time if to check if the method exists for the concrete type
                 // We know it exists on tinybvh::BVH. It also exists on MBVH<M>
-                using BvhType = std::decay_t<decltype(bvh)>;
+                using BvhType = std::decay_t<T0>;
                 if constexpr (std::is_same_v<BvhType, tinybvh::BVH>) {
                     return bvh.LeafCount();
                 } else {
@@ -3374,8 +3558,8 @@ NB_MODULE(_pytinybvh, m) {
                 return 0.0f;
             }
 
-            return dispatch_bvh_call(self.active_bvh_, [](auto& bvh) {
-                using BvhType = std::decay_t<decltype(bvh)>;
+            return dispatch_bvh_call(self.active_bvh_, []<typename T0>(T0& bvh) {
+                using BvhType = std::decay_t<T0>;
                 if constexpr (std::is_same_v<BvhType, tinybvh::BVH>) {
                     return bvh.EPOCost();
                 } else {
@@ -3383,6 +3567,24 @@ NB_MODULE(_pytinybvh, m) {
                 }
             });
             }, "Calculates the Expected Projected Overlap (EPO) cost of the BVH (only for standard layout).")
+
+        .def("set_traversal_cost", &PyBVH::set_traversal_cost,
+            R"((
+            Sets the SAH traversal cost used by metrics/optimizers.
+
+            This does not rebuild the BVH. It simply updates the cost used by SAH reporting
+            and any subsequent optimization passes that consult it.
+            ))",
+            nb::arg("cost"))
+
+        .def("set_intersection_cost", &PyBVH::set_intersection_cost,
+            R"(
+            Sets the SAH intersection cost used by metrics/optimizers.
+
+            This does not rebuild the BVH. It simply updates the cost used by SAH reporting
+            and any subsequent optimization passes that consult it.
+            ))",
+            nb::arg("cost"))
 
         .def_prop_ro("layout", [](const PyBVH &self) -> Layout {
             return self.active_layout_;

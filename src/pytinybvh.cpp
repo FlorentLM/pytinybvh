@@ -2434,57 +2434,90 @@ NB_MODULE(_pytinybvh, m) {
     m.attr("bvh_node_dtype") = nb::borrow(g_bvh_node_dtype);
     m.attr("instance_dtype") = nb::borrow(g_instance_dtype);
 
-    nb::enum_<Layout>(m, "Layout")
-        .value("Standard",   Layout::Standard)
-        .value("SoA",        Layout::SoA)
-        .value("BVH_GPU",    Layout::BVH_GPU)
-        .value("MBVH4",      Layout::MBVH4)
-        .value("MBVH8",      Layout::MBVH8)
-        .value("BVH4_CPU",   Layout::BVH4_CPU)
-        .value("BVH4_GPU",   Layout::BVH4_GPU)
-        .value("CWBVH",      Layout::CWBVH)
-        .value("BVH8_CPU",   Layout::BVH8_CPU);
-
-    m.def("hardware_info", &get_hardware_info,
-        "Returns a dictionary detailing the compile-time and runtime capabilities of the library.");
-
-    m.def("layout_to_string", [](Layout L){ return std::string(layout_to_string(L)); });
-
-    m.def("supports_layout",
-          [](Layout L, bool for_traversal) { return supports_layout(L, for_traversal); },
-          "Checks if the current system supports a given BVH layout.",
-          nb::arg("layout"), nb::arg("for_traversal") = true);
-
-    m.def("require_layout",
-          [](Layout L, bool for_traversal) {
-              if (!supports_layout(L, for_traversal)) {
-                  throw std::runtime_error(
-                      std::string("Requested layout '") + layout_to_string(L) + "' unavailable: " +
-                      explain_requirement(L));
-              }
-          },
-          "Asserts that a given BVH layout is supported, raising a RuntimeError if not.",
-          nb::arg("layout"), nb::arg("for_traversal") = true);
-
-    // Build quality, Geometry type, BVH Layout, Packet Mode, and Cache Policy enums exposed to Python
+    // Build quality, Geometry type, BVH Layout, Packet Mode, Cache Policy and Layout enums exposed to Python
     nb::enum_<BuildQuality>(m, "BuildQuality", "Enum for selecting BVH build quality.")
         .value("Quick", BuildQuality::Quick, "Fastest build, lower quality queries.")
         .value("Balanced", BuildQuality::Balanced, "Balanced build time and query performance (default).")
         .value("High", BuildQuality::High, "Slowest build (uses spatial splits), highest quality queries.");
 
-    nb::enum_<GeometryType>(m, "GeometryType", "Enum for the underlying geometry type used by the BVH.")
+    nb::enum_<GeometryType>(m, "GeometryType", "Enum for the underlying geometry type of the BVH.")
         .value("Triangles", GeometryType::Triangles, "The BVH was built over a triangle mesh.")
         .value("AABBs", GeometryType::AABBs, "The BVH was built over custom Axis-Aligned Bounding Boxes.")
         .value("Spheres", GeometryType::Spheres, "The BVH was built over a point cloud with a radius (spheres).");
 
     nb::enum_<CachePolicy>(m, "CachePolicy", "Enum for managing cached BVH layouts after conversion.")
-        .value("ActiveOnly", CachePolicy::ActiveOnly, "(Default) Free memory of any non-active layouts after a conversion.")
-        .value("All", CachePolicy::All, "Keep all generated layouts in memory for fast switching.");
+        .value("ActiveOnly", CachePolicy::ActiveOnly, "(Default) Free memory of any non-active layouts after a conversion. This minimizes memory usage.")
+        .value("All", CachePolicy::All, "Keep all generated layouts in memory. This uses more memory but makes switching back to a previously used layout instantaneous.");
 
     nb::enum_<PacketMode>(m, "PacketMode", "Enum for controlling SIMD packet traversal in batched queries.")
         .value("Auto",  PacketMode::Auto,  "Use packets for coherent rays with a shared origin.")
         .value("Never", PacketMode::Never, "Always use scalar traversal. Safest for non-coherent rays.")
         .value("Force", PacketMode::Force, "Force packet traversal. Unsafe for non-coherent rays.");
+
+    nb::enum_<Layout>(m, "Layout", "Enum for the internal memory layout of the BVH.")
+        .value("Standard", Layout::Standard, "Standard BVH layout. Always available and traversable.")
+        .value("SoA", Layout::SoA, "Structure of Arrays layout, optimized for AVX/NEON traversal.")
+        .value("BVH_GPU", Layout::BVH_GPU, "Aila & Laine layout, optimized for GPU traversal (scalar traversal on CPU).")
+        .value("MBVH4", Layout::MBVH4, "4-wide MBVH layout. This is a structural format used as an intermediate for other wide layouts. Not directly traversable.")
+        .value("MBVH8", Layout::MBVH8, "8-wide MBVH layout. This is a structural format used as an intermediate for other wide layouts. Not directly traversable.")
+        .value("BVH4_CPU", Layout::BVH4_CPU, "4-wide BVH layout, optimized for SSE CPU traversal.")
+        .value("BVH4_GPU", Layout::BVH4_GPU, "Quantized 4-wide BVH layout for GPUs (scalar traversal on CPU).")
+        .value("CWBVH", Layout::CWBVH, "Compressed 8-wide BVH layout, optimized for AVX traversal.")
+        .value("BVH8_CPU", Layout::BVH8_CPU, "8-wide BVH layout, optimized for AVX2 CPU traversal.");
+
+    // Top-level functions
+
+    m.def("hardware_info", &get_hardware_info,
+        R"((
+        Returns a dictionary detailing the compile-time and runtime capabilities of the library.
+
+        This includes detected SIMD instruction sets and which BVH layouts support
+        conversion and traversal on the current system.
+
+        Returns:
+            Dict[str, Any]: A dictionary with the hardware info.
+        ))");
+
+    m.def("layout_to_string", [](Layout L){ return std::string(layout_to_string(L)); });
+
+    m.def("supports_layout",
+        [](Layout L, bool for_traversal) { return supports_layout(L, for_traversal); },
+        R"((
+        Checks if the current system supports a given BVH layout.
+
+        Args:
+            layout (Layout): The layout to check.
+            for_traversal (bool): If True (default), checks if the layout is supported for
+                                  ray traversal. If False, checks if it's supported for
+                                  conversion (which is always True for valid layouts).
+
+        Returns:
+            bool: True if the layout is supported, False otherwise.
+        ))",
+        nb::arg("layout"), nb::arg("for_traversal") = true);
+
+    m.def("require_layout",
+        [](Layout L, bool for_traversal) {
+            if (!supports_layout(L, for_traversal)) {
+              throw std::runtime_error(
+                  std::string("Requested layout '") + layout_to_string(L) + "' unavailable: " +
+                  explain_requirement(L));
+            }
+        },
+        R"((
+        Asserts that a given BVH layout is supported, raising a RuntimeError if not.
+
+        This is useful for writing tests or code that depends on a specific high-performance
+        layout being available.
+
+        Args:
+            layout (Layout): The layout to require.
+            for_traversal (bool): If True (default), requires traversal support.
+
+        Raises:
+            RuntimeError: If the layout is not supported on the current system.
+        ))",
+        nb::arg("layout"), nb::arg("for_traversal") = true);
 
     // Main Python classes
     nb::class_<PyRay>(m, "Ray", "Represents a ray for intersection queries.")
@@ -2517,13 +2550,13 @@ NB_MODULE(_pytinybvh, m) {
 
         .def_rw("mask", &PyRay::mask, "The visibility mask for the ray.")
 
-        .def_ro("u", &PyRay::u, "Barycentric u-coordinate for triangle hits, or the first texture coordinate for custom geometry like spheres and AABBs.")
+        .def_ro("u", &PyRay::u, "Barycentric u-coordinate, or texture coordinate u when using custom geometry.")
 
-        .def_ro("v", &PyRay::v, "Barycentric v-coordinate for triangle hits, or the second texture coordinate for custom geometry like spheres and AABBs.")
+        .def_ro("v", &PyRay::v, "Barycentric v-coordinate, or texture coordinate v when using custom geometry.")
 
-        .def_ro("prim_id", &PyRay::prim_id, "The ID of the primitive that was hit.")
+        .def_ro("prim_id", &PyRay::prim_id, "The ID of the primitive hit (-1 for miss).")
 
-        .def_ro("inst_id", &PyRay::inst_id, "The ID of the instance that was hit.")
+        .def_ro("inst_id", &PyRay::inst_id, "The ID of the instance hit (-1 for miss or BLAS hit).")
 
         .def("__repr__", [](const PyRay &r) {
             std::string origin_s = "[" + std::to_string(r.origin.x) + ", " +
@@ -2545,60 +2578,25 @@ NB_MODULE(_pytinybvh, m) {
 
     nb::class_<PyBVH>(m, "BVH", "A Bounding Volume Hierarchy for fast ray intersections.")
 
-        // Cache policy management
-
-        .def("set_cache_policy", &PyBVH::set_cache_policy,
-            R"((
-                Sets caching policy for converted layouts.
-
-                Args:
-                    policy (CachePolicy): The new policy to use (ActiveOnly or All).
-                ))",
-            nb::arg("policy"))
-
-        .def("clear_cached_layouts", &PyBVH::clear_cached_layouts,
-            R"((
-                Frees the memory of all cached layouts, except for the active one and the base layout.
-            ))")
-
-        // Converter method
-
-        .def("convert_to", &PyBVH::convert_to,
-            R"((
-                Converts the BVH to a different internal memory layout, modifying it in-place.
-
-                This allows optimizing the BVH for different traversal algorithms (SSE, AVX, etc.).
-                The caching policy of converted layouts can be controlled (see `set_cache_policy` and `clear_cached_layouts`).
-
-                Args:
-                    layout (Layout): The target memory layout.
-                    compact (bool): Whether to compact the BVH during conversion. Defaults to True.
-                    strict (bool): If True, raises a RuntimeError if the target layout is not
-                                   supported for traversal on the current system. Defaults to False.
-                ))",
-            nb::arg("layout") = Layout::Standard,
-            nb::arg("compact") = true,
-            nb::arg("strict") = false)
-
         // Core Builders
 
         .def_static("from_vertices", &PyBVH::from_vertices,
             R"((
-                Builds a BVH from a flat array of vertices (N * 3, 4).
+            Builds a BVH from a flat array of vertices (N * 3, 4).
 
-                This is a zero-copy operation. The BVH will hold a reference to the
-                provided numpy array's memory buffer. The array must not be garbage-collected
-                while the BVH is in use. The number of vertices must be a multiple of 3.
+            This is a zero-copy operation. The BVH will hold a reference to the
+            provided numpy array's memory buffer. The array must not be garbage-collected
+            while the BVH is in use. The number of vertices must be a multiple of 3.
 
-                Args:
-                    vertices (numpy.ndarray): A float32 array of shape (M, 4).
-                    quality (BuildQuality): The desired quality of the BVH.
-                    traversal_cost (float, optional): The traversal cost for the SAH builder. Defaults to 1.
-                    intersection_cost (float, optional): The intersection cost for the SAH builder. Defaults to 1.
-                    hq_bins (int, optional): The number of bins to use for the high-quality build algorithm (SBVH).
+            Args:
+                vertices (numpy.ndarray): A float32 array of shape (M, 4).
+                quality (BuildQuality): The desired quality of the BVH.
+                traversal_cost (float, optional): The traversal cost for the SAH builder. Defaults to 1.
+                intersection_cost (float, optional): The intersection cost for the SAH builder. Defaults to 1.
+                hq_bins (int, optional): The number of bins to use for the high-quality build algorithm (SBVH).
 
-                Returns:
-                    BVH: A new BVH instance.
+            Returns:
+                BVH: A new BVH instance.
             ))",
             nb::rv_policy::move,
             nb::arg("vertices").noconvert(), nb::arg("quality") = BuildQuality::Balanced,
@@ -2609,22 +2607,22 @@ NB_MODULE(_pytinybvh, m) {
 
         .def_static("from_indexed_mesh", &PyBVH::from_indexed_mesh,
             R"((
-                Builds a BVH from a vertex buffer and an index buffer.
+            Builds a BVH from a vertex buffer and an index buffer.
 
-                This is the most memory-efficient method for triangle meshes and allows for
-                efficient refitting after vertex deformation. This is a zero-copy operation.
-                The BVH will hold a reference to both provided numpy arrays.
+            This is the most memory-efficient method for triangle meshes and allows for
+            efficient refitting after vertex deformation. This is a zero-copy operation.
+            The BVH will hold a reference to both provided numpy arrays.
 
-                Args:
-                    vertices (numpy.ndarray): A float32 array of shape (V, 4), where V is the number of unique vertices.
-                    indices (numpy.ndarray): A uint32 array of shape (N, 3), where N is the number of triangles.
-                    quality (BuildQuality): The desired quality of the BVH.
-                    traversal_cost (float, optional): The traversal cost for the SAH builder. Defaults to 1.
-                    intersection_cost (float, optional): The intersection cost for the SAH builder. Defaults to 1.
-                    hq_bins (int, optional): The number of bins to use for the high-quality build algorithm (SBVH).
+            Args:
+                vertices (numpy.ndarray): A float32 array of shape (V, 4), where V is the number of unique vertices.
+                indices (numpy.ndarray): A uint32 array of shape (N, 3), where N is the number of triangles.
+                quality (BuildQuality): The desired quality of the BVH.
+                traversal_cost (float, optional): The traversal cost for the SAH builder. Defaults to 1.
+                intersection_cost (float, optional): The intersection cost for the SAH builder. Defaults to 1.
+                hq_bins (int, optional): The number of bins to use for the high-quality build algorithm (SBVH).
 
-                Returns:
-                    BVH: A new BVH instance.
+            Returns:
+                BVH: A new BVH instance.
             ))",
             nb::rv_policy::move,
             nb::arg("vertices").noconvert(), nb::arg("indices").noconvert(),
@@ -2637,22 +2635,22 @@ NB_MODULE(_pytinybvh, m) {
 
         .def_static("from_aabbs", &PyBVH::from_aabbs,
             R"((
-                Builds a BVH from an array of Axis-Aligned Bounding Boxes.
+            Builds a BVH from an array of Axis-Aligned Bounding Boxes.
 
-                This is a zero-copy operation. The BVH will hold a reference to the
-                provided numpy array's memory buffer. This is useful for building a BVH over
-                custom geometry or for creating a Top-Level Acceleration Structure (TLAS).
+            This is a zero-copy operation. The BVH will hold a reference to the
+            provided numpy array's memory buffer. This is useful for building a BVH over
+            custom geometry or for creating a Top-Level Acceleration Structure (TLAS).
 
-                Args:
-                    aabbs (numpy.ndarray): A float32, C-contiguous array of shape (N, 2, 3),
-                                           where each item is a pair of [min_corner, max_corner].
-                    quality (BuildQuality): The desired quality of the BVH.
-                    traversal_cost (float, optional): The traversal cost for the SAH builder. Defaults to 1.
-                    intersection_cost (float, optional): The intersection cost for the SAH builder. Defaults to 1.
-                    hq_bins (int, optional): The number of bins to use for the high-quality build algorithm (SBVH).
+            Args:
+                aabbs (numpy.ndarray): A float32, C-contiguous array of shape (N, 2, 3),
+                                       where each item is a pair of [min_corner, max_corner].
+                quality (BuildQuality): The desired quality of the BVH.
+                traversal_cost (float, optional): The traversal cost for the SAH builder. Defaults to 1.
+                intersection_cost (float, optional): The intersection cost for the SAH builder. Defaults to 1.
+                hq_bins (int, optional): The number of bins to use for the high-quality build algorithm (SBVH).
 
-                Returns:
-                    BVH: A new BVH instance.
+            Returns:
+                BVH: A new BVH instance.
             ))",
             nb::rv_policy::move,
             nb::arg("aabbs").noconvert(), nb::arg("quality") = BuildQuality::Balanced,
@@ -2665,18 +2663,18 @@ NB_MODULE(_pytinybvh, m) {
 
         .def_static("from_triangles", &PyBVH::from_triangles,
             R"((
-                Builds a BVH from a standard triangle array. This is a convenience method that
-                copies and reformats the data into the layout required by the BVH.
+            Builds a BVH from a standard triangle array. This is a convenience method that
+            copies and reformats the data into the layout required by the BVH.
 
-                Args:
-                    triangles (numpy.ndarray): A float32 array of shape (N, 3, 3) or (N, 9) representing N triangles.
-                    quality (BuildQuality): The desired quality of the BVH.
-                    traversal_cost (float, optional): The traversal cost for the SAH builder. Defaults to 1.
-                    intersection_cost (float, optional): The intersection cost for the SAH builder. Defaults to 1.
-                    hq_bins (int, optional): The number of bins to use for the high-quality build algorithm (SBVH).
+            Args:
+                triangles (numpy.ndarray): A float32 array of shape (N, 3, 3) or (N, 9) representing N triangles.
+                quality (BuildQuality): The desired quality of the BVH.
+                traversal_cost (float, optional): The traversal cost for the SAH builder. Defaults to 1.
+                intersection_cost (float, optional): The intersection cost for the SAH builder. Defaults to 1.
+                hq_bins (int, optional): The number of bins to use for the high-quality build algorithm (SBVH).
 
-                Returns:
-                    BVH: A new BVH instance.
+            Returns:
+                BVH: A new BVH instance.
             ))",
             nb::rv_policy::move,
             nb::arg("triangles"), nb::arg("quality") = BuildQuality::Balanced,
@@ -2687,19 +2685,19 @@ NB_MODULE(_pytinybvh, m) {
 
         .def_static("from_points", &PyBVH::from_points,
             R"((
-                Builds a BVH from a point cloud. This is a convenience method that creates an
-                axis-aligned bounding box for each point and builds the BVH from those.
+            Builds a BVH from a point cloud. This is a convenience method that creates an
+            axis-aligned bounding box for each point and builds the BVH from those.
 
-                Args:
-                    points (numpy.ndarray): A float32 array of shape (N, 3) representing N points.
-                    radius (float): The radius used to create an AABB for each point.
-                    quality (BuildQuality): The desired quality of the BVH.
-                    traversal_cost (float, optional): The traversal cost for the SAH builder. Defaults to 1.
-                    intersection_cost (float, optional): The intersection cost for the SAH builder. Defaults to 1.
-                    hq_bins (int, optional): The number of bins to use for the high-quality build algorithm (SBVH).
+            Args:
+                points (numpy.ndarray): A float32 array of shape (N, 3) representing N points.
+                radius (float): The radius used to create an AABB for each point.
+                quality (BuildQuality): The desired quality of the BVH.
+                traversal_cost (float, optional): The traversal cost for the SAH builder. Defaults to 1.
+                intersection_cost (float, optional): The intersection cost for the SAH builder. Defaults to 1.
+                hq_bins (int, optional): The number of bins to use for the high-quality build algorithm (SBVH).
 
-                Returns:
-                    BVH: A new BVH instance.
+            Returns:
+                BVH: A new BVH instance.
             ))",
             nb::rv_policy::move,
             nb::arg("points"), nb::arg("radius") = 1e-5f, nb::arg("quality") = BuildQuality::Balanced,
@@ -2708,56 +2706,112 @@ NB_MODULE(_pytinybvh, m) {
             nb::keep_alive<0,1>()  // result keeps points
             )
 
-        // Converter method
+        // Cache policy management
+
+        .def("set_cache_policy", &PyBVH::set_cache_policy,
+            R"((
+            Sets caching policy for converted layouts.
+
+            Args:
+                policy (CachePolicy): The new policy to use (ActiveOnly or All).
+            ))",
+           nb::arg("policy"))
+
+        .def("clear_cached_layouts", &PyBVH::clear_cached_layouts,
+           R"((
+            Frees the memory of all cached layouts, except for the active one and the base layout.
+            ))")
+
+        // Conversion, TLAS building
+
         .def("convert_to", &PyBVH::convert_to,
-            nb::arg("layout"),
-            nb::arg("compact") = true,
-            nb::arg("strict") = false)
+            R"((
+            Converts the BVH to a different internal memory layout, modifying it in-place.
+
+            This allows optimizing the BVH for different traversal algorithms (SSE, AVX, etc.).
+            The caching policy of converted layouts can be controlled (see `set_cache_policy` and `clear_cached_layouts`).
+
+            Args:
+                layout (Layout): The target memory layout.
+                compact (bool): Whether to compact the BVH during conversion. Defaults to True.
+                strict (bool): If True, raises a RuntimeError if the target layout is not
+                               supported for traversal on the current system. Defaults to False.
+            ))",
+           nb::arg("layout") = Layout::Standard,
+           nb::arg("compact") = true,
+           nb::arg("strict") = false)
+
+        .def_static("build_tlas", &PyBVH::build_tlas,
+            R"((
+            Builds a Top-Level Acceleration Structure (TLAS) from a list of BVH instances.
+
+            Args:
+                instances (numpy.ndarray): A structured array with `instance_dtype` describing
+                                           each instance's transform, blas_id, and mask.
+                BLASes (List[BVH]): A list of the BVH objects to be instanced. The `blas_id`
+                                    in the instances array corresponds to the index in this list.
+
+            Returns:
+                BVH: A new BVH instance representing the TLAS.
+            ))",
+            nb::arg("instances"), nb::arg("BLASes"))
 
         // Intersection methods
 
         .def("intersect", &PyBVH::intersect,
             R"((
-                Performs an intersection query with a single ray.
+            Performs an intersection query with a single ray.
 
-                This method modifies the passed Ray object in-place if a closer hit is found.
+            This method modifies the passed Ray object in-place if a closer hit is found.
 
-                Args:
-                    ray (Ray): The ray to test. Its `t`, `u`, `v`, and `prim_id` attributes
-                               will be updated upon a successful hit.
+            Args:
+                ray (Ray): The ray to test. Its `t`, `u`, `v`, and `prim_id` attributes
+                           will be updated upon a successful hit.
 
-                Returns:
-                    float: The hit distance `t` if a hit was found, otherwise `infinity`.
+            Returns:
+                float: The hit distance `t` if a hit was found, otherwise `infinity`.
             ))",
             nb::arg("ray"))
 
         .def("intersect_batch", &PyBVH::intersect_batch,
             R"((
-                Performs intersection queries for a batch of rays.
+            Performs intersection queries for a batch of rays.
 
-                This method is highly parallelized using multi-core processing for all geometry types
-                (triangles, AABBs, spheres). For standard triangle meshes, it also leverages SIMD
-                instructions where available for maximum throughput.
+            This method is highly parallelized using multi-core processing for all geometry types
+            (triangles, AABBs, spheres). For standard triangle meshes, it also leverages SIMD
+            instructions where available for maximum throughput.
 
-                Args:
-                    origins (numpy.ndarray): A (N, 3) float array of ray origins.
-                    directions (numpy.ndarray): A (N, 3) float array of ray directions.
-                    t_max (numpy.ndarray, optional): A (N,) float array of maximum intersection distances.
-                    masks (numpy.ndarray, optional): A (N,) uint32 array of per-ray visibility mask.
-                                                     For a ray to test an instance for intersection, the bitwise
-                                                     AND of the ray's mask and the instance's mask must be non-zero.
-                                                     If not provided, rays default to mask 0xFFFF (intersect all instances).
-                    packet (PacketMode, optional): Choose packet usage strategy. Defaults to Auto.
-                    same_origin_eps (float, optional): Epsilon for same-origin test. Default 1e-6.
-                    max_spread (float, optional): Max spread allowed for a batch (cone angle, in degrees). Default 1.0.
-                    warn_on_incoherent (bool, optional): Warn when rays differ in origin. Default True.
+            .. warning::
+                Packet traversal (`Auto` or `Force`) is highly optimized but
+                makes strict assumptions about the input rays:
+                    - Shared origin: All rays in a batch must share the same origin point.
+                    - Coherent directions: The ray directions should form a coherent frustum,
+                        like rays cast from a camera through pixels on a screen.
 
-                Returns:
-                    numpy.ndarray: A structured array of shape (N,) with dtype
-                        [('prim_id', '<u4'), ('inst_id', '<u4'), ('t', '<f4'), ('u', '<f4'), ('v', '<f4')].
-                        For misses, prim_id and inst_id are -1 and t is infinity.
-                        For TLAS hits, inst_id is the instance index and prim_id is the primitive
-                        index within that instance's BLAS.
+                Providing rays with different origins or random, incoherent directions
+                with packet traversal enabled may lead to **incorrect results (false misses)**.
+                If your rays do not meet these criteria, use `packet='Never'` to ensure
+                correctness via scalar traversal.
+
+            Args:
+                origins (numpy.ndarray): A (N, 3) float array of ray origins.
+                directions (numpy.ndarray): A (N, 3) float array of ray directions.
+                t_max (numpy.ndarray, optional): A (N,) float array of maximum intersection distances.
+                masks (numpy.ndarray, optional): A (N,) uint32 array of per-ray visibility mask.
+                                                 For a ray to test an instance for intersection, the bitwise
+                                                 AND of the ray's mask and the instance's mask must be non-zero.
+                                                 If not provided, rays default to mask 0xFFFF (intersect all instances).
+                packet (PacketMode, optional): Choose packet usage strategy. Defaults to Auto.
+                same_origin_eps (float, optional): Epsilon for same-origin test. Default 1e-6.
+                max_spread (float, optional): Max spread allowed for a batch (cone angle, in degrees). Default 1.0.
+                warn_on_incoherent (bool, optional): Warn when rays differ in origin. Default True.
+
+            Returns:
+                numpy.ndarray: A structured array of shape (N,) with dtype
+                    [('prim_id', '<u4'), ('inst_id', '<u4'), ('t', '<f4'), ('u', '<f4'), ('v', '<f4')].
+                    For misses, prim_id and inst_id are -1 and t is infinity.
+                    For TLAS hits, inst_id is the instance index and prim_id is the primitive
+                    index within that instance's BLAS.
             ))",
             nb::arg("origins").noconvert(), nb::arg("directions").noconvert(),
             nb::arg("t_max").noconvert() = nb::none(), nb::arg("masks").noconvert() = nb::none(),
@@ -2767,42 +2821,52 @@ NB_MODULE(_pytinybvh, m) {
             nb::arg("warn_on_incoherent") = true)
 
         .def("is_occluded", &PyBVH::is_occluded,
-           R"((
-                Performs an occlusion query with a single ray.
+            R"((
+            Performs an occlusion query with a single ray.
 
-                Checks if any geometry is hit by the ray within the distance specified by `ray.t`.
-                This is typically faster than `intersect` as it can stop at the first hit.
+            Checks if any geometry is hit by the ray within the distance specified by `ray.t`.
+            This is typically faster than `intersect` as it can stop at the first hit.
 
-                Args:
-                    ray (Ray): The ray to test.
+            Args:
+                ray (Ray): The ray to test.
 
-                Returns:
-                    bool: True if the ray is occluded, False otherwise.
+            Returns:
+                bool: True if the ray is occluded, False otherwise.
            ))",
            nb::arg("ray"))
 
         .def("is_occluded_batch", &PyBVH::is_occluded_batch,
-           R"((
-                Performs occlusion queries for a batch of rays, parallelized for performance.
+            R"((
+            Performs occlusion queries for a batch of rays, parallelized for performance.
 
-                This method uses multi-core parallelization for all geometry types (triangles, AABBs, spheres).
+            .. warning::
+                Packet traversal (`Auto` or `Force`) is highly optimized but
+                makes strict assumptions about the input rays:
+                    - Shared origin: All rays in a batch must share the same origin point.
+                    - Coherent directions: The ray directions should form a coherent frustum,
+                        like rays cast from a camera through pixels on a screen.
 
-                Args:
-                    origins (numpy.ndarray): A (N, 3) float array of ray origins.
-                    directions (numpy.ndarray): A (N, 3) float array of ray directions.
-                    t_max (numpy.ndarray, optional): A (N,) float array of maximum occlusion distances.
-                                                     If a hit is found beyond this distance, it is ignored.
-                    masks (numpy.ndarray, optional): A (N,) uint32 array of per-ray visibility mask.
-                                                     For a ray to test an instance for intersection, the bitwise
-                                                     AND of the ray's mask and the instance's mask must be non-zero.
-                                                     If not provided, rays default to mask 0xFFFF (intersect all instances).
-                    packet (PacketMode, optional): Choose packet usage strategy. Defaults to Auto.
-                    same_origin_eps (float, optional): Epsilon for same-origin test. Default 1e-6.
-                    max_spread (float, optional): Max spread allowed for a batch (cone angle, in degrees). Default 1.0.
-                    warn_on_incoherent (bool, optional): Warn when rays differ in origin. Default True.
+                Providing rays with different origins or random, incoherent directions
+                with packet traversal enabled may lead to **incorrect results (false misses)**.
+                If your rays do not meet these criteria, use `packet='Never'` to ensure
+                correctness via scalar traversal.
 
-                Returns:
-                    numpy.ndarray: A boolean array of shape (N,) where `True` indicates occlusion.
+            Args:
+                origins (numpy.ndarray): A (N, 3) float array of ray origins.
+                directions (numpy.ndarray): A (N, 3) float array of ray directions.
+                t_max (numpy.ndarray, optional): A (N,) float array of maximum occlusion distances.
+                                                 If a hit is found beyond this distance, it is ignored.
+                masks (numpy.ndarray, optional): A (N,) uint32 array of per-ray visibility mask.
+                                                 For a ray to test an instance for intersection, the bitwise
+                                                 AND of the ray's mask and the instance's mask must be non-zero.
+                                                 If not provided, rays default to mask 0xFFFF (intersect all instances).
+                packet (PacketMode, optional): Choose packet usage strategy. Defaults to Auto.
+                same_origin_eps (float, optional): Epsilon for same-origin test. Default 1e-6.
+                max_spread (float, optional): Max spread allowed for a batch (cone angle, in degrees). Default 1.0.
+                warn_on_incoherent (bool, optional): Warn when rays differ in origin. Default True.
+
+            Returns:
+                numpy.ndarray: A boolean array of shape (N,) where `True` indicates occlusion.
            ))",
             nb::arg("origins").noconvert(), nb::arg("directions").noconvert(),
             nb::arg("t_max").noconvert() = nb::none(), nb::arg("masks").noconvert() = nb::none(),
@@ -2813,18 +2877,18 @@ NB_MODULE(_pytinybvh, m) {
 
         .def("intersect_sphere", &PyBVH::intersect_sphere,
             R"((
-                Checks if any geometry intersects with a given sphere.
+            Checks if any geometry intersects with a given sphere.
 
-                This is useful for proximity queries or collision detection. It stops at the
-                first intersection found. Note: This method is not implemented for custom
-                geometry (AABBs, points) and will only work on triangle meshes.
+            This is useful for proximity queries or collision detection. It stops at the
+            first intersection found. Note: This method is not implemented for custom
+            geometry (AABBs, points) and will only work on triangle meshes.
 
-                Args:
-                    center (Vec3Like): The center of the sphere.
-                    radius (float): The radius of the sphere.
+            Args:
+                center (Vec3Like): The center of the sphere.
+                radius (float): The radius of the sphere.
 
-                Returns:
-                    bool: True if an intersection is found, False otherwise.
+            Returns:
+                bool: True if an intersection is found, False otherwise.
             ))",
             nb::arg("center"), nb::arg("radius"))
 
@@ -2876,132 +2940,116 @@ NB_MODULE(_pytinybvh, m) {
 
         .def("get_buffers", &PyBVH::get_buffers,
             R"((
-                Returns a dictionary of raw, zero-copy numpy arrays for all current BVH's internal data and geometry.
+            Returns a dictionary of raw, zero-copy numpy arrays for all current BVH's internal data and geometry.
 
-                This provides low-level access to all the underlying C++ buffers. The returned arrays
-                are views into the BVH's memory.
-                The structure of the returned dictionary and the shape/content of the arrays depend on the active layout.
+            This provides low-level access to all the underlying C++ buffers. The returned arrays
+            are views into the BVH's memory.
+            The structure of the returned dictionary and the shape/content of the arrays depend on the active layout.
 
-                This is primarily useful for advanced use cases (sending BVH data to a SSBO, etc.).
+            This is primarily useful for advanced use cases (sending BVH data to a SSBO, etc.).
 
-                Returns:
-                    Dict[str, numpy.ndarray]: A dictionary mapping buffer names (e.g., 'nodes',
-                                            'prim_indices', 'packed_data', 'vertices', etc.) to
-                                            their corresponding raw data arrays.
+            Returns:
+                Dict[str, numpy.ndarray]: A dictionary mapping buffer names (e.g., 'nodes',
+                                        'prim_indices', 'packed_data', 'vertices', etc.) to
+                                        their corresponding raw data arrays.
             ))")
-
-        // Refitting, TLAS
-
-        .def("refit", &PyBVH::refit,
-             R"((
-                Refits the BVH to the current state of the source geometry, which is much faster than a full rebuild.
-
-                Should be called after the underlying vertex data (numpy array used for construction)
-                has been modified.
-
-                Note: This will fail if the BVH was built with spatial splits (with BuildQuality.High).
-             ))")
-
-        .def_static("build_tlas", &PyBVH::build_tlas,
-            R"((
-                Builds a Top-Level Acceleration Structure (TLAS) from a list of BVH instances.
-
-                Args:
-                    instances (numpy.ndarray): A structured array with `instance_dtype` describing
-                                               each instance's transform, blas_id, and mask.
-                    BLASes (List[BVH]): A list of the BVH objects to be instanced. The `blas_id`
-                                        in the instances array corresponds to the index in this list.
-
-                Returns:
-                    BVH: A new BVH instance representing the TLAS.
-            ))",
-            nb::arg("instances"), nb::arg("BLASes"))
 
         // Load / save
 
         .def_static("load", &PyBVH::load,
             R"((
-                Loads a BVH from a file, re-linking it to the provided geometry.
+            Loads a BVH from a file, re-linking it to the provided geometry.
 
-                The geometry must be provided in the same layout as when the BVH was originally
-                built and saved. If it was built from an indexed mesh, both the vertices and the indices must be provided.
+            The geometry must be provided in the same layout as when the BVH was originally
+            built and saved. If it was built from an indexed mesh, both the vertices and the indices must be provided.
 
-                Args:
-                    filepath (str or pathlib.Path): The path to the saved BVH file.
-                    vertices (numpy.ndarray): A float32, C-style contiguous numpy array of shape (V, 4)
-                                              representing the vertex data.
-                    indices (numpy.ndarray, optional): A uint32, C-style contiguous array of shape (N, 3)
-                                                       if the BVH was built from an indexed mesh.
+            Args:
+                filepath (str or pathlib.Path): The path to the saved BVH file.
+                vertices (numpy.ndarray): A float32, C-style contiguous numpy array of shape (V, 4)
+                                          representing the vertex data.
+                indices (numpy.ndarray, optional): A uint32, C-style contiguous array of shape (N, 3)
+                                                   if the BVH was built from an indexed mesh.
 
-                Returns:
-                    BVH: A new BVH instance.
+            Returns:
+                BVH: A new BVH instance.
             ))",
             nb::arg("filepath"), nb::arg("vertices"), nb::arg("indices") = nb::none())
 
         .def("save", &PyBVH::save,
             R"((
-                Saves the BVH to a file.
+            Saves the BVH to a file.
 
-                Args:
-                    filepath (str or pathlib.Path): The path where the BVH file will be saved.
+            Args:
+                filepath (str or pathlib.Path): The path where the BVH file will be saved.
             ))",
             nb::arg("filepath"))
 
         // Advanced manipulation methods
 
+        .def("refit", &PyBVH::refit,
+            R"((
+            Refits the BVH to the current state of the source geometry, which is much
+            faster than a full rebuild.
+
+            Should be called after the underlying vertex data (numpy array used for construction)
+            has been modified.
+
+            Note: This will fail if the BVH was built with spatial splits (high-quality preset).
+            ))")
+
         .def("optimize", &PyBVH::optimize,
-             R"((
-                Optimizes the BVH tree structure to improve query performance.
+            R"((
+            Optimizes the BVH tree structure to improve query performance.
 
-                This is a costly operation best suited for static scenes. It works by
-                re-inserting subtrees into better locations based on the SAH cost.
+            This is a costly operation best suited for static scenes. It works by
+            re-inserting subtrees into better locations based on the SAH cost.
 
-                Args:
-                    iterations (int): The number of optimization passes.
-                    extreme (bool): If true, a larger portion of the tree is considered
-                                    for optimization in each pass.
-                    stochastic (bool): If true, uses a randomized approach to select
-                                       nodes for re-insertion.
-             ))",
-             nb::arg("iterations") = 25, nb::arg("extreme") = false, nb::arg("stochastic") = false)
+            Args:
+                iterations (int): The number of optimization passes. Defaults to 25.
+                extreme (bool): If true, a larger portion of the tree is considered
+                                for optimization in each pass. Defaults to False.
+                stochastic (bool): If true, uses a randomized approach to select
+                                   nodes for re-insertion. Defaults to False.
+            ))",
+            nb::arg("iterations") = 25, nb::arg("extreme") = false, nb::arg("stochastic") = false)
 
         .def("compact", &PyBVH::compact,
             R"((
-                Removes unused nodes from the BVH structure, reducing memory usage.
+            Removes unused nodes from the BVH structure, reducing memory usage.
 
-                This is useful after building with high quality (which may create
-                spatial splits and more primitives) or after optimization, as these
-                processes can leave gaps in the node array.
+            This is useful after building with high quality (which may create
+            spatial splits and more primitives) or after optimization, as these
+            processes can leave gaps in the node array.
             ))")
 
         .def("split_leaves", &PyBVH::split_leaves,
             R"((
-                Recursively splits leaf nodes until they contain at most `max_prims` primitives.
-                This modifies the BVH in-place. Typically used to prepare a BVH for optimization
-                by breaking it down into single-primitive leaves.
+            Recursively splits leaf nodes until they contain at most `max_prims` primitives.
+            This modifies the BVH in-place. Typically used to prepare a BVH for optimization
+            by breaking it down into single-primitive leaves.
 
-                Warning: This may fail if the BVH does not have enough pre-allocated node memory.
+            Warning: This may fail if the BVH does not have enough pre-allocated node memory.
 
-                Args:
-                    max_prims (int): The maximum number of primitives a leaf node can contain.
-                                     Defaults to 1.
+            Args:
+                max_prims (int): The maximum number of primitives a leaf node can contain.
+                                 Defaults to 1.
             ))",
             nb::arg("max_prims") = 1)
 
         .def("combine_leaves", &PyBVH::combine_leaves,
             R"((
-                Merges adjacent leaf nodes if doing so improves the SAH cost.
-                This modifies the BVH in-place. Typically used as a post-process after
-                optimization to create more efficient leaves.
+            Merges adjacent leaf nodes if doing so improves the SAH cost.
+            This modifies the BVH in-place. Typically used as a post-process after
+            optimization to create more efficient leaves.
 
-                Warning: This operation makes the internal primitive index array non-contiguous.
+            Warning: This operation makes the internal primitive index array non-contiguous.
 
-                It is highly recommended to call `compact()` after using this method to clean up
-                the BVH structure.
+            It is highly recommended to call `compact()` after using this method to clean up
+            the BVH structure.
             ))")
 
         .def("set_opacity_maps", &PyBVH::set_opacity_maps,
-        R"((
+            R"((
             Sets the opacity micro-maps for alpha testing during intersection.
 
             The BVH must be built before calling this. The intersection queries will
@@ -3012,8 +3060,8 @@ NB_MODULE(_pytinybvh, m) {
                                           bitmasks for all triangles. The size must be
                                           (tri_count * N * N + 31) // 32
                 N (int): The resolution of the micro-map per triangle (e.g., 8 for an 8x8 grid).
-        ))",
-        nb::arg("map_data"), nb::arg("N"))
+            ))",
+            nb::arg("map_data"), nb::arg("N"))
 
         // Read-only properties
 
@@ -3033,7 +3081,7 @@ NB_MODULE(_pytinybvh, m) {
 
         .def_prop_ro("node_count",
             [](const PyBVH &self) -> uint32_t { return self.active_bvh_->usedNodes; },
-            "Total number of nodes in the BVH.")
+            "Total number of nodes in the currently active BVH representation.")
 
         .def_prop_ro("prim_count",
             [](const PyBVH &self) -> uint32_t { return self.active_bvh_->triCount; },
@@ -3082,7 +3130,7 @@ NB_MODULE(_pytinybvh, m) {
                     return 0;
                 }
             });
-            }, "The total number of leaf nodes (only for standard layout).")
+            }, "Total number of leaf nodes (only for standard layout).")
 
         .def_prop_ro("sah_cost", [](const PyBVH &self) -> float {
             if (!self.active_bvh_ || self.active_bvh_->triCount == 0) {

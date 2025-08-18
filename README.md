@@ -105,6 +105,8 @@ PYTINYBVH_NO_SIMD=1 uv pip install .
 
 ## Usage examples
 
+Below are some examples. But be sure to check out the stub file `src/_pytinybvh.pyi` to see everything.
+
 `pytinybvh` provides two types of BVH builders: **Core (zero-copy)** builders for performance and **Convenience (include copying)** builders for ease of use with common data formats.
 
 ---
@@ -443,8 +445,6 @@ The tests include a visualiser which can be run by executing `test_pytinybvh.py`
 
 I also included a simple `visualise.py` script that opens a 3D viewer.
 
-1.  **Install visualisation dependencies:**
-
 1.  **Install visualisation dependencies:** `uv pip install .[visualise]`
 2.  **Configure and run the script:** Edit the file paths at the top of `visualise.py` and run it with `python visualise.py`.
 
@@ -494,6 +494,10 @@ Current design choices might evolve
 ## Roadmap
 
 - [ ] Add mutexes to ensure thread-safety for concurrent access to a single BVH object from multiple Python threads.
+- [ ] Direct support for GPU-lived arrays (CuPy, JAX, ...)
+- [ ] Support `tinybvh`'s VoxelSet
+- [ ] Support float64 mode
+
 
 ## Remarks
 

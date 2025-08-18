@@ -2671,120 +2671,135 @@ public:
     [[nodiscard]] nb::dict get_buffers() const {
 
         if (!active_bvh_) {
-            throw std::runtime_error("BVH is not initialized.");
+            throw std::runtime_error("This BVH is not initialized.");
         }
 
         nb::dict buffers;
         const PyBVH& self = *this;
 
-        // Get buffers for the BVH structure itself
-        // all read only, all as float32 (or uint32, for prim_indices)
+        // Helper to create a raw byte view and reinterpret it
+        auto add_buffer = [&](const char* key, const void* data, size_t n_bytes, const nb::object& dtype, const std::vector<size_t>& shape) {
+            if (!data || n_bytes == 0) return;
+
+            // Create a raw 1D byte view of the data
+            auto bytes_view = nb::ndarray<const uint8_t, nb::numpy, nb::c_contig, nb::ro>(
+                data, {n_bytes}, nb::find(&self)
+            );
+
+            // materialize byte view into a numpy array
+            nb::object np_bytes = bytes_view.cast();
+
+            // use nmpy's .view() and .reshape() to get the final typed array
+            nb::object final_array = np_bytes.attr("view")(dtype);
+            if (!shape.empty()) {
+                final_array = final_array.attr("reshape")(nb::cast(shape));
+            }
+
+            buffers[key] = final_array;
+        };
+
         dispatch_bvh_call(active_bvh_, [&]<typename T0>(T0& bvh) {
             using BvhType = std::decay_t<T0>;
+            nb::object f32 = np().attr("float32");
+            nb::object u32 = np().attr("uint32");
 
             // Standard layout
             if constexpr (std::is_same_v<BvhType, tinybvh::BVH>) {
                 if (bvh.bvhNode) {
-                    // exposes nodes as a raw float array. Each is 32 bytes (8 floats)
-                    buffers["nodes"] = nb::ndarray<const float, nb::ro>(
-                        reinterpret_cast<const float*>(bvh.bvhNode),
-                        { static_cast<size_t>(bvh.usedNodes) * 8 },
-                        nb::find(&self)
-                    );
+                    add_buffer("nodes",
+                        bvh.bvhNode,
+                        bvh.usedNodes * sizeof(tinybvh::BVH::BVHNode),
+                        f32,
+                        {static_cast<size_t>(bvh.usedNodes), 8});
                 }
                 if (bvh.primIdx) {
-                    buffers["prim_indices"] = nb::ndarray<const uint32_t, nb::ro>(
+                    add_buffer("prim_indices",
                         bvh.primIdx,
-                        { static_cast<size_t>(bvh.idxCount) },
-                        nb::find(&self)
-                    );
+                        bvh.idxCount * sizeof(uint32_t),
+                        u32,
+                        {static_cast<size_t>(bvh.idxCount)});
                 }
             }
             // GPU layouts
-            else if constexpr (std::is_same_v<BvhType, tinybvh::BVH_GPU>) { // NOLINT(*-branch-clone) Reason: being explicit is better here
+            else if constexpr (std::is_same_v<BvhType, tinybvh::BVH_GPU>) {
                 if (bvh.bvhNode) {
-                    // Each node is 64 bytes (16 floats)
-                    buffers["nodes"] = nb::ndarray<const float, nb::ro>(
-                        reinterpret_cast<const float*>(bvh.bvhNode),
-                        { static_cast<size_t>(bvh.usedNodes) * 16 },
-                        nb::find(&self)
-                    );
+                    add_buffer("nodes",
+                        bvh.bvhNode,
+                        bvh.usedNodes * sizeof(tinybvh::BVH_GPU::BVHNode),
+                        f32,
+                        {static_cast<size_t>(bvh.usedNodes), 16});
                 }
             }
             else if constexpr (std::is_same_v<BvhType, tinybvh::BVH4_GPU>) {
                 if (bvh.bvh4Data) {
-                    // usedBlocks is in units of 16 bytes (a bvhvec4). Total floats = usedBlocks * 4
-                    buffers["packed_data"] = nb::ndarray<const float, nb::ro>(
-                        reinterpret_cast<const float*>(bvh.bvh4Data),
-                        { static_cast<size_t>(bvh.usedBlocks) * 4 },
-                        nb::find(&self)
-                    );
+                    add_buffer("packed_data",
+                        bvh.bvh4Data,
+                        bvh.usedBlocks * 16,
+                        f32,
+                        {static_cast<size_t>(bvh.usedBlocks) * 4});
                 }
             }
             else if constexpr (std::is_same_v<BvhType, tinybvh::BVH8_CWBVH>) {
                 if (bvh.bvh8Data) {
-                    // usedBlocks is in units of 16 bytes
-                    buffers["nodes"] = nb::ndarray<const float, nb::ro>(
-                        reinterpret_cast<const float*>(bvh.bvh8Data),
-                        { static_cast<size_t>(bvh.usedBlocks) * 4 },
-                        nb::find(&self)
-                    );
+                    add_buffer("nodes",
+                        bvh.bvh8Data,
+                        bvh.usedBlocks * 16,
+                        f32,
+                        {static_cast<size_t>(bvh.usedBlocks) * 4});
                 }
                 if (bvh.bvh8Tris) {
-                    // this determines the size based on compilation flags
                     #ifdef CWBVH_COMPRESSED_TRIS
-                        size_t elements_per_tri = 4 * 4; // 4 vec4s
+                        size_t bytes_per_tri = 4 * 4 * sizeof(float);
+                        size_t floats_per_tri = 16;
                     #else
-                        size_t elements_per_tri = 3 * 4; // 3 vec4s
+                        size_t bytes_per_tri = 3 * 4 * sizeof(float);
+                        size_t floats_per_tri = 12;
                     #endif
-                    buffers["triangles"] = nb::ndarray<const float, nb::ro>(
-                        reinterpret_cast<const float*>(bvh.bvh8Tris),
-                        { static_cast<size_t>(bvh.triCount) * elements_per_tri },
-                        nb::find(&self)
-                    );
+                    add_buffer("triangles",
+                        bvh.bvh8Tris,
+                        bvh.triCount * bytes_per_tri,
+                        f32,
+                        {static_cast<size_t>(bvh.triCount), floats_per_tri});
                 }
             }
             // CPU SIMD layouts
             else if constexpr (std::is_same_v<BvhType, tinybvh::BVH4_CPU>) {
                 if (bvh.bvh4Data) {
-                    // usedBlocks is in units of 64 bytes (CacheLine). Total floats = usedBlocks * 16
-                    buffers["packed_data"] = nb::ndarray<const float, nb::ro>(
-                        reinterpret_cast<const float*>(bvh.bvh4Data),
-                        { static_cast<size_t>(bvh.usedBlocks) * 16 },
-                        nb::find(&self)
-                    );
+                    add_buffer("packed_data",
+                        bvh.bvh4Data,
+                        bvh.usedBlocks * 64,
+                        f32,
+                        {static_cast<size_t>(bvh.usedBlocks) * 16});
                 }
             }
             else if constexpr (std::is_same_v<BvhType, tinybvh::BVH8_CPU>) {
                 if (bvh.bvh8Data) {
-                    // usedBlocks is in units of 64 bytes (CacheLine). Total floats = usedBlocks * 16
-                    buffers["packed_data"] = nb::ndarray<const float, nb::ro>(
-                        reinterpret_cast<const float*>(bvh.bvh8Data),
-                        { static_cast<size_t>(bvh.usedBlocks) * 16 },
-                        nb::find(&self)
-                    );
+                    add_buffer("packed_data",
+                        bvh.bvh8Data,
+                        bvh.usedBlocks * 64,
+                        f32,
+                        {static_cast<size_t>(bvh.usedBlocks) * 16});
                 }
             }
             // Intermediate layouts
             else if constexpr (std::is_same_v<BvhType, tinybvh::MBVH<4>> || std::is_same_v<BvhType, tinybvh::MBVH<8>>) {
                  if (bvh.mbvhNode) {
-                    // MBVH<4> node is 48 bytes (12 floats). MBVH<8> is 64 bytes (16 floats)
-                    constexpr size_t node_size_in_floats = sizeof(BvhType::MBVHNode) / sizeof(float);
-                    buffers["nodes"] = nb::ndarray<const float, nb::ro>(
-                        reinterpret_cast<const float*>(bvh.mbvhNode),
-                        { static_cast<size_t>(bvh.usedNodes) * node_size_in_floats },
-                        nb::find(&self)
-                    );
+                    constexpr size_t node_bytes = sizeof(typename BvhType::MBVHNode);
+                    constexpr size_t node_floats = node_bytes / sizeof(float);
+                    add_buffer("nodes",
+                        bvh.mbvhNode,
+                        bvh.usedNodes * node_bytes,
+                        f32,
+                        {static_cast<size_t>(bvh.usedNodes), node_floats});
                 }
             }
             else if constexpr (std::is_same_v<BvhType, tinybvh::BVH_SoA>) {
                 if (bvh.bvhNode) {
-                    // Each node is 64 bytes (16 floats)
-                    buffers["nodes"] = nb::ndarray<const float, nb::ro>(
-                        reinterpret_cast<const float*>(bvh.bvhNode),
-                        { static_cast<size_t>(bvh.usedNodes) * 16 },
-                        nb::find(&self)
-                    );
+                    add_buffer("nodes",
+                        bvh.bvhNode,
+                        bvh.usedNodes * sizeof(tinybvh::BVH_SoA::BVHNode),
+                        f32,
+                        {static_cast<size_t>(bvh.usedNodes), 16});
                 }
             }
         });
@@ -2792,14 +2807,12 @@ public:
         // Add custom geometry data if present
         switch (self.custom_type) {
             case CustomType::AABB:
-                // for AABBs source_geometry_refs contains [aabbs_np, inv_extents_np]
                 if (self.source_geometry_refs.size() >= 2) {
                     buffers["aabbs"] = self.source_geometry_refs[0];
                     buffers["inv_extents"] = self.source_geometry_refs[1];
                 }
                 break;
             case CustomType::Sphere:
-                // for Spheres source_geometry_refs contains [points_np]
                 if (!self.source_geometry_refs.empty()) {
                     buffers["points"] = self.source_geometry_refs[0];
                     buffers["sphere_radius"] = self.sphere_radius;
@@ -2808,7 +2821,6 @@ public:
             case CustomType::None: // triangles
                 if (!self.source_geometry_refs.empty()) {
                     buffers["vertices"] = self.source_geometry_refs[0];
-                    // if indexed mesh, also include the indices buffer
                     if (self.source_geometry_refs.size() > 1) {
                         buffers["indices"] = self.source_geometry_refs[1];
                     }

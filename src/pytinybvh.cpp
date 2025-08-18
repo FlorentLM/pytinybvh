@@ -236,12 +236,6 @@ struct ClosestPoint {
     tinybvh::bvhvec3 closest_point{};
 };
 
-struct TLASInstance {
-    float transform[16];
-    uint32_t blas_id;
-    uint32_t mask;
-};
-
 // Context struct to hold pointers to geometry data for custom callbacks
 struct CustomGeometryContext {
     // For AABBs
@@ -3083,7 +3077,6 @@ struct PyBVHVerbose {
 
 // =============================================== nanobind module =====================================================
 
-NB_MAKE_OPAQUE(TLASInstance);
 NB_MAKE_OPAQUE(HitRecord);
 
 NB_MODULE(_pytinybvh, m) {

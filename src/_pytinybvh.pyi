@@ -601,6 +601,26 @@ class BVH:
         """
         ...
 
+    def closest_point(self, point: Vec3Like) -> Optional[Dict[str, Any]]:
+        """
+        Finds the closest point on the BVH geometry to a given query point.
+
+        This method performs a proximity search, useful for collision detection
+        and geometry analysis. It traverses the BVH to find the nearest surface point.
+
+        Args:
+            point (Vec3Like): The 3D point to query from.
+
+        Returns:
+            Dict[str, Any] or None: A dictionary containing the query result:
+                - 'point' (numpy.ndarray): The 3D coordinates of the closest point.
+                - 'prim_id' (int): The ID of the primitive containing the closest point.
+                - 'inst_id' (int): The ID of the instance (-1 for BLAS).
+                - 'distance' (float): The Euclidean distance to the closest point.
+            Returns None if the BVH is empty.
+        """
+        ...
+
     # Advanced manipulation methods
 
     def refit(self) -> None:
@@ -693,6 +713,39 @@ class BVH:
         """
         ...
 
+    def add_instance(self, transform: np.ndarray = ..., blas: BVH = ..., mask: int = 0xFFFFFFFF) -> None:
+        """
+        Adds a new instance to the TLAS. Only useable on a TLAS.
+
+        This method stages the addition. You must call `refit_tlas()` afterwards to
+        rebuild the acceleration structure and make the new instance visible to ray queries.
+
+        Args:
+            transform (numpy.ndarray): A (4, 4) float32, C-contiguous numpy array for the
+                                       object-to-world transformation.
+            blas (BVH): The Bottom-Level Acceleration Structure (a standard BVH) to instance.
+            mask (int, optional): A 32-bit integer visibility mask. Defaults to 0xFFFFFFFF.
+        """
+        ...
+
+    def remove_instance(self, instance_id: int) -> None:
+        """
+        Removes an instance from the TLAS by its index. Only useable on a TLAS.
+
+        This method stages the removal. You must call `refit_tlas()` afterwards to
+        rebuild the acceleration structure.
+
+        Note:
+            - Removing the last instance that refers to a particular BLAS does NOT
+              de-register the BLAS. This is to avoid a costly re-indexing of all other
+              instances. The BLAS simply becomes orphaned but remains available.
+            - Raises `IndexError` if `instance_id` is out of range, `ValueError` if called on a BLAS.
+
+        Args:
+            instance_id (int): The index of the instance to remove.
+        """
+        ...
+
     def update_instances(self, instances: Optional[np.ndarray] = None, recompute_aabbs = True) -> None:
         """
         Bulk-updates TLAS instances from a structured array (zero extra copies in Python). Only useable on a TLAS.
@@ -708,6 +761,19 @@ class BVH:
         Notes:
             - After updates, call `refit_tlas()` to rebuild the TLAS over the updated AABBs.
             - The array length must match the existing TLAS instance count.
+        """
+        ...
+
+    def compact_blases(self) -> None:
+        """
+        Removes any unused (orphaned) BLASes from the TLAS's internal lists.
+
+        This is a potentially slow operation as it requires re-indexing all existing
+        instances. It should only be called when memory usage is a critical concern
+        after many instances have been removed.
+
+        After calling this, you must still call `refit_tlas()` to rebuild the
+        acceleration structure.
         """
         ...
 
@@ -929,7 +995,30 @@ class BVH:
         """A list of the BVH layouts currently held in the cache."""
         ...
 
+    @property
+    def memory_usage(self) -> Dict[str, Any]:
+        """
+        Reports a detailed breakdown of the memory usage for the BVH.
 
+        The returned dictionary contains the following keys:
+
+        - `total_bytes` (int):
+            The total memory footprint, including C++ buffers and referenced Python objects.
+        - `base_bvh` (Dict):
+            Memory used by the mandatory standard layout BVH. Contains `{'bytes': int}`.
+        - `cached_layouts` (Dict, optional):
+            A dictionary mapping layout names to their memory usage in bytes.
+        - `tlas_data` (Dict, optional):
+            Memory used by internal C++ TLAS buffers (instances, pointers). Contains `{'bytes': int}`.
+        - `source_geometry_bytes` (List[int], optional):
+            A list of byte sizes for each external Python object this BVH holds a
+            reference to. This includes source NumPy arrays (vertices, indices) and,
+            for a TLAS, the total memory footprint of each referenced BLAS
+
+        Returns:
+            Dict[str, Any]: A dictionary detailing the memory usage in bytes.
+        """
+        ...
 
 class BVHVerbose:
     """

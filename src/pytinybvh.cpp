@@ -14,6 +14,7 @@
 #include "tinybvh/tiny_bvh.h"
 
 #include <vector>
+#include <array>
 #include <stdexcept>
 #include <memory> // for std::unique_ptr
 #include <string>
@@ -227,6 +228,14 @@ struct HitRecord {
     float t, u, v;
 };
 
+// A struct to hold the results of a closest point query
+struct ClosestPoint {
+    uint32_t prim_id = -1;
+    uint32_t inst_id = -1;
+    float distance_sq = FLT_MAX;
+    tinybvh::bvhvec3 closest_point{};
+};
+
 struct TLASInstance {
     float transform[16];
     uint32_t blas_id;
@@ -355,6 +364,21 @@ static inline tinybvh::BVHContext cpu_wide_ctx() {
     ctx.userdata = nullptr;
     return ctx;
 }
+
+// Custom deleter for unique_ptrs that manage memory allocated by tinybvh's special page-aligned allocators
+struct CPUWideDeleter {
+    void operator()(tinybvh::BVHBase* ptr) const {
+        if (ptr) {
+#if defined(BVH8_ALIGN_32K)
+            tinybvh::free32k(ptr, nullptr);
+#elif defined(BVH8_ALIGN_4K)
+            tinybvh::free4k(ptr, nullptr);
+#else
+            tinybvh::free64(ptr, nullptr);
+#endif
+        }
+    }
+};
 
 // type caster to accept tinybvh::bvhvec3 objects
 template <> struct nanobind::detail::type_caster<tinybvh::bvhvec3> {
@@ -579,6 +603,74 @@ bool sphere_isoccluded_callback(const tinybvh::Ray& ray, const unsigned int prim
     return intersect_sphere_primitive(ray, center, radius_sq).has_value();
 }
 
+// Calculates the squared distance from a point to an AABB
+// If the point is inside the box, the distance is 0
+static inline float distance_sq_to_aabb(
+    const tinybvh::bvhvec3& p,
+    const tinybvh::bvhvec3& bmin,
+    const tinybvh::bvhvec3& bmax)
+{
+    float d_sq = 0.0f;
+    for (int i = 0; i < 3; ++i) {
+        float v = p[i];
+        if (v < bmin[i]) d_sq += (bmin[i] - v) * (bmin[i] - v);
+        if (v > bmax[i]) d_sq += (v - bmax[i]) * (v - bmax[i]);
+    }
+    return d_sq;
+}
+
+// Finds the closest point on a triangle (v0, v1, v2) to a point (p)
+static inline tinybvh::bvhvec3 closest_point_triangle(
+    const tinybvh::bvhvec3& p,
+    const tinybvh::bvhvec3& v0,
+    const tinybvh::bvhvec3& v1,
+    const tinybvh::bvhvec3& v2)
+{
+    const tinybvh::bvhvec3 e01 = v1 - v0;
+    const tinybvh::bvhvec3 e02 = v2 - v0;
+    const tinybvh::bvhvec3 p0 = p - v0;
+
+    float d1 = tinybvh_dot(e01, p0);
+    float d2 = tinybvh_dot(e02, p0);
+
+    if (d1 <= 0.0f && d2 <= 0.0f) return v0; // Vertex v0 region
+
+    const tinybvh::bvhvec3 p1 = p - v1;
+    float d3 = tinybvh_dot(e01, p1);
+    float d4 = tinybvh_dot(e02, p1);
+
+    if (d3 >= 0.0f && d4 <= d3) return v1; // Vertex v1 region
+
+    float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
+        float t = d1 / (d1 - d3);
+        return v0 + t * e01; // Edge v0-v1 region
+    }
+
+    const tinybvh::bvhvec3 p2 = p - v2;
+    float d5 = tinybvh_dot(e01, p2);
+    float d6 = tinybvh_dot(e02, p2);
+
+    if (d6 >= 0.0f && d5 <= d6) return v2; // Vertex v2 region
+
+    float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
+        float t = d2 / (d2 - d6);
+        return v0 + t * e02; // Edge v0-v2 region
+    }
+
+    float va = d3 * d6 - d5 * d4;
+    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
+        float t = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return v1 + t * (v2 - v1); // Edge v1-v2 region
+    }
+
+    // Inside triangle plane region
+    float denom = 1.0f / (va + vb + vc);
+    float v = vb * denom;
+    float w = vc * denom;
+    return v0 + v * e01 + w * e02;
+}
 
 // Packet gating helpers (TU-local), for batch intersect and batch occlusion tests
 
@@ -702,10 +794,10 @@ struct PyBVH {
     std::unique_ptr<tinybvh::BVH_SoA>     soa_;
     std::unique_ptr<tinybvh::MBVH<4>>     mbvh4_;
     std::unique_ptr<tinybvh::MBVH<8>>     mbvh8_;
-    std::unique_ptr<tinybvh::BVH4_CPU>    bvh4_cpu_;
+    std::unique_ptr<tinybvh::BVH4_CPU, CPUWideDeleter>    bvh4_cpu_;
     std::unique_ptr<tinybvh::BVH4_GPU>    bvh4_gpu_;
     std::unique_ptr<tinybvh::BVH8_CWBVH>  cwbvh_;
-    std::unique_ptr<tinybvh::BVH8_CPU>    bvh8_cpu_;
+    std::unique_ptr<tinybvh::BVH8_CPU, CPUWideDeleter>    bvh8_cpu_;
     std::unique_ptr<tinybvh::BVH_GPU>     bvh_gpu_;
 
     // A raw pointer to the currently active BVH representation
@@ -716,6 +808,7 @@ struct PyBVH {
 
     // These references must be kept alive for the lifetime of any BVH representation
     nb::list source_geometry_refs;
+    nb::list source_blases_refs;
     std::vector<tinybvh::BLASInstance> instances_data;
     nb::ndarray<uint32_t, nb::c_contig> opacity_map_ref;  // ref to keep opacity maps
     std::vector<tinybvh::BVHBase*> blas_pointers; // raw pointers to BLASes for TLAS build
@@ -762,27 +855,15 @@ public:
             (active_layout_ == Layout::CWBVH)  ||
             (active_layout_ == Layout::BVH8_CPU);
 
-        if (active_layout_ != Layout::BVH4_CPU) {
-            // have to make make sure the wide CPU layouts use the wide context so their destructor frees with the right function
-            if (bvh4_cpu_) bvh4_cpu_->context = cpu_wide_ctx();
-            bvh4_cpu_.reset();
-        }
-
-        if (active_layout_ != Layout::BVH8_CPU) {
-            // have to make sure the wide CPU layouts use the wide context so their destructor frees with the right function
-            if (bvh8_cpu_) bvh8_cpu_->context = cpu_wide_ctx();
-            bvh8_cpu_.reset();
-        }
+        if (active_layout_ != Layout::BVH4_CPU) bvh4_cpu_.reset();
+        if (active_layout_ != Layout::BVH8_CPU) bvh8_cpu_.reset();
 
         if (active_layout_ != Layout::SoA)      soa_.reset();
-
-        // Only drop MBVH if nothing currently depends on it
-        if (!needs_m4)                           mbvh4_.reset();
-        if (!needs_m8)                           mbvh8_.reset();
-
-        if (active_layout_ != Layout::BVH4_GPU)  bvh4_gpu_.reset();
-        if (active_layout_ != Layout::CWBVH)     cwbvh_.reset();
-        if (active_layout_ != Layout::BVH_GPU)   bvh_gpu_.reset();
+        if (!needs_m4)                          mbvh4_.reset();
+        if (!needs_m8)                          mbvh8_.reset();
+        if (active_layout_ != Layout::BVH4_GPU) bvh4_gpu_.reset();
+        if (active_layout_ != Layout::CWBVH)    cwbvh_.reset();
+        if (active_layout_ != Layout::BVH_GPU)  bvh_gpu_.reset();
     }
 
     // Converter method
@@ -844,14 +925,17 @@ public:
                 break;
             }
             case Layout::BVH4_CPU: {
-                if (!mbvh4_) mbvh4_ = std::make_unique<tinybvh::MBVH<4>>();
-                mbvh4_->context = base_->context;
-                mbvh4_->ConvertFrom(*base_, compact);
-
-                if (!bvh4_cpu_) bvh4_cpu_ = std::make_unique<tinybvh::BVH4_CPU>();
-                bvh4_cpu_->context = cpu_wide_ctx();    // TODO: Why doesn't that solve the crash????
-                bvh4_cpu_->ConvertFrom(*mbvh4_);
+                ensure_mbvh4(compact);
+                if (!bvh4_cpu_) {
+                    // manually allocate using the special allocator
+                    auto ctx = cpu_wide_ctx();
+                    void* mem = ctx.malloc(sizeof(tinybvh::BVH4_CPU), nullptr);
+                    if (!mem) throw std::bad_alloc();
+                    // Construct object in the pre-allocated memory and assign it to the unique_ptr with the correct deleter
+                    bvh4_cpu_.reset(new (mem) tinybvh::BVH4_CPU());
+                }
                 bvh4_cpu_->context = cpu_wide_ctx();
+                bvh4_cpu_->ConvertFrom(*mbvh4_);
                 active_bvh_ = bvh4_cpu_.get();
                 active_layout_ = Layout::BVH4_CPU;
                 break;
@@ -875,14 +959,17 @@ public:
                 break;
             }
             case Layout::BVH8_CPU: {
-                if (!mbvh8_) mbvh8_ = std::make_unique<tinybvh::MBVH<8>>();
-                mbvh8_->context = base_->context;
-                mbvh8_->ConvertFrom(*base_, compact);
-
-                if (!bvh8_cpu_) bvh8_cpu_ = std::make_unique<tinybvh::BVH8_CPU>();
+                ensure_mbvh8(compact);
+                if (!bvh8_cpu_) {
+                    // manually allocate using the special allocator
+                    auto ctx = cpu_wide_ctx();
+                    void* mem = ctx.malloc(sizeof(tinybvh::BVH8_CPU), nullptr);
+                    if (!mem) throw std::bad_alloc();
+                    // Construct object in the pre-allocated memory and assign it to the unique_ptr with the correct deleter
+                    bvh8_cpu_.reset(new (mem) tinybvh::BVH8_CPU());
+                }
                 bvh8_cpu_->context = cpu_wide_ctx();
                 bvh8_cpu_->ConvertFrom(*mbvh8_);
-                bvh8_cpu_->context = cpu_wide_ctx();
                 active_bvh_ = bvh8_cpu_.get();
                 active_layout_ = Layout::BVH8_CPU;
                 break;
@@ -1861,6 +1948,132 @@ public:
         return bvh->IntersectSphere(center, radius);
     }
 
+    [[nodiscard]] nb::object closest_point(const tinybvh::bvhvec3& point) const {
+        if (!active_bvh_ || active_bvh_->triCount == 0) {
+            return nb::none();
+        }
+
+        if (active_bvh_->layout != tinybvh::BVHBase::LAYOUT_BVH) {
+            throw std::runtime_error("Closest point queries are only supported for the Standard BVH layout.");
+        }
+        // TODO: Support TLAS here
+        if (is_tlas()) {
+            throw std::runtime_error("Closest point queries are not yet implemented for TLAS structures. Query the BLAS directly.");
+        }
+
+        // Safely cast the base pointer to the derived BVH class to access its members
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
+        const auto* bvh = static_cast<const tinybvh::BVH*>(active_bvh_);
+
+        ClosestPoint result;
+        result.closest_point = {INFINITY, INFINITY, INFINITY};
+
+        std::array<uint32_t, 64> stack{};
+        uint32_t stack_ptr = 0;
+        stack[stack_ptr++] = 0; // Start with root node
+
+        while (stack_ptr > 0) {
+            const uint32_t node_idx = stack[--stack_ptr];
+            const auto* node = &bvh->bvhNode[node_idx];
+
+            if (node->isLeaf()) {
+                for (uint32_t i = 0; i < node->triCount; ++i) {
+                    const uint32_t prim_id = bvh->primIdx[node->leftFirst + i];
+                    tinybvh::bvhvec3 current_closest{};
+
+                    switch (custom_type) {
+                        case CustomType::None: { // Triangles
+                            // Get the vertex data pointer from the stored numpy array reference
+                            const auto* vertices_vec_ptr = reinterpret_cast<const tinybvh::bvhvec4*>(nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]).data());
+
+                            const uint32_t v_idx_base = prim_id * 3;
+                            uint32_t i0, i1, i2;
+
+                            if (bvh->vertIdx) { // Indexed mesh
+                                i0 = bvh->vertIdx[v_idx_base + 0];
+                                i1 = bvh->vertIdx[v_idx_base + 1];
+                                i2 = bvh->vertIdx[v_idx_base + 2];
+                            } else { // Flat vertex array
+                                i0 = v_idx_base + 0;
+                                i1 = v_idx_base + 1;
+                                i2 = v_idx_base + 2;
+                            }
+
+                            const tinybvh::bvhvec3 v0 = vertices_vec_ptr[i0];
+                            const tinybvh::bvhvec3 v1 = vertices_vec_ptr[i1];
+                            const tinybvh::bvhvec3 v2 = vertices_vec_ptr[i2];
+                            current_closest = closest_point_triangle(point, v0, v1, v2);
+                            break;
+                        }
+                        case CustomType::AABB: {
+                            const float* aabb_ptr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]).data();
+                            const size_t offset = prim_id * 6;
+                            const tinybvh::bvhvec3 bmin = {aabb_ptr[offset], aabb_ptr[offset+1], aabb_ptr[offset+2]};
+                            const tinybvh::bvhvec3 bmax = {aabb_ptr[offset+3], aabb_ptr[offset+4], aabb_ptr[offset+5]};
+                            current_closest = {
+                                tinybvh::tinybvh_clamp(point.x, bmin.x, bmax.x),
+                                tinybvh::tinybvh_clamp(point.y, bmin.y, bmax.y),
+                                tinybvh::tinybvh_clamp(point.z, bmin.z, bmax.z)
+                            };
+                            break;
+                        }
+                        case CustomType::Sphere: {
+                            const float* points_ptr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]).data();
+                            const size_t offset = prim_id * 3;
+                            const tinybvh::bvhvec3 center = {points_ptr[offset], points_ptr[offset+1], points_ptr[offset+2]};
+                            tinybvh::bvhvec3 dir = point - center;
+                            float d_sq = tinybvh_dot(dir, dir);
+                            if (d_sq > 1e-12f) {
+                                dir = dir * (sphere_radius / std::sqrt(d_sq));
+                            }
+                            current_closest = center + dir;
+                            break;
+                        }
+                    }
+
+                    tinybvh::bvhvec3 diff = point - current_closest;
+                    float dist_sq = tinybvh_dot(diff, diff);
+
+                    if (dist_sq < result.distance_sq) {
+                        result.distance_sq = dist_sq;
+                        result.closest_point = current_closest;
+                        result.prim_id = prim_id;
+                        result.inst_id = static_cast<uint32_t>(-1); // BLAS only for now
+                    }
+                }
+            } else { // Internal node
+                uint32_t child1_idx = node->leftFirst;
+                uint32_t child2_idx = node->leftFirst + 1;
+                auto* child1_node = &bvh->bvhNode[child1_idx];
+                auto* child2_node = &bvh->bvhNode[child2_idx];
+
+                float dist1_sq = distance_sq_to_aabb(point, child1_node->aabbMin, child1_node->aabbMax);
+                float dist2_sq = distance_sq_to_aabb(point, child2_node->aabbMin, child2_node->aabbMax);
+
+                // Push closer child last to process it first
+                if (dist1_sq < dist2_sq) {
+                    if (dist2_sq < result.distance_sq) stack[stack_ptr++] = child2_idx;
+                    if (dist1_sq < result.distance_sq) stack[stack_ptr++] = child1_idx;
+                } else {
+                    if (dist1_sq < result.distance_sq) stack[stack_ptr++] = child1_idx;
+                    if (dist2_sq < result.distance_sq) stack[stack_ptr++] = child2_idx;
+                }
+            }
+        }
+
+        if (result.prim_id == static_cast<uint32_t>(-1)) {
+            return nb::none();
+        }
+
+        nb::dict res;
+        res["point"] = nb::cast(result.closest_point);
+        res["prim_id"] = result.prim_id;
+        res["inst_id"] = static_cast<int32_t>(result.inst_id);
+        res["distance"] = std::sqrt(result.distance_sq);
+
+        return res;
+    }
+
     // Refitting, TLAS
 
     void refit() const {
@@ -1956,7 +2169,7 @@ public:
 
         // Keep Python objects alive to prevent their data from being garbage collected
         wrapper->source_geometry_refs.append(instances_obj);
-        wrapper->source_geometry_refs.append(blases_py);
+        wrapper->source_blases_refs = blases_py;
 
         // Build TLAS and assign it to the wrapper
         // (a TLAS is always a standard-layout tinybvh::BVH)
@@ -2148,7 +2361,6 @@ public:
     }
 
     static nb::object get_nodes(const PyBVH &self) {
-        // TODO: Apply this zero-copy approach to the other properties where possible
 
         // if no BVH or not standard layout: return empty structured array
         if (!self.active_bvh_ || self.active_bvh_->layout != tinybvh::BVHBase::LAYOUT_BVH) {
@@ -2252,10 +2464,71 @@ public:
         return arr;
     }
 
+    void add_instance(const nb::ndarray<const float, nb::shape<4,4>, nb::c_contig>& transform, const nb::object& blas_obj, uint32_t mask) {
+
+        if (!active_bvh_)
+            throw std::runtime_error("This BVH is not initialized.");
+        if (!is_tlas()) {
+            throw nb::value_error("This BVH is not a TLAS (no instances).");
+        }
+        if (!nb::isinstance<PyBVH>(blas_obj)) {
+            throw nb::type_error("The provided 'BLAS' object must be a pytinybvh.BVH instance.");
+        }
+        auto& py_blas = nb::cast<PyBVH&>(blas_obj);
+        if (!py_blas.active_bvh_) {
+            throw std::runtime_error("The provided BLAS has not been initialized.");
+        }
+
+        // BLAS management
+        // Check if this BLAS is already tracked. If not, add it.
+        uint32_t blas_id = -1;
+        bool found = false;
+        for (size_t i = 0; i < source_blases_refs.size(); ++i) {
+            if (source_blases_refs[i].ptr() == blas_obj.ptr()) {
+                blas_id = static_cast<uint32_t>(i);
+                found = true;
+                break;
+            }
+        }
+
+        if (!found) {
+            blas_id = static_cast<uint32_t>(source_blases_refs.size());
+            source_blases_refs.append(blas_obj);
+            blas_pointers.push_back(py_blas.active_bvh_);
+        }
+
+        // Instance management
+        tinybvh::BLASInstance new_instance;
+        new_instance.blasIdx = blas_id;
+        new_instance.mask = mask;
+        std::memcpy(new_instance.transform.cell, transform.data(), 16 * sizeof(float));
+
+        // Update instance to compute its inverse transform and world-space AABB
+        new_instance.Update(py_blas.active_bvh_);
+
+        instances_data.push_back(new_instance);
+    }
+
+    void remove_instance(size_t instance_id) {
+        if (!is_tlas()) {
+            throw nb::value_error("This BVH is not a TLAS (no instances).");
+        }
+        if (instance_id >= instances_data.size()) {
+            throw nb::index_error("Instance ID is out of range.");
+        }
+
+        // Erase the instance from the vector
+        // This is O(N), should be fine for this use case
+        instances_data.erase(instances_data.begin() + instance_id);
+
+        // Note: We do NOT remove the BLAS from the blas_pointers or source_blases_ref lists,
+        // even if it's now orphaned, to avoid recomputing indices.
+    }
+
     void update_instances(nb::object instances_obj = nb::none(), const bool recompute_aabbs = true) {
 
         if (!active_bvh_)
-            throw std::runtime_error("BVH is not initialized.");
+            throw std::runtime_error("This BVH is not initialized.");
         if (instances_data.empty())
             throw nb::value_error("This BVH is not a TLAS (no instances).");
 
@@ -2358,6 +2631,47 @@ public:
             for (auto& inst : instances_data)
                 inst.Update(blas_pointers[inst.blasIdx]);
         }
+    }
+
+    void compact_blases() {
+        if (!is_tlas()) {
+            throw nb::value_error("BLAS compaction can only be performed on a TLAS.");
+        }
+        if (instances_data.empty()) {
+            source_blases_refs.clear();
+            blas_pointers.clear();
+            return;
+        }
+
+        std::vector<bool> active_blas_ids(source_blases_refs.size(), false);
+        for (const auto& inst : instances_data) {
+            if (inst.blasIdx < active_blas_ids.size()) {
+                active_blas_ids[inst.blasIdx] = true;
+            }
+        }
+
+        std::vector<uint32_t> old_to_new_id_map(source_blases_refs.size());
+        nb::list new_source_blases;
+        std::vector<tinybvh::BVHBase*> new_blas_pointers;
+        uint32_t new_id_counter = 0;
+
+        for (size_t i = 0; i < active_blas_ids.size(); ++i) {
+            if (active_blas_ids[i]) {
+                old_to_new_id_map[i] = new_id_counter;
+                new_source_blases.append(source_blases_refs[i]);
+                new_blas_pointers.push_back(blas_pointers[i]);
+                new_id_counter++;
+            }
+        }
+
+        // Re-index all instances
+        for (auto& inst : instances_data) {
+            inst.blasIdx = old_to_new_id_map[inst.blasIdx];
+        }
+
+        // Replace the old lists with the new compacted ones
+        source_blases_refs = new_source_blases;
+        blas_pointers = new_blas_pointers;
     }
 
     [[nodiscard]] nb::dict get_buffers() const {
@@ -2509,6 +2823,91 @@ public:
         }
 
         return buffers;
+    }
+
+    [[nodiscard]] nb::dict memory_usage() const {
+        if (!active_bvh_) {
+            throw std::runtime_error("This BVH is not initialized.");
+        }
+
+        nb::dict result;
+        nb::dict base_dict;
+        nb::dict cached_dict;
+        nb::dict tlas_dict;
+        size_t total_bytes = 0;
+
+        // C++ Allocated buffers
+        if (base_) {
+            size_t base_bytes = 0;
+            if (base_->bvhNode) base_bytes += base_->allocatedNodes * sizeof(tinybvh::BVH::BVHNode);
+            if (base_->primIdx) base_bytes += base_->idxCount * sizeof(uint32_t);
+            base_dict["bytes"] = base_bytes;
+            total_bytes += base_bytes;
+        }
+
+        auto add_to_cache = [&](const char* name, size_t bytes) {
+            if (bytes > 0) { cached_dict[name] = bytes; total_bytes += bytes; }
+        };
+
+        if (soa_)      add_to_cache("SoA", soa_->allocatedNodes * sizeof(tinybvh::BVH_SoA::BVHNode));
+        if (bvh_gpu_)  add_to_cache("BVH_GPU", bvh_gpu_->allocatedNodes * sizeof(tinybvh::BVH_GPU::BVHNode));
+        if (mbvh4_)    add_to_cache("MBVH4", mbvh4_->allocatedNodes * sizeof(tinybvh::MBVH<4>::MBVHNode));
+        if (mbvh8_)    add_to_cache("MBVH8", mbvh8_->allocatedNodes * sizeof(tinybvh::MBVH<8>::MBVHNode));
+        if (bvh4_cpu_) add_to_cache("BVH4_CPU", bvh4_cpu_->allocatedBlocks * 64);
+        if (bvh8_cpu_) add_to_cache("BVH8_CPU", bvh8_cpu_->allocatedBlocks * 64);
+        if (bvh4_gpu_) add_to_cache("BVH4_GPU", bvh4_gpu_->allocatedBlocks * 16);
+        if (cwbvh_) {
+            size_t bytes = cwbvh_->allocatedBlocks * 16;
+            #ifdef CWBVH_COMPRESSED_TRIS
+                bytes += cwbvh_->triCount * 4 * 4 * sizeof(float);
+            #else
+                bytes += cwbvh_->triCount * 3 * 4 * sizeof(float);
+            #endif
+            add_to_cache("CWBVH", bytes);
+        }
+
+        if (is_tlas()) {
+            size_t tlas_bytes = instances_data.size() * sizeof(tinybvh::BLASInstance);
+            tlas_bytes += blas_pointers.size() * sizeof(tinybvh::BVHBase*);
+            tlas_dict["bytes"] = tlas_bytes;
+            total_bytes += tlas_bytes;
+        }
+
+        // Referenced Python objects
+        nb::list source_bytes_list;
+        auto collect_referenced_bytes = [&](const nb::list& ref_list) {
+            for (const auto& handle : ref_list) {
+                if (nb::isinstance<nb::ndarray<>>(handle)) {
+                    source_bytes_list.append(nb::cast<nb::ndarray<>>(handle).nbytes());
+                } else if (nb::isinstance<PyBVH>(handle) && handle.ptr() != nb::find(this).ptr()) {
+                    // Safely call the Python method via its attribute
+                    nb::object method = handle.attr("memory_usage");
+                    auto blas_usage = nb::cast<nb::dict>(method());
+                    source_bytes_list.append(blas_usage["total_bytes"]);
+                }
+            }
+        };
+
+        collect_referenced_bytes(source_geometry_refs);
+        if (is_tlas()) {
+            collect_referenced_bytes(source_blases_refs);
+        }
+        if (opacity_map_ref.is_valid()) {
+            source_bytes_list.append(opacity_map_ref.nbytes());
+        }
+
+        for(const auto& item : source_bytes_list) {
+            total_bytes += nb::cast<size_t>(item);
+        }
+
+        // Assemble final dict
+        result["total_bytes"] = total_bytes;
+        result["base_bvh"] = base_dict;
+        if (nb::len(cached_dict) > 0) result["cached_layouts"] = cached_dict;
+        if (is_tlas()) result["tlas_data"] = tlas_dict;
+        if (nb::len(source_bytes_list) > 0) result["source_geometry_bytes"] = source_bytes_list;
+
+        return result;
     }
 
     [[nodiscard]] nb::list get_cached_layouts() const {
@@ -3272,6 +3671,26 @@ NB_MODULE(_pytinybvh, m) {
             ))",
             nb::arg("center"), nb::arg("radius"))
 
+        .def("closest_point", &PyBVH::closest_point,
+            R"((
+            Finds the closest point on the BVH geometry to a given query point.
+
+            This method performs a proximity search, useful for collision detection
+            and geometry analysis. It traverses the BVH to find the nearest surface point.
+
+            Args:
+                point (Vec3Like): The 3D point to query from.
+
+            Returns:
+                Dict[str, Any] or None: A dictionary containing the query result:
+                    - 'point' (numpy.ndarray): The 3D coordinates of the closest point.
+                    - 'prim_id' (int): The ID of the primitive containing the closest point.
+                    - 'inst_id' (int): The ID of the instance (-1 for BLAS).
+                    - 'distance' (float): The Euclidean distance to the closest point.
+                Returns None if the BVH is empty.
+            ))",
+            nb::arg("point"))
+
         // Accessors for the BVH data
 
         .def_prop_ro("nodes", &PyBVH::get_nodes,
@@ -3330,6 +3749,38 @@ NB_MODULE(_pytinybvh, m) {
                   before `refit_tlas()`, so AABBs are re-derived from the new BLAS.
             ))")
 
+        .def("add_instance", &PyBVH::add_instance,
+            R"((
+            Adds a new instance to the TLAS. Only useable on a TLAS.
+
+            This method stages the addition. You must call `refit_tlas()` afterwards to
+            rebuild the acceleration structure and make the new instance visible to ray queries.
+
+            Args:
+                transform (numpy.ndarray): A (4, 4) float32, C-contiguous numpy array for the
+                                           object-to-world transformation.
+                blas (BVH): The Bottom-Level Acceleration Structure (a standard BVH) to instance.
+                mask (int, optional): A 32-bit integer visibility mask. Defaults to 0xFFFFFFFF.
+            ))",
+            nb::arg("transform"), nb::arg("blas"), nb::arg("mask") = 0xFFFFFFFF)
+
+        .def("remove_instance", &PyBVH::remove_instance,
+            R"((
+            Removes an instance from the TLAS by its index. Only useable on a TLAS.
+
+            This method stages the removal. You must call `refit_tlas()` afterwards to
+            rebuild the acceleration structure.
+
+            Note:
+                - Removing the last instance that refers to a particular BLAS does NOT
+                  de-register the BLAS. This is to avoid a costly re-indexing of all other
+                  instances. The BLAS simply becomes orphaned but remains available.
+
+            Args:
+                instance_id (int): The index of the instance to remove.
+            ))",
+            nb::arg("instance_id"))
+
         .def("update_instances", &PyBVH::update_instances,
             R"((
             Bulk-updates TLAS instances from a structured array (zero extra copies in Python). Only useable on a TLAS.
@@ -3348,6 +3799,18 @@ NB_MODULE(_pytinybvh, m) {
             ))",
             nb::arg("instances"), nb::arg("recompute_aabbs") = true)
 
+        .def("compact_blases", &PyBVH::compact_blases,
+            R"((
+            Removes any unused (orphaned) BLASes from the TLAS's internal lists.
+
+            This is a potentially slow operation as it requires re-indexing all existing
+            instances. It should only be called when memory usage is a critical concern
+            after many instances have been removed.
+
+            After calling this, you must still call `refit_tlas()` to rebuild the
+            acceleration structure.
+            ))")
+
         .def("get_buffers", &PyBVH::get_buffers,
             R"((
             Returns a dictionary of raw, zero-copy numpy arrays for all current BVH's internal data and geometry.
@@ -3362,6 +3825,29 @@ NB_MODULE(_pytinybvh, m) {
                 Dict[str, numpy.ndarray]: A dictionary mapping buffer names (e.g., 'nodes',
                                         'prim_indices', 'packed_data', 'vertices', etc.) to
                                         their corresponding raw data arrays.
+            ))")
+
+        .def_prop_ro("memory_usage", &PyBVH::memory_usage,
+            R"((
+            Reports a detailed breakdown of the memory usage for the BVH.
+
+            The returned dictionary contains the following keys:
+
+            - `total_bytes` (int):
+                The total memory footprint, including C++ buffers and referenced Python objects.
+            - `base_bvh` (Dict):
+                Memory used by the mandatory standard layout BVH. Contains ``{'bytes': int}``.
+            - `cached_layouts` (Dict, optional):
+                A dictionary mapping layout names to their memory usage in bytes.
+            - `tlas_data` (Dict, optional):
+                Memory used by internal C++ TLAS buffers (instances, pointers). Contains ``{'bytes': int}``.
+            - `source_geometry_bytes` (List[int], optional):
+                A list of byte sizes for each external Python object this BVH holds a
+                reference to. This includes source NumPy arrays (vertices, indices) and,
+                for a TLAS, the total memory footprint of each referenced BLAS
+
+            Returns:
+                Dict[str, Any]: A dictionary detailing the memory usage in bytes.
             ))")
 
         // Load / save

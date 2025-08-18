@@ -488,11 +488,8 @@ This exposes most of `tinybvh`'s features, with a few Pythonic additions:
 - Conversion between different performance-oriented memory layouts
 - BVH refitting, optimization, saving, and loading
 
-Some things are still a little bit unstable for now:
-- Occasional crashes when intersecting a large number of rays after layout conversion. Investigating this.
-
 Current design choices might evolve
-- I might be dropping the use of `Intersect256()` in batched occlusion tests, as I am not sure it's actually faster in a real-life situation
+- I _might_ be dropping the use of `Intersect256()` in batched occlusion tests, as I am not sure it's actually faster in a real-life situation
 
 ## Roadmap
 

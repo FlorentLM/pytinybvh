@@ -939,12 +939,12 @@ class BVH:
         """
         ...
 
-    def get_SSBO_bundle(self) -> Dict[str, np.ndarray]:
+    def get_SSBO_bundle(self, flatten_nodes: bool = True) -> Dict[str, np.ndarray]:
         """
         Returns a consistent (layout-agnostic) dict for SSBO uploads and GLSL setup:
 
         Keys:
-            - node_buffer        : Raw bytes view of the active layout's node memory (for SSBO)
+            - node_buffer        : Raw bytes view of the active layout's node memory (for SSBO), (only if `flatten_nodes` is True)
             - node_key           : Source key used for nodes ("nodes" or "packed_data")
             - node_count         : Number of structured nodes (2D layouts), else 0
             - block_count        : Number of node blocks (blocked layouts), else 0
@@ -968,6 +968,10 @@ class BVH:
             - is_tlas            : Whether the BVH is a TLAS or not
             - defines            : Dict of "TBVH_*" macros for GLSL
             - preamble           : String of "#define TBVH_* ..." lines to prepend to shaders
+
+        Args:
+            flatten_nodes (bool, optional): If True (default), returns the node data as a raw 1D byte array (`node_buffer`)
+                                            If False, provides the nodes in their structured/multi-dimensional format (`nodes`)
 
         Returns:
             Dict[str, numpy.ndarray]: A dictionary containing everything needed for SSBO upload

@@ -2872,7 +2872,7 @@ public:
         return buffers;
     }
 
-    [[nodiscard]] nb::dict uniform_bundle(bool flat_nodes = true) const {
+    [[nodiscard]] nb::dict uniform_bundle(bool flatten_nodes = true) const {
 
         if (!active_bvh_) {
             throw std::runtime_error("This BVH is not initialized.");
@@ -2892,7 +2892,7 @@ public:
         }
 
         if (node_key) {
-            if (flat_nodes) {
+            if (flatten_nodes) {
                 // raw byte view is the safest uniform carrier
                 out["node_buffer"] = nb::cast<nb::object>(src[node_key]).attr("view")(np().attr("uint8"));
             } else {
@@ -4084,7 +4084,7 @@ NB_MODULE(_pytinybvh, m) {
             Returns a consistent (layout-agnostic) dict for SSBO uploads and GLSL setup:
 
             Keys:
-                - node_buffer        : Raw bytes view of the active layout's node memory (for SSBO)
+                - node_buffer        : Raw bytes view of the active layout's node memory (for SSBO), (only if `flatten_nodes` is True)
                 - node_key           : Source key used for nodes ("nodes" or "packed_data")
                 - node_count         : Number of structured nodes (2D layouts), else 0
                 - block_count        : Number of node blocks (blocked layouts), else 0
@@ -4109,10 +4109,14 @@ NB_MODULE(_pytinybvh, m) {
                 - defines            : Dict of "TBVH_*" macros for GLSL
                 - preamble           : String of "#define TBVH_* ..." lines to prepend to shaders
 
+            Args:
+                flatten_nodes (bool, optional): If True (default), returns the node data as a raw 1D byte array (`node_buffer`)
+                                                If False, provides the nodes in their structured/multi-dimensional format (`nodes`)
+
             Returns:
                 Dict[str, numpy.ndarray]: A dictionary containing everything needed for SSBO upload
             )doc",
-            nb::arg("flat_nodes") = true)
+            nb::arg("flatten_nodes") = true)
 
         .def_prop_ro("memory_usage", &PyBVH::memory_usage,
             R"doc(

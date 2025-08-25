@@ -1,11 +1,29 @@
-# pytinybvh
+<br />
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+<div align="center">
 
-Python bindings for the great C++ Bounding Volume Hierarchy (BVH) library [tinybvh](https://github.com/jbikker/tinybvh) by Jacco Bikker.
+  <a href="https://github.com/FlorentLM/pytinybvh">
+    <img src="img/pytinybvh_logo.png" alt="Logo" width="128" height="128">
+  </a>
 
-Exposes `tinybvh`'s fast BVH construction algorithms to Python.
-For example, the BVH can be used as-is in a SSBO for real time ray-tracing with PyOpenGL or Vulkan, or for CPU-side computations like collision detection, etc.
+<h3 align="center">PyTinyBVH</h3>
+  <p>
+  Bounding Volume Hierarchy (BVH) for Python
+  <br/>
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)  
+
+  </p>
+</div>
+
+PyTinyBVH are Python bindings for the great C++ Bounding Volume Hierarchy (BVH) library [tinybvh](https://github.com/jbikker/tinybvh) by Jacco Bikker.
+
+Exposes `tinybvh`'s fast geometry acceleration structures for your Python projects.
+
+**Why?** Real time ray-tracing with PyOpenGL or Vulkan, CPU-side computations like collision detection, etc.
+
+Powered by [nanobind](https://github.com/wjakob/nanobind)
+
 
 <div style="text-align:center">
 <img alt="Screenshot of a test model in a Bounding Volume Hierarchy" src="img/screenshot.png" title="Screenshot" width="500"/>
@@ -13,7 +31,7 @@ For example, the BVH can be used as-is in a SSBO for real time ray-tracing with 
 
 ## Current status
 
-Most of `tinybvh`'s core functionality is now implemented and functional :)
+Most of `tinybvh`'s functionality is now implemented and functional :)
 
 See [Features](#Features) and [Roadmap](#Roadmap) below for more details.
 

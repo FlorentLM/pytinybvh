@@ -2079,7 +2079,7 @@ public:
         auto* bvh = static_cast<tinybvh::BVH*>(active_bvh_);
 
         if (!bvh->refittable) {
-            throw std::runtime_error("BVH is not refittable. This is expected for a BVH built with spatial splits (High Quality preset).");
+            throw std::runtime_error("This BVH is not refittable. This is expected for a BVH built with spatial splits (High Quality preset).");
         }
         bvh->Refit();
     }
@@ -2322,7 +2322,7 @@ public:
         // This static_cast is safe because the layout has just been checked
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
         auto* bvh = static_cast<tinybvh::BVH*>(active_bvh_);
-        if (bvh->triCount == 0) throw std::runtime_error("BVH is not initialized.");
+        if (bvh->triCount == 0) throw std::runtime_error("This BVH is not initialized.");
         if (bvh->usedNodes + bvh->triCount > bvh->allocatedNodes) {
             throw std::runtime_error("Cannot split leaves: not enough allocated node capacity.");
         }
@@ -2336,7 +2336,7 @@ public:
         // This static_cast is safe because the layout has just been checked
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
         auto* bvh = static_cast<tinybvh::BVH*>(active_bvh_);
-        if (bvh->triCount == 0) throw std::runtime_error("BVH is not initialized.");
+        if (bvh->triCount == 0) throw std::runtime_error("This BVH is not initialized.");
         bvh->CombineLeafs();
     }
 
@@ -2433,7 +2433,7 @@ public:
     }
 
     nb::object instances() {
-        if (!active_bvh_) throw std::runtime_error("BVH is not initialized.");
+        if (!active_bvh_) throw std::runtime_error("This BVH is not initialized.");
 
         if (instances_data.empty()) {
             return np().attr("empty")(nb::make_tuple(0), "dtype"_a = INSTANCE_DTYPE());
@@ -2678,8 +2678,12 @@ public:
         const PyBVH& self = *this;
 
         // Helper to create a raw byte view and reinterpret it
-        auto add_buffer = [&](const char* key, const void* data, size_t n_bytes, const nb::object& dtype, const std::vector<size_t>& shape) {
-            if (!data || n_bytes == 0) return;
+        auto add_buffer = [&](const char* key, const void* data, size_t n_bytes,
+                         const nb::object& dtype, const std::vector<size_t>& shape) {
+
+            if (!data || n_bytes == 0) {
+                return;
+            }
 
             // Create a raw 1D byte view of the data
             auto bytes_view = nb::ndarray<const uint8_t, nb::numpy, nb::c_contig, nb::ro>(
@@ -2694,7 +2698,6 @@ public:
             if (!shape.empty()) {
                 final_array = final_array.attr("reshape")(nb::cast(shape));
             }
-
             buffers[key] = final_array;
         };
 
@@ -2804,31 +2807,240 @@ public:
             }
         });
 
-        // Add custom geometry data if present
-        switch (self.custom_type) {
-            case CustomType::AABB:
-                if (self.source_geometry_refs.size() >= 2) {
-                    buffers["aabbs"] = self.source_geometry_refs[0];
-                    buffers["inv_extents"] = self.source_geometry_refs[1];
+        // Always provide the canonical leaf mapping if it exists (BLAS: prim ids, TLAS: instance ids)
+        if (base_ && base_->primIdx && base_->idxCount) {
+            nb::object u32 = np().attr("uint32");
+            add_buffer("prim_indices",
+                       base_->primIdx,
+                       static_cast<size_t>(base_->idxCount) * sizeof(uint32_t),
+                       u32,
+                       { static_cast<size_t>(base_->idxCount) });
+        }
+
+        // Alias packed_data to nodes when nodes absent (BVH4/BVH8)
+        if (!buffers.contains("nodes") && buffers.contains("packed_data")) {
+            buffers["nodes"] = buffers["packed_data"];   // same ndarray view
+        }
+
+        // 'leaf_ids' alias (stable name for leaf -> thing mapping)
+        // BLAS: leaf -> primitive id
+        // TLAS: leaf -> instance id
+        if (buffers.contains("prim_indices"))
+            buffers["leaf_ids"] = buffers["prim_indices"];
+
+        // Source-geometry aliases
+        switch (custom_type) {
+            case CustomType::None: { // triangles
+                if (nb::len(source_geometry_refs) > 0) {
+                    buffers["vertices"] = source_geometry_refs[0];
                 }
-                break;
-            case CustomType::Sphere:
-                if (!self.source_geometry_refs.empty()) {
-                    buffers["points"] = self.source_geometry_refs[0];
-                    buffers["sphere_radius"] = self.sphere_radius;
+                if (nb::len(source_geometry_refs) > 1) {
+                    buffers["indices"] = source_geometry_refs[1];
+                    buffers["primitives"] = buffers["indices"];     // prefer index triplets
+                } else {
+                    buffers["primitives"] = buffers["vertices"];    // fallback (non-indexed)
                 }
+                buffers["primitive_kind"] = "Triangles";
                 break;
-            case CustomType::None: // triangles
-                if (!self.source_geometry_refs.empty()) {
-                    buffers["vertices"] = self.source_geometry_refs[0];
-                    if (self.source_geometry_refs.size() > 1) {
-                        buffers["indices"] = self.source_geometry_refs[1];
-                    }
+            }
+            case CustomType::AABB: {
+                if (nb::len(source_geometry_refs) > 0) {
+                    buffers["aabbs"]      = source_geometry_refs[0];
+                    buffers["primitives"] = buffers["aabbs"];  // alias
                 }
+                if (nb::len(source_geometry_refs) > 1)
+                    buffers["inv_extents"] = source_geometry_refs[1]; // optional
+                buffers["primitive_kind"]  = "AABBs";
                 break;
+            }
+            case CustomType::Sphere: {
+                if (nb::len(source_geometry_refs) > 0) {
+                    buffers["points"]     = source_geometry_refs[0];
+                    buffers["primitives"] = buffers["points"];  // alias
+                }
+                buffers["sphere_radius"]  = nb::cast(sphere_radius);
+                buffers["primitive_kind"] = "Spheres";
+                break;
+            }
+        }
+
+        // TLAS helper: expose instances and give a stable alias too
+        if (is_tlas()) {
+            buffers["instances"] = const_cast<PyBVH*>(this)->instances();
         }
 
         return buffers;
+    }
+
+    [[nodiscard]] nb::dict uniform_bundle(bool flat_nodes = true) const {
+
+        if (!active_bvh_) {
+            throw std::runtime_error("This BVH is not initialized.");
+        }
+
+        nb::dict src = get_buffers();
+        nb::dict out;
+
+        const Layout L = active_layout_;
+        const char* node_key = nullptr;
+
+        // Nodes: provide a raw byte buffer (or float32 view) for easy SSBO upload
+        if (src.contains("nodes")) {
+            node_key = "nodes";
+        } else if (src.contains("packed_data")) {
+            node_key = "packed_data";
+        }
+
+        if (node_key) {
+            if (flat_nodes) {
+                // raw byte view is the safest uniform carrier
+                out["node_buffer"] = nb::cast<nb::object>(src[node_key]).attr("view")(np().attr("uint8"));
+            } else {
+                out["nodes"] = src[node_key];   // structured access if caller wants it
+            }
+            out["node_key"] = node_key;     // tell user which one we used
+        }
+
+        // Leaf IDs (uniform name)
+        out["leaf_ids"] = src.contains("leaf_ids") ? src["leaf_ids"] :
+                          (src.contains("prim_indices") ? src["prim_indices"] : nb::none());
+
+        // Unified primitives
+        if (src.contains("primitives"))     out["primitives"]     = src["primitives"];
+        if (src.contains("vertices"))       out["vertices"]       = src["vertices"];
+        if (src.contains("indices"))        out["index_buffer"]   = src["indices"];
+        if (src.contains("aabbs"))          out["aabbs"]          = src["aabbs"];
+        if (src.contains("points"))         out["points"]         = src["points"];
+        if (src.contains("sphere_radius"))  out["sphere_radius"]  = src["sphere_radius"];
+        if (src.contains("primitive_kind")) out["primitive_kind"] = src["primitive_kind"];
+
+        // Embedded triangles stream (CWBVH)
+        if (src.contains("triangles")) {
+            out["embedded_triangles"] = src["triangles"];
+        }
+
+        // TLAS instances if any
+        if (is_tlas()) {
+            out["instances"] = const_cast<PyBVH*>(this)->instances(); // zero-copy structured view
+        }
+
+        // Minimal meta
+        out["layout"] = active_layout_;
+        out["geometry_type"] = (custom_type == CustomType::AABB)   ? "AABBs"
+                              : (custom_type == CustomType::Sphere) ? "Spheres"
+                              : "Triangles";
+        out["is_tlas"] = is_tlas();
+
+        // Counts (nice to have)
+        // node_count for 2D node arrays, block_count for blocked (1D) layouts
+        int node_count = 0;
+        int block_count = 0;
+
+        if (node_key) {
+            const auto arr = nb::cast<nb::object>(src[node_key]);
+            const int ndim = nb::cast<int>(arr.attr("ndim"));
+
+            if (ndim == 2) {
+                node_count = nb::cast<int>(arr.attr("shape")[0]);
+            } else {
+                // 1D buffers represent blocks. Determine BLOCK_FLOATS first:
+                int block_bytes  = 0;
+                if (L == Layout::BVH4_GPU || L == Layout::CWBVH) block_bytes = 16;
+                else if (L == Layout::BVH4_CPU || L == Layout::BVH8_CPU) block_bytes = 64;
+
+                if (block_bytes) {
+                    const int block_floats = block_bytes / 4;
+                    const int total_floats = nb::cast<int>(arr.attr("size"));
+                    block_count = total_floats / block_floats;
+                }
+            }
+        }
+        out["node_count"] = nb::int_(node_count);
+        out["block_count"] = nb::int_(block_count);
+
+        // Defines and preamble for GLSL
+
+        nb::dict defs;
+        auto seti = [&](const char* k, int v){ defs[k] = nb::int_(v); };
+        auto setb = [&](const char* k, bool v){ defs[k] = nb::int_(v ? 1 : 0); };
+
+        // Layout
+        setb("TBVH_LAYOUT_STANDARD", L == Layout::Standard);
+        setb("TBVH_LAYOUT_SOA",      L == Layout::SoA);
+        setb("TBVH_LAYOUT_BVH_GPU",  L == Layout::BVH_GPU);
+        setb("TBVH_LAYOUT_BVH4_CPU", L == Layout::BVH4_CPU);
+        setb("TBVH_LAYOUT_BVH4_GPU", L == Layout::BVH4_GPU);
+        setb("TBVH_LAYOUT_CWBVH",    L == Layout::CWBVH);
+        setb("TBVH_LAYOUT_BVH8_CPU", L == Layout::BVH8_CPU);
+        setb("TBVH_LAYOUT_MBVH4",    L == Layout::MBVH4);
+        setb("TBVH_LAYOUT_MBVH8",    L == Layout::MBVH8);
+
+        // Geometry
+        setb("TBVH_GEOM_TRIANGLES", custom_type == CustomType::None);
+        setb("TBVH_GEOM_AABBS",     custom_type == CustomType::AABB);
+        setb("TBVH_GEOM_SPHERES",   custom_type == CustomType::Sphere);
+
+        // TLAS
+        setb("TBVH_IS_TLAS", is_tlas());
+
+        // Streams presence flags
+        auto has = [&](const char* k){ return nb::cast<bool>(src.contains(k)); };
+        setb("TBVH_HAS_INSTANCES",     is_tlas() && src.contains("instances"));
+        setb("TBVH_HAS_PRIM_INDICES",    static_cast<bool>(has("prim_indices") || has("leaf_ids")));
+        setb("TBVH_HAS_SOURCE_VERTICES", static_cast<bool>(has("vertices")));
+        setb("TBVH_HAS_SOURCE_INDICES",  static_cast<bool>(has("indices")));
+        setb("TBVH_HAS_AABBS",           static_cast<bool>(has("aabbs")));
+        setb("TBVH_HAS_POINTS",          static_cast<bool>(has("points")));
+        setb("TBVH_HAS_EMBEDDED_TRIS",   static_cast<bool>(has("triangles"))); // CWBVH triangles stream
+
+        // Node stride
+        int node_stride_bytes = 0;
+        int node_stride_floats = 0;
+
+        if (node_key && std::string(node_key) == "nodes") {
+            if (const auto nodes = nb::cast<nb::object>(src["nodes"]); nb::cast<int>(nodes.attr("ndim")) == 2) {
+                node_stride_bytes  = nb::cast<int>(nodes.attr("strides")[0]);
+                node_stride_floats = node_stride_bytes / nb::cast<int>(nodes.attr("dtype").attr("itemsize"));
+            }
+        }
+        if (node_stride_bytes  > 0) seti("TBVH_NODE_STRIDE_BYTES",  node_stride_bytes);
+        if (node_stride_floats > 0) seti("TBVH_NODE_STRIDE_FLOATS", node_stride_floats);
+
+        if (node_stride_bytes > 0) {
+            out["node_stride_bytes"] = nb::int_(node_stride_bytes);
+        }
+
+        // Blocked layouts (bytes are fixed per exporter)
+        // BVH4_GPU & CWBVH: 16B blocks
+        // BVH4_CPU & BVH8_CPU: 64B blocks
+        int block_bytes = 0;
+        if (L == Layout::BVH4_GPU || L == Layout::CWBVH) block_bytes = 16;  // 4 floats per block
+        else if (L == Layout::BVH4_CPU || L == Layout::BVH8_CPU) block_bytes = 64; // 16 floats per block
+        if (block_bytes) {
+            seti("TBVH_BLOCK_BYTES",  block_bytes);
+            seti("TBVH_BLOCK_FLOATS", block_bytes / 4);
+            out["block_stride_bytes"] = nb::int_(block_bytes);
+        }
+
+        // CWBVH triangles packing (compile-time)
+        #if defined(CWBVH_COMPRESSED_TRIS)
+            setb("TBVH_CWBVH_COMPRESSED_TRIS", true);
+        #else
+            setb("TBVH_CWBVH_COMPRESSED_TRIS", false);
+        #endif
+
+        // Ready-to-include GLSL preamble
+        std::string preamble;
+        for (auto item : defs) {
+            const auto key = nb::cast<std::string>(item.first);
+            const int val = nb::cast<int>(item.second);
+            preamble += "#define " + key + " " + std::to_string(val) + "\n";
+        }
+
+        out["defines"]  = defs;
+        out["preamble"] = preamble;
+
+        return out;
     }
 
     [[nodiscard]] nb::dict memory_usage() const {
@@ -3142,7 +3354,7 @@ NB_MODULE(_pytinybvh, m) {
     // Top-level functions
 
     m.def("hardware_info", &get_hardware_info,
-        R"((
+        R"doc(
         Returns a dictionary detailing the compile-time and runtime capabilities of the library.
 
         This includes detected SIMD instruction sets and which BVH layouts support
@@ -3150,13 +3362,13 @@ NB_MODULE(_pytinybvh, m) {
 
         Returns:
             Dict[str, Any]: A dictionary with the hardware info.
-        ))");
+        )doc");
 
     m.def("layout_to_string", [](Layout L){ return std::string(layout_to_string(L)); });
 
     m.def("supports_layout",
         [](Layout L, bool for_traversal) { return supports_layout(L, for_traversal); },
-        R"((
+        R"doc(
         Checks if the current system supports a given BVH layout.
 
         Args:
@@ -3167,7 +3379,7 @@ NB_MODULE(_pytinybvh, m) {
 
         Returns:
             bool: True if the layout is supported, False otherwise.
-        ))",
+        )doc",
         nb::arg("layout"), nb::arg("for_traversal") = true);
 
     m.def("require_layout",
@@ -3178,7 +3390,7 @@ NB_MODULE(_pytinybvh, m) {
                   explain_requirement(L));
             }
         },
-        R"((
+        R"doc(
         Asserts that a given BVH layout is supported, raising a RuntimeError if not.
 
         This is useful for writing tests or code that depends on a specific high-performance
@@ -3190,7 +3402,7 @@ NB_MODULE(_pytinybvh, m) {
 
         Raises:
             RuntimeError: If the layout is not supported on the current system.
-        ))",
+        )doc",
         nb::arg("layout"), nb::arg("for_traversal") = true);
 
     // Main Python classes
@@ -3250,19 +3462,20 @@ NB_MODULE(_pytinybvh, m) {
             return "<pytinybvh.Ray (origin=" + origin_s + " dir=" + dir_s + ", Miss)>";
         });
 
-    nb::class_<PyBVHVerbose>(m, "BVHVerbose", R"((
+    nb::class_<PyBVHVerbose>(m, "BVHVerbose",
+        R"doc(
         Editable/inspectable BVH representation.
 
         This layout exposes explicit nodes and indices for diagnostics, SAH analysis,
         local optimizations, and maintenance (refit / compaction).
 
         Convert from/to the compact `BVH` with `from_bvh()` and `to_bvh()`.
-        ))")
+        )doc")
 
         .def(nb::init<>())
 
         .def_static("from_bvh", &PyBVHVerbose::from_bvh,
-            R"((
+            R"doc(
             Creates a verbose BVH from a compact `BVH`.
 
             Args:
@@ -3271,12 +3484,12 @@ NB_MODULE(_pytinybvh, m) {
 
             Returns:
                 BVHVerbose: New verbose tree (deep copy).
-            ))",
+            )doc",
             nb::arg("bvh"),
             nb::arg("compact") = true)
 
         .def("sah_cost_at", &PyBVHVerbose::sah_cost,
-            R"((
+            R"doc(
             Computes the Surface Area Heuristic (SAH) cost for a node or the whole tree.
 
             Args:
@@ -3284,7 +3497,7 @@ NB_MODULE(_pytinybvh, m) {
 
             Returns:
                 int
-            ))",
+            )doc",
             nb::arg("node") = 0)
 
         .def_prop_ro("node_count", &PyBVHVerbose::node_count,
@@ -3299,7 +3512,7 @@ NB_MODULE(_pytinybvh, m) {
         }, "Computes the Surface Area Heuristic (SAH) cost of the verbose tree.")
 
 //         .def("prim_count_at", &PyBVHVerbose::prim_count,
-//             R"((
+//             R"doc(
 //             Number of primitives referenced under a node.
 //
 //             Args:
@@ -3307,49 +3520,49 @@ NB_MODULE(_pytinybvh, m) {
 //
 //             Returns:
 //                 int
-//             ))",
+//             )doc",
 //             nb::arg("node") = 0)
 
         .def("refit", &PyBVHVerbose::refit,
-            R"((
+            R"doc(
             Refits the AABBs starting at `node`.
 
             Args:
                 node (int): Subtree root to refit (0 = entire tree).
                 skip_leaves (bool): If True, leaf bounds are assumed up to date and are not recomputed (default False).
-            ))",
+            )doc",
             nb::arg("node") = 0,
             nb::arg("skip_leaves") = false)
 
         .def("compact", &PyBVHVerbose::compact,
-            R"((
+            R"doc(
             Removes dead/degenerate nodes and pack arrays tightly.
 
             Useful after structural edits to ensure a compact representation.
-            ))")
+            )doc")
 
         .def("sort_indices", &PyBVHVerbose::sort_indices,
-            R"((
+            R"doc(
             Reorders primitive indices to improve spatial/streaming coherence.
 
             This can improve downstream cache behaviour.
-            ))")
+            )doc")
 
         .def("optimize", &PyBVHVerbose::optimize,
-            R"((
+            R"doc(
             Runs local BVH optimizations to reduce SAH cost.
 
             Args:
                 iterations (int): Number of improvement passes (default 25).
                 extreme (bool): Enables more aggressive (but slower) transformations. Default False.
                 stochastic (bool): Adds randomness to escape local minima. Default False.
-            ))",
+            )doc",
             nb::arg("iterations") = 25,
             nb::arg("extreme") = false,
             nb::arg("stochastic") = false)
 
         .def("to_bvh", &PyBVHVerbose::to_bvh,
-            R"((
+            R"doc(
             Converts this verbose BVH back to a compact `BVH`.
 
             Args:
@@ -3357,7 +3570,7 @@ NB_MODULE(_pytinybvh, m) {
 
             Returns:
                 A new compact BVH (deep copy).
-            ))",
+            )doc",
             nb::arg("compact") = true);
 
     nb::class_<PyBVH>(m, "BVH", "A Bounding Volume Hierarchy for fast ray intersections.")
@@ -3365,7 +3578,7 @@ NB_MODULE(_pytinybvh, m) {
         // Core Builders
 
         .def_static("from_vertices", &PyBVH::from_vertices,
-            R"((
+            R"doc(
             Builds a BVH from a flat array of vertices (N * 3, 4).
 
             This is a zero-copy operation. The BVH will hold a reference to the
@@ -3381,7 +3594,7 @@ NB_MODULE(_pytinybvh, m) {
 
             Returns:
                 BVH: A new BVH instance.
-            ))",
+            )doc",
             nb::rv_policy::move,
             nb::arg("vertices").noconvert(), nb::arg("quality") = BuildQuality::Balanced,
             nb::arg("traversal_cost") = C_TRAV, nb::arg("intersection_cost") = C_INT,
@@ -3390,7 +3603,7 @@ NB_MODULE(_pytinybvh, m) {
             )
 
         .def_static("from_indexed_mesh", &PyBVH::from_indexed_mesh,
-            R"((
+            R"doc(
             Builds a BVH from a vertex buffer and an index buffer.
 
             This is the most memory-efficient method for triangle meshes and allows for
@@ -3407,7 +3620,7 @@ NB_MODULE(_pytinybvh, m) {
 
             Returns:
                 BVH: A new BVH instance.
-            ))",
+            )doc",
             nb::rv_policy::move,
             nb::arg("vertices").noconvert(), nb::arg("indices").noconvert(),
             nb::arg("quality") = BuildQuality::Balanced,
@@ -3418,7 +3631,7 @@ NB_MODULE(_pytinybvh, m) {
             )
 
         .def_static("from_aabbs", &PyBVH::from_aabbs,
-            R"((
+            R"doc(
             Builds a BVH from an array of Axis-Aligned Bounding Boxes.
 
             This is a zero-copy operation. The BVH will hold a reference to the
@@ -3435,7 +3648,7 @@ NB_MODULE(_pytinybvh, m) {
 
             Returns:
                 BVH: A new BVH instance.
-            ))",
+            )doc",
             nb::rv_policy::move,
             nb::arg("aabbs").noconvert(), nb::arg("quality") = BuildQuality::Balanced,
             nb::arg("traversal_cost") = C_TRAV, nb::arg("intersection_cost") = C_INT,
@@ -3446,7 +3659,7 @@ NB_MODULE(_pytinybvh, m) {
         // Convenience builders (with copying)
 
         .def_static("from_triangles", &PyBVH::from_triangles,
-            R"((
+            R"doc(
             Builds a BVH from a standard triangle array. This is a convenience method that
             copies and reformats the data into the layout required by the BVH.
 
@@ -3459,7 +3672,7 @@ NB_MODULE(_pytinybvh, m) {
 
             Returns:
                 BVH: A new BVH instance.
-            ))",
+            )doc",
             nb::rv_policy::move,
             nb::arg("triangles"), nb::arg("quality") = BuildQuality::Balanced,
             nb::arg("traversal_cost") = C_TRAV, nb::arg("intersection_cost") = C_INT,
@@ -3468,7 +3681,7 @@ NB_MODULE(_pytinybvh, m) {
             )
 
         .def_static("from_points", &PyBVH::from_points,
-            R"((
+            R"doc(
             Builds a BVH from a point cloud. This is a convenience method that creates an
             axis-aligned bounding box for each point and builds the BVH from those.
 
@@ -3482,7 +3695,7 @@ NB_MODULE(_pytinybvh, m) {
 
             Returns:
                 BVH: A new BVH instance.
-            ))",
+            )doc",
             nb::rv_policy::move,
             nb::arg("points"), nb::arg("radius") = 1e-5f, nb::arg("quality") = BuildQuality::Balanced,
             nb::arg("traversal_cost") = C_TRAV, nb::arg("intersection_cost") = C_INT,
@@ -3493,23 +3706,23 @@ NB_MODULE(_pytinybvh, m) {
         // Cache policy management
 
         .def("set_cache_policy", &PyBVH::set_cache_policy,
-            R"((
+            R"doc(
             Sets caching policy for converted layouts.
 
             Args:
                 policy (CachePolicy): The new policy to use (ActiveOnly or All).
-            ))",
+            )doc",
            nb::arg("policy"))
 
         .def("clear_cached_layouts", &PyBVH::clear_cached_layouts,
-           R"((
+           R"doc(
             Frees the memory of all cached layouts, except for the active one and the base layout.
-            ))")
+            )doc")
 
         // Conversion, TLAS building
 
         .def("convert_to", &PyBVH::convert_to,
-            R"((
+            R"doc(
             Converts the BVH to a different internal memory layout, modifying it in-place.
 
             This allows optimizing the BVH for different traversal algorithms (SSE, AVX, etc.).
@@ -3520,13 +3733,13 @@ NB_MODULE(_pytinybvh, m) {
                 compact (bool): Whether to compact the BVH during conversion. Defaults to True.
                 strict (bool): If True, raises a RuntimeError if the target layout is not
                                supported for traversal on the current system. Defaults to False.
-            ))",
+            )doc",
            nb::arg("layout") = Layout::Standard,
            nb::arg("compact") = true,
            nb::arg("strict") = false)
 
         .def_static("build_tlas", &PyBVH::build_tlas,
-            R"((
+            R"doc(
             Builds a Top-Level Acceleration Structure (TLAS) from a list of BVH instances.
 
             Args:
@@ -3537,13 +3750,13 @@ NB_MODULE(_pytinybvh, m) {
 
             Returns:
                 BVH: A new BVH instance representing the TLAS.
-            ))",
+            )doc",
             nb::arg("instances"), nb::arg("BLASes"))
 
         // Intersection methods
 
         .def("intersect", &PyBVH::intersect,
-            R"((
+            R"doc(
             Performs an intersection query with a single ray.
 
             This method modifies the passed Ray object in-place if a closer hit is found.
@@ -3554,11 +3767,11 @@ NB_MODULE(_pytinybvh, m) {
 
             Returns:
                 float: The hit distance `t` if a hit was found, otherwise `infinity`.
-            ))",
+            )doc",
             nb::arg("ray"))
 
         .def("intersect_batch", &PyBVH::intersect_batch,
-            R"((
+            R"doc(
             Performs intersection queries for a batch of rays.
 
             This method is highly parallelized using multi-core processing for all geometry types
@@ -3596,7 +3809,7 @@ NB_MODULE(_pytinybvh, m) {
                     For misses, prim_id and inst_id are -1 and t is infinity.
                     For TLAS hits, inst_id is the instance index and prim_id is the primitive
                     index within that instance's BLAS.
-            ))",
+            )doc",
             nb::arg("origins").noconvert(), nb::arg("directions").noconvert(),
             nb::arg("t_max").noconvert() = nb::none(), nb::arg("masks").noconvert() = nb::none(),
             nb::arg("packet") = PacketMode::Auto,
@@ -3605,7 +3818,7 @@ NB_MODULE(_pytinybvh, m) {
             nb::arg("warn_on_incoherent") = true)
 
         .def("is_occluded", &PyBVH::is_occluded,
-            R"((
+            R"doc(
             Performs an occlusion query with a single ray.
 
             Checks if any geometry is hit by the ray within the distance specified by `ray.t`.
@@ -3616,11 +3829,11 @@ NB_MODULE(_pytinybvh, m) {
 
             Returns:
                 bool: True if the ray is occluded, False otherwise.
-           ))",
+           )doc",
            nb::arg("ray"))
 
         .def("is_occluded_batch", &PyBVH::is_occluded_batch,
-            R"((
+            R"doc(
             Performs occlusion queries for a batch of rays, parallelized for performance.
 
             .. warning::
@@ -3651,7 +3864,7 @@ NB_MODULE(_pytinybvh, m) {
 
             Returns:
                 numpy.ndarray: A boolean array of shape (N,) where `True` indicates occlusion.
-           ))",
+           )doc",
             nb::arg("origins").noconvert(), nb::arg("directions").noconvert(),
             nb::arg("t_max").noconvert() = nb::none(), nb::arg("masks").noconvert() = nb::none(),
             nb::arg("packet") = PacketMode::Auto,
@@ -3660,7 +3873,7 @@ NB_MODULE(_pytinybvh, m) {
             nb::arg("warn_on_incoherent") = true)
 
         .def("intersect_sphere", &PyBVH::intersect_sphere,
-            R"((
+            R"doc(
             Checks if any geometry intersects with a given sphere.
 
             This is useful for proximity queries or collision detection. It stops at the
@@ -3673,11 +3886,11 @@ NB_MODULE(_pytinybvh, m) {
 
             Returns:
                 bool: True if an intersection is found, False otherwise.
-            ))",
+            )doc",
             nb::arg("center"), nb::arg("radius"))
 
         .def("closest_point", &PyBVH::closest_point,
-            R"((
+            R"doc(
             Finds the closest point on the BVH geometry to a given query point.
 
             This method performs a proximity search, useful for collision detection
@@ -3693,7 +3906,7 @@ NB_MODULE(_pytinybvh, m) {
                     - 'inst_id' (int): The ID of the instance (-1 for BLAS).
                     - 'distance' (float): The Euclidean distance to the closest point.
                 Returns None if the BVH is empty.
-            ))",
+            )doc",
             nb::arg("point"))
 
         // Accessors for the BVH data
@@ -3743,7 +3956,7 @@ NB_MODULE(_pytinybvh, m) {
             }, "The radius for sphere geometry, or None.")
 
         .def_prop_ro("instances", &PyBVH::instances,
-            R"((
+            R"doc(
             A writable 1D structured numpy view of the TLAS instances (zero-copy). Only meaningful on a TLAS.
 
             Notes:
@@ -3752,10 +3965,10 @@ NB_MODULE(_pytinybvh, m) {
                   BLAS captured at TLAS build time. After changing it, call `update_instances`
                   with `recompute_aabbs=True` (or call it once for all changed instances)
                   before `refit_tlas()`, so AABBs are re-derived from the new BLAS.
-            ))")
+            )doc")
 
         .def("add_instance", &PyBVH::add_instance,
-            R"((
+            R"doc(
             Adds a new instance to the TLAS. Only useable on a TLAS.
 
             This method stages the addition. You must call `refit_tlas()` afterwards to
@@ -3766,11 +3979,11 @@ NB_MODULE(_pytinybvh, m) {
                                            object-to-world transformation.
                 blas (BVH): The Bottom-Level Acceleration Structure (a standard BVH) to instance.
                 mask (int, optional): A 32-bit integer visibility mask. Defaults to 0xFFFFFFFF.
-            ))",
+            )doc",
             nb::arg("transform"), nb::arg("blas"), nb::arg("mask") = 0xFFFFFFFF)
 
         .def("remove_instance", &PyBVH::remove_instance,
-            R"((
+            R"doc(
             Removes an instance from the TLAS by its index. Only useable on a TLAS.
 
             This method stages the removal. You must call `refit_tlas()` afterwards to
@@ -3783,11 +3996,11 @@ NB_MODULE(_pytinybvh, m) {
 
             Args:
                 instance_id (int): The index of the instance to remove.
-            ))",
+            )doc",
             nb::arg("instance_id"))
 
         .def("update_instances", &PyBVH::update_instances,
-            R"((
+            R"doc(
             Bulk-updates TLAS instances from a structured array (zero extra copies in Python). Only useable on a TLAS.
 
             Args:
@@ -3801,11 +4014,11 @@ NB_MODULE(_pytinybvh, m) {
             Notes:
                 - After updates, call `refit_tlas()` to rebuild the TLAS over the updated AABBs.
                 - The array length must match the existing TLAS instance count.
-            ))",
+            )doc",
             nb::arg("instances"), nb::arg("recompute_aabbs") = true)
 
         .def("compact_blases", &PyBVH::compact_blases,
-            R"((
+            R"doc(
             Removes any unused (orphaned) BLASes from the TLAS's internal lists.
 
             This is a potentially slow operation as it requires re-indexing all existing
@@ -3814,26 +4027,95 @@ NB_MODULE(_pytinybvh, m) {
 
             After calling this, you must still call `refit_tlas()` to rebuild the
             acceleration structure.
-            ))")
+            )doc")
 
         .def("get_buffers", &PyBVH::get_buffers,
-            R"((
-            Returns a dictionary of raw, zero-copy numpy arrays for all current BVH's internal data and geometry.
+            R"doc(
+            Returns a dict of zero-copy numpy views over the active BVH and its source geometry.
 
-            This provides low-level access to all the underlying C++ buffers. The returned arrays
-            are views into the BVH's memory.
-            The structure of the returned dictionary and the shape/content of the arrays depend on the active layout.
+            Common keys:
+                - nodes          : The node buffer for the active layout. 2D float32 for structured
+                                   layouts (Standard: (N, 8), BVH_GPU/SoA: (N,16), MBVH4/8: (N,K)).
+                                   For blocked layouts where nodes are exported as flat blocks, 'nodes'
+                                   is a 1D float32 alias to 'packed_data'.
+                - prim_indices   : Reordered leaf mapping stored by tinybvh (uint32). For BLAS this maps
+                                   leaf → primitive id; for TLAS this maps leaf → instance id.
+                - leaf_ids       : Alias of 'prim_indices' (stable name to target in shaders).
+                - primitives     : Geometry-agnostic alias to the primitive stream:
+                                      - Triangles : 'indices' if present, otherwise 'vertices'
+                                      - AABBs     : 'aabbs'
+                                      - Spheres   : 'points'
+                - primitive_kind : One of {"Triangles", "AABBs", "Spheres"}.
 
-            This is primarily useful for advanced use cases (sending BVH data to a SSBO, etc.).
+            Geometry keys:
+                Triangles:
+                - vertices      : (V, 3) float32, Vertex positions (zero-copy reference to source array)
+                - indices       : (T, 3) uint32, Triangle indices (optional for non-indexed meshes)
+
+                AABBs:
+                - aabbs         : (N, 2, 3) float32, Boxes extents (min, max)
+                - inv_extents   : (N, 3) float32 (optional), Inverse of boxes extents
+
+                Spheres:
+                - points        : (N, 3) float32, Sphere centers
+                - sphere_radius : float scalar, Radius (broadcast)
+
+                TLAS:
+                - instances     : Structured array of instances (zero-copy view), only present for TLAS.
+
+            Layout-specific keys:
+                - packed_data : 1D float32, View of blocked node memory for BVH4/8 CPU/GPU layouts.
+                                BVH4/8 CPU: 64B blocks → 16 floats per block
+                                BVH4_GPU/CWBVH: 16B blocks → 4 floats per block
+                - triangles   : For CWBVH only. The embedded triangle stream used by the layout.
+                                12 or 16 floats per triangle, depending on build flags
+
+            Notes:
+                - All arrays are views into internal memory, no copies are made.
+                - The exact shapes of 'nodes' depend on the layout exporter (see above).
+                - For blocked layouts, 'nodes' is an alias to 'packed_data'.
 
             Returns:
-                Dict[str, numpy.ndarray]: A dictionary mapping buffer names (e.g., 'nodes',
-                                        'prim_indices', 'packed_data', 'vertices', etc.) to
-                                        their corresponding raw data arrays.
-            ))")
+                Dict[str, numpy.ndarray]: A dictionary mapping buffer names to their corresponding raw data arrays.
+            )doc")
+
+        .def("get_SSBO_bundle", &PyBVH::uniform_bundle,
+            R"doc(
+            Returns a consistent (layout-agnostic) dict for SSBO uploads and GLSL setup:
+
+            Keys:
+                - node_buffer        : Raw bytes view of the active layout's node memory (for SSBO)
+                - node_key           : Source key used for nodes ("nodes" or "packed_data")
+                - node_count         : Number of structured nodes (2D layouts), else 0
+                - block_count        : Number of node blocks (blocked layouts), else 0
+                - node_stride_bytes  : Bytes per structured node row (when nodes are 2D)
+                - block_stride_bytes : Bytes per node block for blocked layouts (e.g., 16 or 64) when applicable
+                - leaf_ids           : Reordered leaf mapping (leaf → prim id for BLAS, leaf → instance id for TLAS)
+                - primitives         : Geometry-agnostic primitive stream:
+                                        Triangles → 'indices' if present, else 'vertices'
+                                        AABBs → 'aabbs'
+                                        Spheres → 'points'
+                - index_buffer       : Triangle index buffer (if the source mesh is indexed)
+                - vertices           : Triangle vertex positions
+                - aabbs              : AABB boxes (min,max)
+                - points             : Sphere centers
+                - sphere_radius      : Sphere radius (scalar)
+                - primitive_kind     : "Triangles", "AABBs" or "Spheres"
+                - embedded_triangles : CWBVH-only triangle stream (if present)
+                - instances          : TLAS instance array (only for TLAS)
+                - layout             : String version of the Layout
+                - geometry_type      : String version of the geometry type
+                - is_tlas            : Whether the BVH is a TLAS or not
+                - defines            : Dict of "TBVH_*" macros for GLSL
+                - preamble           : String of "#define TBVH_* ..." lines to prepend to shaders
+
+            Returns:
+                Dict[str, numpy.ndarray]: A dictionary containing everything needed for SSBO upload
+            )doc",
+            nb::arg("flat_nodes") = true)
 
         .def_prop_ro("memory_usage", &PyBVH::memory_usage,
-            R"((
+            R"doc(
             Reports a detailed breakdown of the memory usage for the BVH.
 
             The returned dictionary contains the following keys:
@@ -3853,12 +4135,12 @@ NB_MODULE(_pytinybvh, m) {
 
             Returns:
                 Dict[str, Any]: A dictionary detailing the memory usage in bytes.
-            ))")
+            )doc")
 
         // Load / save
 
         .def_static("load", &PyBVH::load,
-            R"((
+            R"doc(
             Loads a BVH from a file, re-linking it to the provided geometry.
 
             The geometry must be provided in the same layout as when the BVH was originally
@@ -3873,22 +4155,22 @@ NB_MODULE(_pytinybvh, m) {
 
             Returns:
                 BVH: A new BVH instance.
-            ))",
+            )doc",
             nb::arg("filepath"), nb::arg("vertices"), nb::arg("indices") = nb::none())
 
         .def("save", &PyBVH::save,
-            R"((
+            R"doc(
             Saves the BVH to a file.
 
             Args:
                 filepath (str or pathlib.Path): The path where the BVH file will be saved.
-            ))",
+            )doc",
             nb::arg("filepath"))
 
         // Advanced manipulation methods
 
         .def("refit", &PyBVH::refit,
-            R"((
+            R"doc(
             Refits the BVH to the current state of the source geometry, which is much
             faster than a full rebuild.
 
@@ -3896,10 +4178,10 @@ NB_MODULE(_pytinybvh, m) {
             has been modified.
 
             Note: This will fail if the BVH was built with spatial splits (high-quality preset).
-            ))")
+            )doc")
 
         .def("optimize", &PyBVH::optimize,
-            R"((
+            R"doc(
             Optimizes the BVH tree structure to improve query performance.
 
             This is a costly operation best suited for static scenes. It works by
@@ -3911,20 +4193,20 @@ NB_MODULE(_pytinybvh, m) {
                                 for optimization in each pass. Defaults to False.
                 stochastic (bool): If true, uses a randomized approach to select
                                    nodes for re-insertion. Defaults to False.
-            ))",
+            )doc",
             nb::arg("iterations") = 25, nb::arg("extreme") = false, nb::arg("stochastic") = false)
 
         .def("compact", &PyBVH::compact,
-            R"((
+            R"doc(
             Removes unused nodes from the BVH structure, reducing memory usage.
 
             This is useful after building with high quality (which may create
             spatial splits and more primitives) or after optimization, as these
             processes can leave gaps in the node array.
-            ))")
+            )doc")
 
         .def("split_leaves", &PyBVH::split_leaves,
-            R"((
+            R"doc(
             Recursively splits leaf nodes until they contain at most `max_prims` primitives.
             This modifies the BVH in-place. Typically used to prepare a BVH for optimization
             by breaking it down into single-primitive leaves.
@@ -3934,11 +4216,11 @@ NB_MODULE(_pytinybvh, m) {
             Args:
                 max_prims (int): The maximum number of primitives a leaf node can contain.
                                  Defaults to 1.
-            ))",
+            )doc",
             nb::arg("max_prims") = 1)
 
         .def("combine_leaves", &PyBVH::combine_leaves,
-            R"((
+            R"doc(
             Merges adjacent leaf nodes if doing so improves the SAH cost.
             This modifies the BVH in-place. Typically used as a post-process after
             optimization to create more efficient leaves.
@@ -3947,10 +4229,10 @@ NB_MODULE(_pytinybvh, m) {
 
             It is highly recommended to call `compact()` after using this method to clean up
             the BVH structure.
-            ))")
+            )doc")
 
         .def("set_opacity_maps", &PyBVH::set_opacity_maps,
-            R"((
+            R"doc(
             Sets the opacity micro-maps for alpha testing during intersection.
 
             The BVH must be built before calling this. The intersection queries will
@@ -3961,21 +4243,21 @@ NB_MODULE(_pytinybvh, m) {
                                           bitmasks for all triangles. The size must be
                                           (tri_count * N * N + 31) // 32
                 N (int): The resolution of the micro-map per triangle (e.g., 8 for an 8x8 grid).
-            ))",
+            )doc",
             nb::arg("map_data"), nb::arg("N"))
 
         // Read-only properties
 
         .def_prop_ro("traversal_cost",
             [](const PyBVH &self) -> float {
-                if (!self.active_bvh_) throw std::runtime_error("BVH is not initialized.");
+                if (!self.active_bvh_) throw std::runtime_error("This BVH is not initialized.");
                 return self.active_bvh_->c_trav;
             },
             "The traversal cost used in the Surface Area Heuristic (SAH) calculation during the build.")
 
         .def_prop_ro("intersection_cost",
             [](const PyBVH &self) -> float {
-                if (!self.active_bvh_) throw std::runtime_error("BVH is not initialized.");
+                if (!self.active_bvh_) throw std::runtime_error("This BVH is not initialized.");
                 return self.active_bvh_->c_int;
             },
             "The intersection cost used in the Surface Area Heuristic (SAH) calculation during the build.")
@@ -4042,7 +4324,7 @@ NB_MODULE(_pytinybvh, m) {
             return dispatch_bvh_call(self.active_bvh_, [](auto& bvh) {
                 return bvh.SAHCost(0);
             });
-            }, R"((Calculates the Surface Area Heuristic (SAH) cost of the BVH.))")
+            }, R"doc(Calculates the Surface Area Heuristic (SAH) cost of the BVH.)doc")
 
         .def_prop_ro("epo_cost", [](const PyBVH &self) -> float {
             if (!self.active_bvh_ || self.active_bvh_->triCount == 0) {
@@ -4060,21 +4342,21 @@ NB_MODULE(_pytinybvh, m) {
             }, "Calculates the Expected Projected Overlap (EPO) cost of the BVH (only for standard layout).")
 
         .def("set_traversal_cost", &PyBVH::set_traversal_cost,
-            R"((
+            R"doc(
             Sets the SAH traversal cost used by metrics/optimizers.
 
             This does not rebuild the BVH. It simply updates the cost used by SAH reporting
             and any subsequent optimization passes that consult it.
-            ))",
+            )doc",
             nb::arg("cost"))
 
         .def("set_intersection_cost", &PyBVH::set_intersection_cost,
-            R"(
+            R"doc(
             Sets the SAH intersection cost used by metrics/optimizers.
 
             This does not rebuild the BVH. It simply updates the cost used by SAH reporting
             and any subsequent optimization passes that consult it.
-            ))",
+            )doc",
             nb::arg("cost"))
 
         .def_prop_ro("layout", [](const PyBVH &self) -> Layout {
@@ -4120,7 +4402,7 @@ NB_MODULE(_pytinybvh, m) {
         }, "Total number of instances in this TLAS. Only meaningful if TLAS.")
 
         .def("set_instance_transform", &PyBVH::set_instance_transform,
-            R"((
+            R"doc(
             Update the transform of one TLAS instance and recompute its world-space AABB.
 
             Args:
@@ -4130,28 +4412,28 @@ NB_MODULE(_pytinybvh, m) {
 
             Notes: - This does not rebuild the TLAS. You must call `refit_tlas()` after a batch of updates.
                    - Raises `IndexError` if `i` is out of range, `ValueError` if called on a BLAS.
-            ))",
+            )doc",
             nb::arg("i"), nb::arg("m4x4"))
 
         .def("set_instance_mask", &PyBVH::set_instance_mask,
-            R"((
+            R"doc(
             Set the 32-bit visibility mask for an instance.
 
             Args:
                 i (int): Instance index (0-based).
                 mask (int): Bitmask to AND with ray masks during traversal.
-            ))",
+            )doc",
             nb::arg("i"), nb::arg("mask"))
 
         .def("refit_tlas", &PyBVH::refit_tlas,
-            R"((
+            R"doc(
             Refit / rebuild the TLAS using the current per-instance AABBs.
 
             Call this after one or more `set_instance_transform` / `set_instance_mask`
             updates. Faster than rebuilding BLASes. Does not change instance order.
 
             Raises ValueError if called on a BLAS (non-TLAS) BVH.
-            ))")
+            )doc")
 
         .def_prop_ro("has_opacity_maps", &PyBVH::has_opacity_maps,
             "Returns True is opacity micromaps are attached to this BVH.")
@@ -4160,12 +4442,12 @@ NB_MODULE(_pytinybvh, m) {
             "Opacity micromap subdivision level `N` (0 if none).")
 
         .def("clear_opacity_maps", &PyBVH::clear_opacity_maps,
-            R"((
+            R"doc(
             Detach opacity micromaps from this BVH.
 
             After calling this, ray tests ignore per-triangle alpha coverage.
             Safe to call when no micromaps are present (no-op).
-            ))")
+            )doc")
 
         .def("__repr__", &PyBVH::get_repr)
 

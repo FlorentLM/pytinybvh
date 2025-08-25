@@ -890,18 +890,87 @@ class BVH:
 
     def get_buffers(self) -> Dict[str, np.ndarray]:
         """
-        Returns a dictionary of raw, zero-copy numpy arrays for all current BVH's internal data and geometry.
+        Returns a dict of zero-copy numpy views over the active BVH and its source geometry.
 
-        This provides low-level access to all the underlying C++ buffers. The returned arrays
-        are views into the BVH's memory.
-        The structure of the returned dictionary and the shape/content of the arrays depend on the active layout.
+            Common keys:
+                - nodes          : The node buffer for the active layout. 2D float32 for structured
+                                   layouts (Standard: (N, 8), BVH_GPU/SoA: (N,16), MBVH4/8: (N,K)).
+                                   For blocked layouts where nodes are exported as flat blocks, 'nodes'
+                                   is a 1D float32 alias to 'packed_data'.
+                - prim_indices   : Reordered leaf mapping stored by tinybvh (uint32). For BLAS this maps
+                                   leaf → primitive id; for TLAS this maps leaf → instance id.
+                - leaf_ids       : Alias of 'prim_indices' (stable name to target in shaders).
+                - primitives     : Geometry-agnostic alias to the primitive stream:
+                                      - Triangles : 'indices' if present, otherwise 'vertices'
+                                      - AABBs     : 'aabbs'
+                                      - Spheres   : 'points'
+                - primitive_kind : One of {"Triangles", "AABBs", "Spheres"}.
 
-        This is primarily useful for advanced use cases (sending BVH data to a SSBO, etc.).
+            Geometry keys:
+                Triangles:
+                - vertices      : (V, 3) float32, Vertex positions (zero-copy reference to source array)
+                - indices       : (T, 3) uint32, Triangle indices (optional for non-indexed meshes)
+
+                AABBs:
+                - aabbs         : (N, 2, 3) float32, Boxes extents (min, max)
+                - inv_extents   : (N, 3) float32 (optional), Inverse of boxes extents
+
+                Spheres:
+                - points        : (N, 3) float32, Sphere centers
+                - sphere_radius : float scalar, Radius (broadcast)
+
+                TLAS:
+                - instances     : Structured array of instances (zero-copy view), only present for TLAS.
+
+            Layout-specific keys:
+                - packed_data : 1D float32, View of blocked node memory for BVH4/8 CPU/GPU layouts.
+                                BVH4/8 CPU: 64B blocks → 16 floats per block
+                                BVH4_GPU/CWBVH: 16B blocks → 4 floats per block
+                - triangles   : For CWBVH only. The embedded triangle stream used by the layout.
+                                12 or 16 floats per triangle, depending on build flags
+
+            Notes:
+                - All arrays are views into internal memory, no copies are made.
+                - The exact shapes of 'nodes' depend on the layout exporter (see above).
+                - For blocked layouts, 'nodes' is an alias to 'packed_data'.
 
         Returns:
-            Dict[str, numpy.ndarray]: A dictionary mapping buffer names (e.g., 'nodes',
-                                    'prim_indices', 'packed_data', 'vertices', etc.) to
-                                    their corresponding raw data arrays.
+            Dict[str, numpy.ndarray]: A dictionary mapping buffer names to their corresponding raw data arrays.
+        """
+        ...
+
+    def get_SSBO_bundle(self) -> Dict[str, np.ndarray]:
+        """
+        Returns a consistent (layout-agnostic) dict for SSBO uploads and GLSL setup:
+
+        Keys:
+            - node_buffer        : Raw bytes view of the active layout's node memory (for SSBO)
+            - node_key           : Source key used for nodes ("nodes" or "packed_data")
+            - node_count         : Number of structured nodes (2D layouts), else 0
+            - block_count        : Number of node blocks (blocked layouts), else 0
+            - node_stride_bytes  : Bytes per structured node row (when nodes are 2D)
+            - block_stride_bytes : Bytes per node block for blocked layouts (e.g., 16 or 64) when applicable
+            - leaf_ids           : Reordered leaf mapping (leaf → prim id for BLAS, leaf → instance id for TLAS)
+            - primitives         : Geometry-agnostic primitive stream:
+                                    Triangles → 'indices' if present, else 'vertices'
+                                    AABBs → 'aabbs'
+                                    Spheres → 'points'
+            - index_buffer       : Triangle index buffer (if the source mesh is indexed)
+            - vertices           : Triangle vertex positions
+            - aabbs              : AABB boxes (min,max)
+            - points             : Sphere centers
+            - sphere_radius      : Sphere radius (scalar)
+            - primitive_kind     : "Triangles", "AABBs" or "Spheres"
+            - embedded_triangles : CWBVH-only triangle stream (if present)
+            - instances          : TLAS instance array (only for TLAS)
+            - layout             : String version of the Layout
+            - geometry_type      : String version of the geometry type
+            - is_tlas            : Whether the BVH is a TLAS or not
+            - defines            : Dict of "TBVH_*" macros for GLSL
+            - preamble           : String of "#define TBVH_* ..." lines to prepend to shaders
+
+        Returns:
+            Dict[str, numpy.ndarray]: A dictionary containing everything needed for SSBO upload
         """
         ...
 

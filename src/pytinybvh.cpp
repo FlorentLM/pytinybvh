@@ -20,6 +20,9 @@
 #include <string>
 #include <cmath>
 #include <cfloat>
+#include <unordered_map>
+#include <vector>
+#include <tuple>
 
 #include "capabilities.h"
 
@@ -244,7 +247,8 @@ struct CustomGeometryContext {
 
     // For Spheres
     const float* points_ptr = nullptr;
-    float sphere_radius = 0.0f;
+    const float* radii_ptr  = nullptr;   // optional per-primitive radiusf
+    float radius = 0.0f;
 };
 
 // Custom dtypes
@@ -569,7 +573,8 @@ bool sphere_intersect_callback(tinybvh::Ray& ray, const unsigned int prim_id) {
 
     const size_t offset = prim_id * 3;
     const tinybvh::bvhvec3 center = {context->points_ptr[offset], context->points_ptr[offset + 1], context->points_ptr[offset + 2]};
-    const float radius_sq = context->sphere_radius * context->sphere_radius;
+    const float r = context->radii_ptr ? context->radii_ptr[prim_id] : context->radius;
+    const float radius_sq = r * r;
 
     if (auto t = intersect_sphere_primitive(ray, center, radius_sq)) {
         ray.hit.t = *t;
@@ -592,7 +597,8 @@ bool sphere_isoccluded_callback(const tinybvh::Ray& ray, const unsigned int prim
 
     const size_t offset = prim_id * 3;
     const tinybvh::bvhvec3 center = {context->points_ptr[offset], context->points_ptr[offset + 1], context->points_ptr[offset + 2]};
-    const float radius_sq = context->sphere_radius * context->sphere_radius;
+    const float r = context->radii_ptr ? context->radii_ptr[prim_id] : context->radius;
+    const float radius_sq = r * r;
 
     return intersect_sphere_primitive(ray, center, radius_sq).has_value();
 }
@@ -811,7 +817,7 @@ struct PyBVH {
     BuildQuality quality = BuildQuality::Balanced;
     enum class CustomType { None, AABB, Sphere };
     CustomType custom_type = CustomType::None;
-    float sphere_radius = 0.0f;
+    float radius = 0.0f;
 
     // Constructor
     PyBVH() = default;
@@ -1263,7 +1269,7 @@ public:
         return wrapper;
     }
 
-    static std::unique_ptr<PyBVH> from_points(
+    static std::unique_ptr<PyBVH> from_points_scalar(
         const nb::ndarray<const float, nb::c_contig>& points_np,
         const float radius,
         BuildQuality quality,
@@ -1294,7 +1300,7 @@ public:
         wrapper->quality = quality;
         wrapper->source_geometry_refs.append(points_np); // Store original points
         wrapper->custom_type = CustomType::Sphere;
-        wrapper->sphere_radius = radius;
+        wrapper->radius = radius;
 
         bvh->customIntersect = sphere_intersect_callback;
         bvh->customIsOccluded = sphere_isoccluded_callback;
@@ -1341,6 +1347,73 @@ public:
         return wrapper;
     }
 
+    static std::unique_ptr<PyBVH> from_points(const nb::ndarray<const float, nb::c_contig>& points_np,
+       const nb::object& radius_or_radii,
+       const BuildQuality quality,
+       const float traversal_cost,
+       const float intersection_cost,
+       const int hq_bins = HQBVHBINS) {
+
+        // Fast path: scalar
+        if (nb::isinstance<nb::float_>(radius_or_radii) ||
+            nb::isinstance<nb::int_>(radius_or_radii) ||
+            radius_or_radii.is_none()) {
+            const float r = radius_or_radii.is_none()
+                ? 1e-5f : nb::cast<float>(radius_or_radii);
+            return from_points_scalar(points_np, r, quality, traversal_cost, intersection_cost, hq_bins);
+        }
+
+        // Array path: per-point radii
+        auto radii_np = nb::cast<nb::ndarray<const float, nb::c_contig>>(radius_or_radii);
+        if (radii_np.ndim() != 1 || radii_np.shape(0) != points_np.shape(0))
+            throw std::runtime_error("radius must be a scalar or a (N,) float32 array.");
+
+        // Build a BVH exactly like the scalar path but expand each AABB by r_i
+        auto wrapper = std::make_unique<PyBVH>();
+        auto bvh = std::make_unique<tinybvh::BVH>();
+
+        wrapper->quality = quality;
+        wrapper->custom_type = PyBVH::CustomType::Sphere;
+        wrapper->radius = 0.0f; // unused when per-prim radii present
+
+        wrapper->source_geometry_refs.append(points_np); // keep alive
+        wrapper->source_geometry_refs.append(radii_np);  // keep alive
+
+        bvh->customIntersect  = sphere_intersect_callback;
+        bvh->customIsOccluded = sphere_isoccluded_callback;
+        bvh->c_trav = traversal_cost;
+        bvh->c_int  = intersection_cost;
+
+        const size_t N = points_np.shape(0);
+        if (N == 0) {
+            finalize_build(wrapper, std::move(bvh)); return wrapper;
+        }
+
+        const float* P = points_np.data();
+        const float* R = radii_np.data();
+
+        auto* aabbs_buf = new float[N * 6];
+        nb::capsule aabbs_owner(aabbs_buf, [](void* p) noexcept { delete[] static_cast<float*>(p); });
+        nb::ndarray<float, nb::numpy, nb::c_contig> aabbs_np(aabbs_buf, { N, (size_t)2, (size_t)3 }, aabbs_owner);
+
+        for (size_t i = 0; i < N; ++i) {
+            const size_t p = i * 3, a = i * 6;
+            const float r = std::max(R[i], 0.0f);
+            aabbs_buf[a+0] = P[p+0] - r; aabbs_buf[a+1] = P[p+1] - r; aabbs_buf[a+2] = P[p+2] - r;
+            aabbs_buf[a+3] = P[p+0] + r; aabbs_buf[a+4] = P[p+1] + r; aabbs_buf[a+5] = P[p+2] + r;
+        }
+
+        AABBptrGuard guard(aabbs_buf);
+        bvh->context = default_ctx();
+        {
+            nb::gil_scoped_release release;
+            bvh->Build(aabb_build_callback, static_cast<uint32_t>(N));
+        }
+
+        finalize_build(wrapper, std::move(bvh));
+        return wrapper;
+    }
+
     // Interseciton methods
 
     float intersect(PyRay &py_ray) const {
@@ -1372,7 +1445,10 @@ public:
             ray.hit.auxData = &context;
         } else if (custom_type == CustomType::Sphere) {
             context.points_ptr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]).data();
-            context.sphere_radius = sphere_radius;
+            context.radius = radius;
+            if (nb::len(source_geometry_refs) > 1) {
+                context.radii_ptr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[1]).data();
+            }
             ray.hit.auxData = &context;
         }
 
@@ -1489,7 +1565,11 @@ public:
             auto points_arr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]);
 
             context.points_ptr = points_arr.data();
-            context.sphere_radius = sphere_radius;
+            context.radius = radius;
+            if (nb::len(source_geometry_refs) > 1) {
+                auto radii_arr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[1]);
+                context.radii_ptr = radii_arr.data();
+            }
         }
 
         // Early out: empty BVH
@@ -1689,7 +1769,10 @@ public:
             ray.hit.auxData = &context;
         } else if (custom_type == CustomType::Sphere) {
             context.points_ptr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]).data();
-            context.sphere_radius = sphere_radius;
+            context.radius = radius;
+            if (nb::len(source_geometry_refs) > 1) {
+                context.radii_ptr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[1]).data();
+            }
             ray.hit.auxData = &context;
         }
 
@@ -1781,7 +1864,11 @@ public:
             auto points_arr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]);
 
             context.points_ptr = points_arr.data();
-            context.sphere_radius = sphere_radius;
+            context.radius = radius;
+            if (nb::len(source_geometry_refs) > 1) {
+                auto radii_arr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[1]);
+                context.radii_ptr = radii_arr.data();
+            }
         }
 
         // Early out: empty BVH
@@ -2013,12 +2100,16 @@ public:
                         }
                         case CustomType::Sphere: {
                             const float* points_ptr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]).data();
+                            const float* radii_ptr  = (nb::len(source_geometry_refs) > 1)
+                                ? nb::cast<nb::ndarray<const float>>(source_geometry_refs[1]).data()
+                                : nullptr;
                             const size_t offset = prim_id * 3;
                             const tinybvh::bvhvec3 center = {points_ptr[offset], points_ptr[offset+1], points_ptr[offset+2]};
                             tinybvh::bvhvec3 dir = point - center;
                             float d_sq = tinybvh_dot(dir, dir);
                             if (d_sq > 1e-12f) {
-                                dir = dir * (sphere_radius / std::sqrt(d_sq));
+                                float r = radii_ptr ? radii_ptr[prim_id] : radius;
+                                dir = dir * (r / std::sqrt(d_sq));
                             }
                             current_closest = center + dir;
                             break;
@@ -2858,7 +2949,10 @@ public:
                     buffers["points"]     = source_geometry_refs[0];
                     buffers["primitives"] = buffers["points"];  // alias
                 }
-                buffers["sphere_radius"]  = nb::cast(sphere_radius);
+                if (nb::len(source_geometry_refs) > 1) {
+                    buffers["radii"] = source_geometry_refs[1];
+                }
+                buffers["radius"]  = nb::cast(radius); // broadcast (may be unused if 'radii' present)
                 buffers["primitive_kind"] = "Spheres";
                 break;
             }
@@ -2911,7 +3005,8 @@ public:
         if (src.contains("indices"))        out["index_buffer"]   = src["indices"];
         if (src.contains("aabbs"))          out["aabbs"]          = src["aabbs"];
         if (src.contains("points"))         out["points"]         = src["points"];
-        if (src.contains("sphere_radius"))  out["sphere_radius"]  = src["sphere_radius"];
+        if (src.contains("radii"))          out["radii"]          = src["radii"];
+        if (src.contains("radius"))         out["radius"]         = src["radius"];
         if (src.contains("primitive_kind")) out["primitive_kind"] = src["primitive_kind"];
 
         // Embedded triangles stream (CWBVH)
@@ -3687,7 +3782,7 @@ NB_MODULE(_pytinybvh, m) {
 
             Args:
                 points (numpy.ndarray): A float32 array of shape (N, 3) representing N points.
-                radius (float): The radius used to create an AABB for each point.
+                radius (float or numpy.ndarray): Either a scalar (broadcast) or a per-point array.
                 quality (BuildQuality): The desired quality of the BVH.
                 traversal_cost (float, optional): The traversal cost for the SAH builder. Defaults to 1.
                 intersection_cost (float, optional): The intersection cost for the SAH builder. Defaults to 1.
@@ -3948,12 +4043,21 @@ NB_MODULE(_pytinybvh, m) {
             return nb::none();
             }, "The source point buffer for sphere geometry as a numpy array, or None.")
 
-        .def_prop_ro("sphere_radius", [](const PyBVH& self) -> nb::object {
+        .def_prop_ro("radius", [](const PyBVH& self) -> nb::object {
             if (self.custom_type == PyBVH::CustomType::Sphere) {
-                return nb::cast(self.sphere_radius);
+                return nb::cast(self.radius);
             }
             return nb::none();
             }, "The radius for sphere geometry, or None.")
+
+        .def_prop_ro("radii", [](const PyBVH& self) -> nb::object {
+            if (self.custom_type == PyBVH::CustomType::Sphere) {
+                if (nb::len(self.source_geometry_refs) > 1) {
+                    return nb::cast(self.source_geometry_refs[1]);
+                }
+            }
+            return nb::none();
+            }, "The per-sphere radii for sphere geometry, or None.")
 
         .def_prop_ro("instances", &PyBVH::instances,
             R"doc(
@@ -4057,8 +4161,9 @@ NB_MODULE(_pytinybvh, m) {
                 - inv_extents   : (N, 3) float32 (optional), Inverse of boxes extents
 
                 Spheres:
-                - points        : (N, 3) float32, Sphere centers
-                - sphere_radius : float scalar, Radius (broadcast)
+                - points        : (N, 3) float32, Spheres centers
+                - radii         : (N,) float32, Per-sphere radii
+                - radius        : float scalar, Spheres radius (broadcast)
 
                 TLAS:
                 - instances     : Structured array of instances (zero-copy view), only present for TLAS.
@@ -4097,9 +4202,10 @@ NB_MODULE(_pytinybvh, m) {
                                         Spheres → 'points'
                 - index_buffer       : Triangle index buffer (if the source mesh is indexed)
                 - vertices           : Triangle vertex positions
-                - aabbs              : AABB boxes (min,max)
-                - points             : Sphere centers
-                - sphere_radius      : Sphere radius (scalar)
+                - aabbs              : AABB boxes (min, max)
+                - points             : Spheres centers
+                - radii              : Per-sphere radii
+                - radius             : Spheres radius (scalar)
                 - primitive_kind     : "Triangles", "AABBs" or "Spheres"
                 - embedded_triangles : CWBVH-only triangle stream (if present)
                 - instances          : TLAS instance array (only for TLAS)

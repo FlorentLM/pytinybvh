@@ -362,14 +362,14 @@ class BVH:
         ...
 
     @staticmethod
-    def from_points(points: np.ndarray, radius: float = 1e-05, quality: BuildQuality = ..., traversal_cost: float = ..., intersection_cost: float = ..., hq_bins : int = ...) -> BVH:
+    def from_points(points: np.ndarray, radius: Union[np.ndarray, float] = 1e-05, quality: BuildQuality = ..., traversal_cost: float = ..., intersection_cost: float = ..., hq_bins : int = ...) -> BVH:
         """
         Builds a BVH from a point cloud. This is a convenience method that creates an
         axis-aligned bounding box for each point and builds the BVH from those.
 
         Args:
             points (numpy.ndarray): A float32 array of shape (N, 3) representing N points.
-            radius (float): The radius used to create an AABB for each point.
+            radius (float or numpy.ndarray): Either a scalar (broadcast) or a per-point array.
             quality (BuildQuality): The desired quality of the BVH.
             traversal_cost (float, optional): The traversal cost for the SAH builder. Defaults to 1.
             intersection_cost (float, optional): The intersection cost for the SAH builder. Defaults to 1.
@@ -884,8 +884,13 @@ class BVH:
         ...
 
     @property
-    def sphere_radius(self) -> Optional[float]:
+    def radius(self) -> Optional[float]:
         """The radius for sphere geometry, or None."""
+        ...
+
+    @property
+    def radii(self) -> Optional[np.ndarray]:
+        """The per-sphere radii for sphere geometry, or None."""
         ...
 
     def get_buffers(self) -> Dict[str, np.ndarray]:
@@ -916,8 +921,9 @@ class BVH:
                 - inv_extents   : (N, 3) float32 (optional), Inverse of boxes extents
 
                 Spheres:
-                - points        : (N, 3) float32, Sphere centers
-                - sphere_radius : float scalar, Radius (broadcast)
+                - points        : (N, 3) float32, Spheres centers
+                - radii         : (N,) float32, Per-sphere radii
+                - radius        : float scalar, Spheres radius (broadcast)
 
                 TLAS:
                 - instances     : Structured array of instances (zero-copy view), only present for TLAS.
@@ -957,9 +963,10 @@ class BVH:
                                     Spheres → 'points'
             - index_buffer       : Triangle index buffer (if the source mesh is indexed)
             - vertices           : Triangle vertex positions
-            - aabbs              : AABB boxes (min,max)
-            - points             : Sphere centers
-            - sphere_radius      : Sphere radius (scalar)
+            - aabbs              : AABB boxes (min, max)
+            - points             : Spheres centers
+            - radii              : Per-sphere radii
+            - radius             : Spheres radius (scalar)
             - primitive_kind     : "Triangles", "AABBs" or "Spheres"
             - embedded_triangles : CWBVH-only triangle stream (if present)
             - instances          : TLAS instance array (only for TLAS)

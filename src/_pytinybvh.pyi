@@ -897,48 +897,48 @@ class BVH:
         """
         Returns a dict of zero-copy numpy views over the active BVH and its source geometry.
 
-            Common keys:
-                - nodes          : The node buffer for the active layout. 2D float32 for structured
-                                   layouts (Standard: (N, 8), BVH_GPU/SoA: (N,16), MBVH4/8: (N,K)).
-                                   For blocked layouts where nodes are exported as flat blocks, 'nodes'
-                                   is a 1D float32 alias to 'packed_data'.
-                - prim_indices   : Reordered leaf mapping stored by tinybvh (uint32). For BLAS this maps
-                                   leaf → primitive id; for TLAS this maps leaf → instance id.
-                - leaf_ids       : Alias of 'prim_indices' (stable name to target in shaders).
-                - primitives     : Geometry-agnostic alias to the primitive stream:
-                                      - Triangles : 'indices' if present, otherwise 'vertices'
-                                      - AABBs     : 'aabbs'
-                                      - Spheres   : 'points'
-                - primitive_kind : One of {"Triangles", "AABBs", "Spheres"}.
+        Common keys:
+            - nodes          : The node buffer for the active layout. 2D float32 for structured
+                               layouts (Standard: (N, 8), BVH_GPU/SoA: (N,16), MBVH4/8: (N,K)).
+                               For blocked layouts where nodes are exported as flat blocks, 'nodes'
+                               is a 1D float32 alias to 'packed_data'.
+            - prim_indices   : Reordered leaf mapping stored by tinybvh (uint32). For BLAS this maps
+                               leaf → primitive id; for TLAS this maps leaf → instance id.
+            - leaf_ids       : Alias of 'prim_indices' (stable name to target in shaders).
+            - primitives     : Geometry-agnostic alias to the primitive stream:
+                                  - Triangles : 'indices' if present, otherwise 'vertices'
+                                  - AABBs     : 'aabbs'
+                                  - Spheres   : 'points'
+            - primitive_kind : One of {"Triangles", "AABBs", "Spheres"}.
 
-            Geometry keys:
-                Triangles:
-                - vertices      : (V, 3) float32, Vertex positions (zero-copy reference to source array)
-                - indices       : (T, 3) uint32, Triangle indices (optional for non-indexed meshes)
+        Geometry keys:
+            Triangles:
+            - vertices      : (V, 3) float32, Vertex positions (zero-copy reference to source array)
+            - indices       : (T, 3) uint32, Triangle indices (optional for non-indexed meshes)
 
-                AABBs:
-                - aabbs         : (N, 2, 3) float32, Boxes extents (min, max)
-                - inv_extents   : (N, 3) float32 (optional), Inverse of boxes extents
+            AABBs:
+            - aabbs         : (N, 2, 3) float32, Boxes extents (min, max)
+            - inv_extents   : (N, 3) float32 (optional), Inverse of boxes extents
 
                 Spheres:
                 - points        : (N, 3) float32, Spheres centers
                 - radii         : (N,) float32, Per-sphere radii
                 - radius        : float scalar, Spheres radius (broadcast)
 
-                TLAS:
-                - instances     : Structured array of instances (zero-copy view), only present for TLAS.
+            TLAS:
+            - instances     : Structured array of instances (zero-copy view), only present for TLAS.
 
-            Layout-specific keys:
-                - packed_data : 1D float32, View of blocked node memory for BVH4/8 CPU/GPU layouts.
-                                BVH4/8 CPU: 64B blocks → 16 floats per block
-                                BVH4_GPU/CWBVH: 16B blocks → 4 floats per block
-                - triangles   : For CWBVH only. The embedded triangle stream used by the layout.
-                                12 or 16 floats per triangle, depending on build flags
+        Layout-specific keys:
+            - packed_data : 1D float32, View of blocked node memory for BVH4/8 CPU/GPU layouts.
+                            BVH4/8 CPU: 64B blocks → 16 floats per block
+                            BVH4_GPU/CWBVH: 16B blocks → 4 floats per block
+            - triangles   : For CWBVH only. The embedded triangle stream used by the layout.
+                            12 or 16 floats per triangle, depending on build flags
 
-            Notes:
-                - All arrays are views into internal memory, no copies are made.
-                - The exact shapes of 'nodes' depend on the layout exporter (see above).
-                - For blocked layouts, 'nodes' is an alias to 'packed_data'.
+        Notes:
+            - All arrays are views into internal memory, no copies are made.
+            - The exact shapes of 'nodes' depend on the layout exporter (see above).
+            - For blocked layouts, 'nodes' is an alias to 'packed_data'.
 
         Returns:
             Dict[str, numpy.ndarray]: A dictionary mapping buffer names to their corresponding raw data arrays.
@@ -961,20 +961,26 @@ class BVH:
                                     Triangles → 'indices' if present, else 'vertices'
                                     AABBs → 'aabbs'
                                     Spheres → 'points'
+            - primitive_kind     : "Triangles", "AABBs" or "Spheres"
             - index_buffer       : Triangle index buffer (if the source mesh is indexed)
             - vertices           : Triangle vertex positions
             - aabbs              : AABB boxes (min, max)
             - points             : Spheres centers
             - radii              : Per-sphere radii
             - radius             : Spheres radius (scalar)
-            - primitive_kind     : "Triangles", "AABBs" or "Spheres"
             - embedded_triangles : CWBVH-only triangle stream (if present)
             - instances          : TLAS instance array (only for TLAS)
             - layout             : String version of the Layout
             - geometry_type      : String version of the geometry type
             - is_tlas            : Whether the BVH is a TLAS or not
-            - defines            : Dict of "TBVH_*" macros for GLSL
-            - preamble           : String of "#define TBVH_* ..." lines to prepend to shaders
+            - defines            : Dict of "TBVH_*" macros for GLSL (see below)
+            - preamble           : String of "#define TBVH_*" lines to prepend to shaders (see below)
+
+        Defines (keys `defines` and `preamble`):
+          - TBVH_HAS_RADII         : 1 if per-point 'radii' is present. 0 otherwise.
+          - TBVH_HAS_SHARED_RADIUS : 1 if a scalar 'radius' is present. 0 otherwise.
+          - TBVH_GEOM_TRIANGLES / TBVH_GEOM_AABBS / TBVH_GEOM_SPHERES : one of these is 1, others are 0.
+          - TBVH_LAYOUT_*          : Layout flags as exported by the active layout.
 
         Args:
             flatten_nodes (bool, optional): If True (default), returns the node data as a raw 1D byte array (`node_buffer`)

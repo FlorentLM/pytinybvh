@@ -20,8 +20,7 @@
 #include <string>
 #include <cmath>
 #include <cfloat>
-#include <unordered_map>
-#include <vector>
+
 #include <tuple>
 
 #include "capabilities.h"
@@ -446,7 +445,7 @@ struct AABBptrGuard {
     ~AABBptrGuard() { g_build_aabbs_ptr = nullptr; }
 };
 
-// C-style callback for building from AABBs
+// Callback for building from AABBs
 static void aabb_build_callback(unsigned int i, tinybvh::bvhvec3& bmin, tinybvh::bvhvec3& bmax) {
     const float* a = g_build_aabbs_ptr;
     const size_t off = static_cast<size_t>(i) * 6;
@@ -454,7 +453,7 @@ static void aabb_build_callback(unsigned int i, tinybvh::bvhvec3& bmin, tinybvh:
     bmax.x = a[off+3]; bmax.y = a[off+4]; bmax.z = a[off+5];
 }
 
-// C-style callback for intersecting AABBs
+// Callback for intersecting AABBs
 bool aabb_intersect_callback(tinybvh::Ray& ray, const unsigned int prim_id) {
     if (!ray.hit.auxData) throw std::runtime_error("Internal error: Ray context is null in AABB intersect callback.");
     auto* context = static_cast<const CustomGeometryContext*>(ray.hit.auxData);
@@ -525,7 +524,7 @@ bool aabb_intersect_callback(tinybvh::Ray& ray, const unsigned int prim_id) {
     return false;
 }
 
-// C-style callback for occlusion testing with AABBs
+// Callback for occlusion testing with AABBs
 bool aabb_isoccluded_callback(const tinybvh::Ray& ray, const unsigned int prim_id) {
     if (!ray.hit.auxData) throw std::runtime_error("Internal error: Ray context is null in AABB occlusion callback.");
     auto* context = static_cast<const CustomGeometryContext*>(ray.hit.auxData);
@@ -566,12 +565,12 @@ std::optional<float> intersect_sphere_primitive(const tinybvh::Ray& ray, const t
     return std::nullopt;
 }
 
-// C-style callback for ray-sphere intersection
+// Callback for ray-sphere intersection
 bool sphere_intersect_callback(tinybvh::Ray& ray, const unsigned int prim_id) {
     if (!ray.hit.auxData) throw std::runtime_error("Internal error: Ray context is null in sphere intersect callback.");
     auto* context = static_cast<const CustomGeometryContext*>(ray.hit.auxData);
 
-    const size_t offset = prim_id * 3;
+    const size_t offset = static_cast<size_t>(prim_id) * 3;
     const tinybvh::bvhvec3 center = {context->points_ptr[offset], context->points_ptr[offset + 1], context->points_ptr[offset + 2]};
     const float r = context->radii_ptr ? context->radii_ptr[prim_id] : context->radius;
     const float radius_sq = r * r;
@@ -590,17 +589,16 @@ bool sphere_intersect_callback(tinybvh::Ray& ray, const unsigned int prim_id) {
     return false;
 }
 
-// C-style callback for occlusion testing with spheres
+// Callback for occlusion testing with spheres
 bool sphere_isoccluded_callback(const tinybvh::Ray& ray, const unsigned int prim_id) {
     if (!ray.hit.auxData) throw std::runtime_error("Internal error: Ray context is null in sphere occlusion callback.");
     auto* context = static_cast<const CustomGeometryContext*>(ray.hit.auxData);
 
-    const size_t offset = prim_id * 3;
+    const size_t offset = static_cast<size_t>(prim_id) * 3;
     const tinybvh::bvhvec3 center = {context->points_ptr[offset], context->points_ptr[offset + 1], context->points_ptr[offset + 2]};
     const float r = context->radii_ptr ? context->radii_ptr[prim_id] : context->radius;
-    const float radius_sq = r * r;
 
-    return intersect_sphere_primitive(ray, center, radius_sq).has_value();
+    return intersect_sphere_primitive(ray, center, r * r).has_value();
 }
 
 // Calculates the squared distance from a point to an AABB
@@ -1285,7 +1283,6 @@ public:
         if (radius <= 0.0f) {
             throw std::runtime_error("Point radius must be positive.");
         }
-
         if (quality == BuildQuality::High) {
             warnings().attr("warn")(
                 "BuildQuality.High (SBVH) is not supported for points-based BVHs. "
@@ -1361,6 +1358,14 @@ public:
             const float r = radius_or_radii.is_none()
                 ? 1e-5f : nb::cast<float>(radius_or_radii);
             return from_points_scalar(points_np, r, quality, traversal_cost, intersection_cost, hq_bins);
+        }
+
+        if (quality == BuildQuality::High) {
+            warnings().attr("warn")(
+                "BuildQuality.High (SBVH) is not supported for points-based BVHs. "
+                "Falling back to the standard 'Balanced' quality build.",
+                userwarning()
+            );
         }
 
         // Array path: per-point radii
@@ -2413,10 +2418,39 @@ public:
         // This static_cast is safe because the layout has just been checked
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
         auto* bvh = static_cast<tinybvh::BVH*>(active_bvh_);
-        if (bvh->triCount == 0) throw std::runtime_error("This BVH is not initialized.");
-        if (bvh->usedNodes + bvh->triCount > bvh->allocatedNodes) {
-            throw std::runtime_error("Cannot split leaves: not enough allocated node capacity.");
+        if (bvh->triCount == 0) {
+            // No primitives to split, no-op
+            return;
         }
+        // Etimate worst case scenario nedded memory (identical to tinybvh)
+        uint32_t required_capacity = bvh->usedNodes + bvh->triCount;
+
+        // if not enough space, reallocate the node buffer
+        if (required_capacity > bvh->allocatedNodes) {
+            std::cout << "pytinybvh: Reallocating node buffer to split leaves. From "
+                      << bvh->allocatedNodes << " to " << required_capacity << " nodes." << std::endl;
+
+            auto* new_node_buffer = static_cast<tinybvh::BVH::BVHNode*>(
+                bvh->context.malloc(required_capacity * sizeof(tinybvh::BVH::BVHNode), bvh->context.userdata)
+            );
+
+            if (!new_node_buffer) {
+                throw std::bad_alloc();
+            }
+
+            // Copy existing node data to new buffer
+            memcpy(new_node_buffer, bvh->bvhNode, bvh->usedNodes * sizeof(tinybvh::BVH::BVHNode));
+
+            // Free old buffer
+            if (bvh->bvhNode) {
+                bvh->context.free(bvh->bvhNode, bvh->context.userdata);
+            }
+
+            // Update the BVH pointers and capacity information
+            bvh->bvhNode = new_node_buffer;
+            bvh->allocatedNodes = required_capacity;
+        }
+
         bvh->SplitLeafs(max_prims);
     }
 
@@ -3000,14 +3034,14 @@ public:
                           (src.contains("prim_indices") ? src["prim_indices"] : nb::none());
 
         // Unified primitives
-        if (src.contains("primitives"))     out["primitives"]     = src["primitives"];
-        if (src.contains("vertices"))       out["vertices"]       = src["vertices"];
-        if (src.contains("indices"))        out["index_buffer"]   = src["indices"];
-        if (src.contains("aabbs"))          out["aabbs"]          = src["aabbs"];
-        if (src.contains("points"))         out["points"]         = src["points"];
-        if (src.contains("radii"))          out["radii"]          = src["radii"];
-        if (src.contains("radius"))         out["radius"]         = src["radius"];
-        if (src.contains("primitive_kind")) out["primitive_kind"] = src["primitive_kind"];
+        if (src.contains("primitives"))         out["primitives"]         = src["primitives"];
+        if (src.contains("vertices"))           out["vertices"]           = src["vertices"];
+        if (src.contains("indices"))            out["index_buffer"]       = src["indices"];
+        if (src.contains("aabbs"))              out["aabbs"]              = src["aabbs"];
+        if (src.contains("points"))             out["points"]             = src["points"];
+        if (src.contains("radii"))              out["radii"]              = src["radii"];
+        if (src.contains("radius"))             out["radius"]             = src["radius"];
+        if (src.contains("primitive_kind"))     out["primitive_kind"]     = src["primitive_kind"];
 
         // Embedded triangles stream (CWBVH)
         if (src.contains("triangles")) {
@@ -3074,6 +3108,29 @@ public:
         setb("TBVH_GEOM_TRIANGLES", custom_type == CustomType::None);
         setb("TBVH_GEOM_AABBS",     custom_type == CustomType::AABB);
         setb("TBVH_GEOM_SPHERES",   custom_type == CustomType::Sphere);
+
+        // Optional feature flags (scene-level if TLAS)
+        bool has_points        = src.contains("points");
+        bool has_radii         = src.contains("radii");
+        bool has_shared_radius = src.contains("radius");
+
+        if (is_tlas()) {
+            // Union features from child BLASes
+            for (auto h : source_blases_refs) {
+                auto& child = nb::cast<PyBVH&>(h);
+                nb::dict child_bundle = child.uniform_bundle(false);
+                auto child_defs = nb::cast<nb::dict>(child_bundle["defines"]);
+                auto getb = [&](const char* k) -> bool {
+                    return child_defs.contains(k) && nb::cast<int>(child_defs[k]) != 0;
+                };
+                has_points        = has_points        || getb("TBVH_HAS_POINTS");
+                has_radii         = has_radii         || getb("TBVH_HAS_RADII");
+                has_shared_radius = has_shared_radius || getb("TBVH_HAS_SHARED_RADIUS");
+            }
+        }
+        setb("TBVH_HAS_POINTS",         has_points);
+        setb("TBVH_HAS_RADII",          has_radii);
+        setb("TBVH_HAS_SHARED_RADIUS",  has_shared_radius);
 
         // TLAS
         setb("TBVH_IS_TLAS", is_tlas());
@@ -3783,10 +3840,10 @@ NB_MODULE(_pytinybvh, m) {
             Args:
                 points (numpy.ndarray): A float32 array of shape (N, 3) representing N points.
                 radius (float or numpy.ndarray): Either a scalar (broadcast) or a per-point array.
-                quality (BuildQuality): The desired quality of the BVH.
+                quality (BuildQuality): The desired quality of the BVH. Quick/Balanced (High is unsupported for points).
                 traversal_cost (float, optional): The traversal cost for the SAH builder. Defaults to 1.
                 intersection_cost (float, optional): The intersection cost for the SAH builder. Defaults to 1.
-                hq_bins (int, optional): The number of bins to use for the high-quality build algorithm (SBVH).
+                hq_bins (int, optional): Ignored for points.
 
             Returns:
                 BVH: A new BVH instance.
@@ -4200,20 +4257,26 @@ NB_MODULE(_pytinybvh, m) {
                                         Triangles → 'indices' if present, else 'vertices'
                                         AABBs → 'aabbs'
                                         Spheres → 'points'
+                - primitive_kind     : "Triangles", "AABBs" or "Spheres"
                 - index_buffer       : Triangle index buffer (if the source mesh is indexed)
                 - vertices           : Triangle vertex positions
                 - aabbs              : AABB boxes (min, max)
                 - points             : Spheres centers
                 - radii              : Per-sphere radii
                 - radius             : Spheres radius (scalar)
-                - primitive_kind     : "Triangles", "AABBs" or "Spheres"
                 - embedded_triangles : CWBVH-only triangle stream (if present)
                 - instances          : TLAS instance array (only for TLAS)
                 - layout             : String version of the Layout
                 - geometry_type      : String version of the geometry type
                 - is_tlas            : Whether the BVH is a TLAS or not
-                - defines            : Dict of "TBVH_*" macros for GLSL
-                - preamble           : String of "#define TBVH_* ..." lines to prepend to shaders
+                - defines            : Dict of "TBVH_*" macros for GLSL (see below)
+                - preamble           : String of "#define TBVH_*" lines to prepend to shaders (see below)
+
+            Defines (keys `defines` and `preamble`):
+              - TBVH_HAS_RADII         : 1 if per-point 'radii' is present. 0 otherwise.
+              - TBVH_HAS_SHARED_RADIUS : 1 if a scalar 'radius' is present. 0 otherwise.
+              - TBVH_GEOM_TRIANGLES / TBVH_GEOM_AABBS / TBVH_GEOM_SPHERES : one of these is 1, others are 0.
+              - TBVH_LAYOUT_*          : Layout flags as exported by the active layout.
 
             Args:
                 flatten_nodes (bool, optional): If True (default), returns the node data as a raw 1D byte array (`node_buffer`)

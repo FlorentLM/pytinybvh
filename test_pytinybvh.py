@@ -7,9 +7,6 @@ from pytinybvh import BVH, Ray, BuildQuality, Layout, CachePolicy, hardware_info
 import trimesh
 import warnings
 
-# ==============================================================================
-# HELPERS AND FIXTURES
-# ==============================================================================
 
 def translation_matrix(translation: np.ndarray) -> np.ndarray:
     M = np.identity(4, dtype=np.float32)
@@ -32,9 +29,9 @@ def rotation_matrix(axis: np.ndarray, angle_rad: float) -> np.ndarray:
     xC, yC, zC = x * C, y * C, z * C
     xyC, yzC, zxC = x * yC, y * zC, z * xC
     return np.array([
-        [x * xC + c, xyC - zs, zxC + ys, 0], 
-        [xyC + zs, y * yC + c, yzC - xs, 0], 
-        [zxC - ys, yzC + xs, z * zC + c, 0], 
+        [x * xC + c, xyC - zs, zxC + ys, 0],
+        [xyC + zs, y * yC + c, yzC - xs, 0],
+        [zxC - ys, yzC + xs, z * zC + c, 0],
         [0, 0, 0, 1]
     ], dtype=np.float32)
 
@@ -55,11 +52,11 @@ def bvh_cube():
 
     cube_verts = np.zeros((8, 4), dtype=np.float32)
     cube_verts[:, :3] = np.array([
-        [-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5], 
+        [-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5],
         [-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5]
     ])
     cube_indices = np.array([
-        [0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7], [0, 4, 7], [0, 7, 3], 
+        [0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7], [0, 4, 7], [0, 7, 3],
         [1, 5, 6], [1, 6, 2], [0, 1, 5], [0, 5, 4], [3, 2, 6], [3, 6, 7]
     ], dtype=np.uint32)
 
@@ -93,11 +90,11 @@ def tlas_scene():
     # BLAS 0: Unit cube
     cube_verts = np.zeros((8, 4), dtype=np.float32)
     cube_verts[:, :3] = np.array([
-        [-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5], 
+        [-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5],
         [-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5]
     ])
     cube_indices = np.array([
-        [0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7], [0, 4, 7], [0, 7, 3], 
+        [0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7], [0, 4, 7], [0, 7, 3],
         [1, 5, 6], [1, 6, 2], [0, 1, 5], [0, 5, 4], [3, 2, 6], [3, 6, 7]
     ], dtype=np.uint32)
     bvh_cube_blas = BVH.from_indexed_mesh(cube_verts, cube_indices)
@@ -115,26 +112,22 @@ def tlas_scene():
     instances = np.zeros(4, dtype=instance_dtype)
     instances[0] = (np.identity(4, dtype=np.float32), 0, 0b0001)
     instances[1] = (translation_matrix(np.array([5, 0, 0])) @ scale_matrix(2.0), 0, 0b0010)
-    instances[2] = (translation_matrix(np.array([0, 5, 0])) @ rotation_matrix(np.array([0, 1, 0]), np.pi / 2), 1, 
+    instances[2] = (translation_matrix(np.array([0, 5, 0])) @ rotation_matrix(np.array([0, 1, 0]), np.pi / 2), 1,
                     0b0100)
     instances[3] = (translation_matrix(np.array([0, 0, -5])), 1, 0b1000)
 
     tlas_bvh = BVH.build_tlas(instances, blases)
 
     return {
-        "tlas": tlas_bvh, 
-        "blases": blases, 
-        "instances": instances, 
-        "cube_verts": cube_verts, 
-        "cube_indices": cube_indices, 
-        "quad_verts": quad_verts, 
-        "quad_indices": quad_indices, 
+        "tlas": tlas_bvh,
+        "blases": blases,
+        "instances": instances,
+        "cube_verts": cube_verts,
+        "cube_indices": cube_indices,
+        "quad_verts": quad_verts,
+        "quad_indices": quad_indices,
     }
 
-
-# ==============================================================================
-# TEST CLASSES
-# ==============================================================================
 
 class TestConstruction:
     def test_from_triangles_quality(self, bvh_two_triangles):
@@ -292,6 +285,26 @@ class TestIntersection:
         # Sphere is at z=1, radius=0.5. Closest point to tri is at z=0.5, outside sphere.
         assert bvh.intersect_sphere(center=(0, 0, 1), radius=0.5) is False
 
+    def test_closest_point(self, bvh_two_triangles):
+        """Tests the closest point query against BLAS geometry"""
+        bvh, _ = bvh_two_triangles
+        # Triangle 0 is at z=0, around origin (inside is x=0, y=0)
+        # Triangle 1 is at z=5, around (3, 3, 5)
+
+        # Query near triangle 0
+        res1 = bvh.closest_point((0, 0, 1.0))
+        assert res1 is not None
+        assert res1['prim_id'] == 0
+        assert np.isclose(res1['distance'], 1.0)
+        np.testing.assert_allclose(res1['point'], (0, 0, 0), atol=1e-5)
+
+        # Query near triangle 1
+        res2 = bvh.closest_point((3.0, 3.0, 6.0))
+        assert res2 is not None
+        assert res2['prim_id'] == 1
+        assert np.isclose(res2['distance'], 1.0)
+        np.testing.assert_allclose(res2['point'], (3.0, 3.0, 5.0), atol=1e-5)
+
 
 class TestOcclusion:
     def test_single_is_occluded(self, bvh_two_triangles):
@@ -366,6 +379,45 @@ class TestTLAS:
         tlas.intersect(ray)
 
         assert np.isclose(ray.t, 7.0) and ray.inst_id == 3
+
+    def test_tlas_intersect_sphere_masking(self, tlas_scene):
+        """Tests sphere intersection with masks on a TLAS"""
+        tlas = tlas_scene["tlas"]
+
+        # Instance 1 is a scaled cube centered at (5, 0, 0)
+        # Bounds: [3, 7] in X, [-1, 1] in Y and Z
+
+        # Sphere at (5, 0, 1.5) with radius 0.6
+        # It should touch the Z=1.0 face of the scaled cube (distance 0.5)
+        assert tlas.intersect_sphere(center=(5, 0, 1.5), radius=0.6) is True
+
+        # If we mask out Instance 1 (mask 0b0010) it should miss
+        # Mask 0b1101 (everything except inst 1)
+        assert tlas.intersect_sphere(center=(5, 0, 1.5), radius=0.6, mask=0b1101) is False
+
+    def test_tlas_closest_point_masking(self, tlas_scene):
+        """Tests closest point queries with masks on a TLAS"""
+        tlas = tlas_scene["tlas"]
+
+        # Instance 1 is scaled cube at (5, 0, 0), bounds X:[4, 6], Y:[-1, 1], Z:[-1, 1]
+        # Instance 0 is unit cube at (0, 0, 0), bounds X:[-0.5, 0.5], Y:[-0.5, 0.5], Z:[-0.5, 0.5]
+
+        # Query point: (8.0, 0.0, 0.0)
+        # Unmasked: should hit Instance 1 at (6.0, 0.0, 0.0), distance 2.0
+        res_unmasked = tlas.closest_point((8.0, 0.0, 0.0))
+        assert res_unmasked is not None
+        assert res_unmasked['inst_id'] == 1
+        assert np.isclose(res_unmasked['distance'], 2.0)
+        np.testing.assert_allclose(res_unmasked['point'], (6.0, 0.0, 0.0), atol=1e-5)
+
+        # Mask out Instance 1 (0b0010)
+        # We query with mask 0b0001 (only instance 0)
+        # Closest point to (8, 0, 0) on instance 0 should be (0.5, 0, 0), distance 7.5
+        res_masked = tlas.closest_point((8.0, 0.0, 0.0), mask=0b0001)
+        assert res_masked is not None
+        assert res_masked['inst_id'] == 0
+        assert np.isclose(res_masked['distance'], 7.5)
+        np.testing.assert_allclose(res_masked['point'], (0.5, 0.0, 0.0), atol=1e-5)
 
 
 class TestPostProcessing:
@@ -583,7 +635,7 @@ class TestAdvancedFeatures:
 
         # A quad from (-1, -1, 0) to (1, 1, 0) made of two triangles
         verts_4d = np.zeros((4, 4), dtype=np.float32)
-        verts_4d[:, :3] = np.array([[-1, -1, 0], [1, -1, 0], [1, 1, 0], [-1, 1, 0]])
+        verts_4d[:, :3] = np.array([[-1, -1, 0], [1, -1, 0], [1, 1, 0],[-1, 1, 0]])
         indices = np.array([
             [0, 1, 2],  # Triangle 0
             [0, 2, 3],  # Triangle 1
@@ -677,7 +729,6 @@ class TestLayoutConversion:
 
     hwinfo = hardware_info()
 
-    # Define all layouts we want to test for traversal
     TRAVERSABLE_LAYOUTS = [
         (Layout.SoA, hwinfo['compile_time']["layouts"]["SoA"]["traverse"]),
         (Layout.BVH_GPU, hwinfo['compile_time']["layouts"]["BVH (GPU)"]["traverse"]),
@@ -790,10 +841,6 @@ class TestLayoutConversion:
         assert Layout.BVH_GPU in bvh.cached_layouts
 
 
-# ==============================================================================
-# VISUALISATION OF TEST SCENE
-# ==============================================================================
-
 def view_test_scene():
     """Builds and visualizes the TLAS test scene"""
     try:
@@ -808,11 +855,11 @@ def view_test_scene():
     # BLAS 0: Unit cube
     cube_verts = np.zeros((8, 4), dtype=np.float32)
     cube_verts[:, :3] = np.array([
-        [-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5], 
+        [-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5],
         [-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5]
     ])
     cube_indices = np.array([
-        [0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7], [0, 4, 7], [0, 7, 3], 
+        [0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7], [0, 4, 7], [0, 7, 3],
         [1, 5, 6], [1, 6, 2], [0, 1, 5], [0, 5, 4], [3, 2, 6], [3, 6, 7]
     ], dtype=np.uint32)
     bvh_cube_blas = BVH.from_indexed_mesh(cube_verts, cube_indices)
@@ -824,7 +871,7 @@ def view_test_scene():
     bvh_quad_blas = BVH.from_indexed_mesh(quad_verts, quad_indices)
 
     blas_geometries = [
-        (cube_verts[:, :3], cube_indices), 
+        (cube_verts[:, :3], cube_indices),
         (quad_verts[:, :3], quad_indices)
     ]
     blases = [bvh_cube_blas, bvh_quad_blas]
@@ -834,7 +881,7 @@ def view_test_scene():
     instances = np.zeros(4, dtype=instance_dtype)
     instances[0] = (np.identity(4, dtype=np.float32), 0, 0b0001)
     instances[1] = (translation_matrix(np.array([5, 0, 0])) @ scale_matrix(2.0), 0, 0b0010)
-    instances[2] = (translation_matrix(np.array([0, 5, 0])) @ rotation_matrix(np.array([0, 1, 0]), np.pi / 2), 1, 
+    instances[2] = (translation_matrix(np.array([0, 5, 0])) @ rotation_matrix(np.array([0, 1, 0]), np.pi / 2), 1,
                     0b0100)
     instances[3] = (translation_matrix(np.array([0, 0, -5])), 1, 0b1000)
 
@@ -842,12 +889,12 @@ def view_test_scene():
 
     # Define rays for visualization
     ray_defs = [
-        {'label': "Hit Inst 0 (Cube)", 'o': [0, 0, -2], 'd': [0, 0, 1], 'mask': 0xFFFFFFFF}, 
-        {'label': "Hit Inst 1 (Scaled Cube)", 'o': [5, 0, -2], 'd': [0, 0, 1], 'mask': 0xFFFFFFFF}, 
-        {'label': "Hit Inst 2 (Rotated Quad)", 'o': [-2, 5, 0], 'd': [1, 0, 0], 'mask': 0xFFFFFFFF}, 
-        {'label': "Miss", 'o': [5, 5, 5], 'd': [1, 1, 1], 'mask': 0xFFFFFFFF}, 
-        {'label': "Masked: Hit Inst 3 (Quad)", 'o': [0, 0, 2], 'd': [0, 0, -1], 'mask': 0b1000}, 
-        {'label': "Unmasked: Hit Inst 0", 'o': [0, 0, 2], 'd': [0, 0, -1], 'mask': 0b0001}, 
+        {'label': "Hit Inst 0 (Cube)", 'o': [0, 0, -2], 'd': [0, 0, 1], 'mask': 0xFFFFFFFF},
+        {'label': "Hit Inst 1 (Scaled Cube)", 'o': [5, 0, -2], 'd': [0, 0, 1], 'mask': 0xFFFFFFFF},
+        {'label': "Hit Inst 2 (Rotated Quad)", 'o': [-2, 5, 0], 'd': [1, 0, 0], 'mask': 0xFFFFFFFF},
+        {'label': "Miss", 'o': [5, 5, 5], 'd': [1, 1, 1], 'mask': 0xFFFFFFFF},
+        {'label': "Masked: Hit Inst 3 (Quad)", 'o': [0, 0, 2], 'd': [0, 0, -1], 'mask': 0b1000},
+        {'label': "Unmasked: Hit Inst 0", 'o': [0, 0, 2], 'd': [0, 0, -1], 'mask': 0b0001},
     ]
     origins = np.array([r['o'] for r in ray_defs], dtype=np.float32)
     directions = np.array([r['d'] for r in ray_defs], dtype=np.float32)
@@ -873,9 +920,9 @@ def view_test_scene():
 
         tris_to_plot = transformed_verts_h[:, :3][indices]
         ax.add_collection3d(Poly3DCollection(
-            tris_to_plot, 
-            alpha=0.3, 
-            facecolor=instance_colors[i], 
+            tris_to_plot,
+            alpha=0.3,
+            facecolor=instance_colors[i],
             edgecolor=instance_colors[i]
         ))
 
@@ -897,13 +944,13 @@ def view_test_scene():
 
         if is_hit:
             hit_point = origin + direction * hit['t']
-            ax.plot(*zip(origin, hit_point), color='black', marker='o', markevery=[0], 
+            ax.plot(*zip(origin, hit_point), color='black', marker='o', markevery=[0],
                     label=ray_def['label'] if i == 0 else None)
             ax.scatter(*hit_point, color=instance_colors[hit['inst_id']], s=80, edgecolor='black', zorder=10)
             ax.text(hit_point[0], hit_point[1], f" Hit Inst {hit['inst_id']}", color='black', zorder=11)
         else:
             end_point = origin + direction * 20  # fixed length for misses
-            ax.plot(*zip(origin, end_point), color='red', alpha=0.7, linestyle=':', marker='o', markevery=[0], 
+            ax.plot(*zip(origin, end_point), color='red', alpha=0.7, linestyle=':', marker='o', markevery=[0],
                     label=ray_def['label'] if i == 0 else None)
             ax.text(end_point[0], end_point[1], " Miss", color='red', alpha=0.9)
 
@@ -925,16 +972,16 @@ def view_test_scene():
 def plot_aabb(ax, aabb_min, aabb_max, **kwargs):
     """Plots a 3D bounding box"""
     points = np.array([
-        [aabb_min[0], aabb_min[1], aabb_min[2]], [aabb_max[0], aabb_min[1], aabb_min[2]], 
-        [aabb_max[0], aabb_max[1], aabb_min[2]], [aabb_min[0], aabb_max[1], aabb_min[2]], 
-        [aabb_min[0], aabb_min[1], aabb_max[2]], [aabb_max[0], aabb_min[1], aabb_max[2]], 
-        [aabb_max[0], aabb_max[1], aabb_max[2]], [aabb_min[0], aabb_max[1], aabb_max[2]], 
+        [aabb_min[0], aabb_min[1], aabb_min[2]], [aabb_max[0], aabb_min[1], aabb_min[2]],
+        [aabb_max[0], aabb_max[1], aabb_min[2]], [aabb_min[0], aabb_max[1], aabb_min[2]],
+        [aabb_min[0], aabb_min[1], aabb_max[2]],[aabb_max[0], aabb_min[1], aabb_max[2]],
+        [aabb_max[0], aabb_max[1], aabb_max[2]], [aabb_min[0], aabb_max[1], aabb_max[2]],
     ])
     edges = [
-        [points[0], points[1], points[2], points[3], points[0]], 
-        [points[4], points[5], points[6], points[7], points[4]], 
-        [points[0], points[4]], [points[1], points[5]], 
-        [points[2], points[6]], [points[3], points[7]], 
+        [points[0], points[1], points[2], points[3], points[0]],
+        [points[4], points[5], points[6], points[7], points[4]],
+        [points[0], points[4]], [points[1], points[5]],
+        [points[2], points[6]], [points[3], points[7]],
     ]
     for edge in edges:
         line = np.array(edge)

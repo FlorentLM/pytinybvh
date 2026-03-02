@@ -836,6 +836,102 @@ private:
         mbvh8_->ConvertFrom(*base_, compact);   // always refresh
     }
 
+    ClosestPoint _closest_point_blas(const tinybvh::bvhvec3& point, float max_dist_sq) const {
+        ClosestPoint result;
+        result.distance_sq = max_dist_sq; // to prune early
+        const auto* bvh = static_cast<const tinybvh::BVH*>(active_bvh_);
+
+        const tinybvh::bvhvec4* vertices_ptr = nullptr;
+        const float* aabb_ptr = nullptr;
+        const float* points_ptr = nullptr;
+        const float* radii_ptr = nullptr;
+
+        if (custom_type == CustomType::None && !source_geometry_refs.empty()) {
+            vertices_ptr = reinterpret_cast<const tinybvh::bvhvec4*>(nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]).data());
+        } else if (custom_type == CustomType::AABB) {
+            aabb_ptr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]).data();
+        } else if (custom_type == CustomType::Sphere) {
+            points_ptr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]).data();
+            if (nb::len(source_geometry_refs) > 1) {
+                radii_ptr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[1]).data();
+            }
+        }
+
+        std::array<uint32_t, 64> stack{};
+        uint32_t stack_ptr = 0;
+        stack[stack_ptr++] = 0;
+
+        while (stack_ptr > 0) {
+            const uint32_t node_idx = stack[--stack_ptr];
+            const auto* node = &bvh->bvhNode[node_idx];
+
+            if (node->isLeaf()) {
+                for (uint32_t i = 0; i < node->triCount; ++i) {
+                    const uint32_t prim_id = bvh->primIdx[node->leftFirst + i];
+                    tinybvh::bvhvec3 current_closest{};
+
+                    switch (custom_type) {
+                        case CustomType::None: { // Triangles
+                            const uint32_t v_idx_base = prim_id * 3;
+                            uint32_t i0 = bvh->vertIdx ? bvh->vertIdx[v_idx_base + 0] : v_idx_base + 0;
+                            uint32_t i1 = bvh->vertIdx ? bvh->vertIdx[v_idx_base + 1] : v_idx_base + 1;
+                            uint32_t i2 = bvh->vertIdx ? bvh->vertIdx[v_idx_base + 2] : v_idx_base + 2;
+
+                            current_closest = closest_point_triangle(point, vertices_ptr[i0], vertices_ptr[i1], vertices_ptr[i2]);
+                            break;
+                        }
+                        case CustomType::AABB: {
+                            const size_t offset = prim_id * 6;
+                            const tinybvh::bvhvec3 bmin = {aabb_ptr[offset], aabb_ptr[offset+1], aabb_ptr[offset+2]};
+                            const tinybvh::bvhvec3 bmax = {aabb_ptr[offset+3], aabb_ptr[offset+4], aabb_ptr[offset+5]};
+                            current_closest = {
+                                tinybvh::tinybvh_clamp(point.x, bmin.x, bmax.x),
+                                tinybvh::tinybvh_clamp(point.y, bmin.y, bmax.y),
+                                tinybvh::tinybvh_clamp(point.z, bmin.z, bmax.z)
+                            };
+                            break;
+                        }
+                        case CustomType::Sphere: {
+                            const size_t offset = prim_id * 3;
+                            const tinybvh::bvhvec3 center = {points_ptr[offset], points_ptr[offset+1], points_ptr[offset+2]};
+                            tinybvh::bvhvec3 dir = point - center;
+                            float d_sq = tinybvh_dot(dir, dir);
+                            if (d_sq > 1e-12f) {
+                                float r = radii_ptr ? radii_ptr[prim_id] : radius;
+                                dir = dir * (r / std::sqrt(d_sq));
+                            }
+                            current_closest = center + dir;
+                            break;
+                        }
+                    }
+
+                    tinybvh::bvhvec3 diff = point - current_closest;
+                    float dist_sq = tinybvh_dot(diff, diff);
+
+                    if (dist_sq < result.distance_sq) {
+                        result.distance_sq = dist_sq;
+                        result.closest_point = current_closest;
+                        result.prim_id = prim_id;
+                    }
+                }
+            } else {
+                uint32_t child1_idx = node->leftFirst;
+                uint32_t child2_idx = node->leftFirst + 1;
+                float dist1_sq = distance_sq_to_aabb(point, bvh->bvhNode[child1_idx].aabbMin, bvh->bvhNode[child1_idx].aabbMax);
+                float dist2_sq = distance_sq_to_aabb(point, bvh->bvhNode[child2_idx].aabbMin, bvh->bvhNode[child2_idx].aabbMax);
+
+                if (dist1_sq < dist2_sq) {
+                    if (dist2_sq < result.distance_sq) stack[stack_ptr++] = child2_idx;
+                    if (dist1_sq < result.distance_sq) stack[stack_ptr++] = child1_idx;
+                } else {
+                    if (dist1_sq < result.distance_sq) stack[stack_ptr++] = child1_idx;
+                    if (dist2_sq < result.distance_sq) stack[stack_ptr++] = child2_idx;
+                }
+            }
+        }
+        return result;
+    }
+
 public:
 
     // Cache policy management
@@ -2021,7 +2117,7 @@ public:
         return result;
     }
 
-    [[nodiscard]] bool intersect_sphere(const tinybvh::bvhvec3& center, float radius) const {
+    [[nodiscard]] bool intersect_sphere(const tinybvh::bvhvec3& center, float radius, uint32_t mask = 0xFFFF) const {
         if (!active_bvh_ || active_bvh_->triCount == 0) {
             return false;
         }
@@ -2031,136 +2127,140 @@ public:
         // This static_cast is safe because the layout has just been checked
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
         const auto* bvh = static_cast<const tinybvh::BVH*>(active_bvh_);
-        return bvh->IntersectSphere(center, radius);
+
+        if (is_tlas()) {
+            std::array<uint32_t, 64> stack{};
+            uint32_t stack_ptr = 0;
+            stack[stack_ptr++] = 0;
+
+            while (stack_ptr > 0) {
+                const uint32_t node_idx = stack[--stack_ptr];
+                const auto* node = &bvh->bvhNode[node_idx];
+
+                if (node->isLeaf()) {
+                    for (uint32_t i = 0; i < node->triCount; ++i) {
+                        const uint32_t inst_idx = bvh->primIdx[node->leftFirst + i];
+                        const auto& inst = bvh->instList[inst_idx];
+
+                        if (!(inst.mask & mask)) {
+                            continue;
+                        }
+
+                        const auto* blas = static_cast<const tinybvh::BVH*>(bvh->blasList[inst.blasIdx]);
+
+                        // Transform sphere center to local BLAS space
+                        tinybvh::bvhvec3 local_center = tinybvh::tinybvh_transform_point(center, inst.invTransform);
+
+                        // Approx local radius
+                        float scale_x_sq = inst.invTransform[0]*inst.invTransform[0] + inst.invTransform[4]*inst.invTransform[4] + inst.invTransform[8]*inst.invTransform[8];
+                        float local_radius = radius * std::sqrt(scale_x_sq);
+
+                        if (blas->IntersectSphere(local_center, local_radius)) {
+                            return true;
+                        }
+                    }
+                } else {
+                    // AABB distance check for TLAS nodes
+                    uint32_t child1_idx = node->leftFirst;
+                    uint32_t child2_idx = node->leftFirst + 1;
+
+                    if (distance_sq_to_aabb(center, bvh->bvhNode[child1_idx].aabbMin, bvh->bvhNode[child1_idx].aabbMax) <= radius * radius) {
+                        stack[stack_ptr++] = child1_idx;
+                    }
+                    if (distance_sq_to_aabb(center, bvh->bvhNode[child2_idx].aabbMin, bvh->bvhNode[child2_idx].aabbMax) <= radius * radius) {
+                        stack[stack_ptr++] = child2_idx;
+                    }
+                }
+            }
+            return false;
+        } else {
+            // is just a BLAS
+            return bvh->IntersectSphere(center, radius);
+        }
     }
 
-    [[nodiscard]] nb::object closest_point(const tinybvh::bvhvec3& point) const {
+    [[nodiscard]] nb::object closest_point(const tinybvh::bvhvec3& point, uint32_t mask = 0xFFFF) const {
         if (!active_bvh_ || active_bvh_->triCount == 0) {
             return nb::none();
         }
-
         if (active_bvh_->layout != tinybvh::BVHBase::LAYOUT_BVH) {
             throw std::runtime_error("Closest point queries are only supported for the Standard BVH layout.");
         }
-        // TODO: Support TLAS here
-        if (is_tlas()) {
-            throw std::runtime_error("Closest point queries are not yet implemented for TLAS structures. Query the BLAS directly.");
-        }
-
-        // Safely cast the base pointer to the derived BVH class to access its members
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-static-cast-downcast)
         const auto* bvh = static_cast<const tinybvh::BVH*>(active_bvh_);
 
         ClosestPoint result;
-        result.closest_point = {INFINITY, INFINITY, INFINITY};
 
-        std::array<uint32_t, 64> stack{};
-        uint32_t stack_ptr = 0;
-        stack[stack_ptr++] = 0; // Start with root node
+        if (is_tlas()) {
+            const auto* bvh = static_cast<const tinybvh::BVH*>(active_bvh_);
+            std::array<uint32_t, 64> stack{};
+            uint32_t stack_ptr = 0;
+            stack[stack_ptr++] = 0;
 
-        while (stack_ptr > 0) {
-            const uint32_t node_idx = stack[--stack_ptr];
-            const auto* node = &bvh->bvhNode[node_idx];
+            while (stack_ptr > 0) {
+                const uint32_t node_idx = stack[--stack_ptr];
+                const auto* node = &bvh->bvhNode[node_idx];
 
-            if (node->isLeaf()) {
-                for (uint32_t i = 0; i < node->triCount; ++i) {
-                    const uint32_t prim_id = bvh->primIdx[node->leftFirst + i];
-                    tinybvh::bvhvec3 current_closest{};
+                if (node->isLeaf()) {
+                    for (uint32_t i = 0; i < node->triCount; ++i) {
+                        const uint32_t inst_idx = bvh->primIdx[node->leftFirst + i];
+                        const auto& inst = bvh->instList[inst_idx];
 
-                    switch (custom_type) {
-                        case CustomType::None: { // Triangles
-                            // Get the vertex data pointer from the stored numpy array reference
-                            const auto* vertices_vec_ptr = reinterpret_cast<const tinybvh::bvhvec4*>(nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]).data());
-
-                            const uint32_t v_idx_base = prim_id * 3;
-                            uint32_t i0, i1, i2;
-
-                            if (bvh->vertIdx) { // Indexed mesh
-                                i0 = bvh->vertIdx[v_idx_base + 0];
-                                i1 = bvh->vertIdx[v_idx_base + 1];
-                                i2 = bvh->vertIdx[v_idx_base + 2];
-                            } else { // Flat vertex array
-                                i0 = v_idx_base + 0;
-                                i1 = v_idx_base + 1;
-                                i2 = v_idx_base + 2;
-                            }
-
-                            const tinybvh::bvhvec3 v0 = vertices_vec_ptr[i0];
-                            const tinybvh::bvhvec3 v1 = vertices_vec_ptr[i1];
-                            const tinybvh::bvhvec3 v2 = vertices_vec_ptr[i2];
-                            current_closest = closest_point_triangle(point, v0, v1, v2);
-                            break;
+                        if (!(inst.mask & mask)) {
+                            continue;
                         }
-                        case CustomType::AABB: {
-                            const float* aabb_ptr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]).data();
-                            const size_t offset = prim_id * 6;
-                            const tinybvh::bvhvec3 bmin = {aabb_ptr[offset], aabb_ptr[offset+1], aabb_ptr[offset+2]};
-                            const tinybvh::bvhvec3 bmax = {aabb_ptr[offset+3], aabb_ptr[offset+4], aabb_ptr[offset+5]};
-                            current_closest = {
-                                tinybvh::tinybvh_clamp(point.x, bmin.x, bmax.x),
-                                tinybvh::tinybvh_clamp(point.y, bmin.y, bmax.y),
-                                tinybvh::tinybvh_clamp(point.z, bmin.z, bmax.z)
-                            };
-                            break;
-                        }
-                        case CustomType::Sphere: {
-                            const float* points_ptr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]).data();
-                            const float* radii_ptr  = (nb::len(source_geometry_refs) > 1)
-                                ? nb::cast<nb::ndarray<const float>>(source_geometry_refs[1]).data()
-                                : nullptr;
-                            const size_t offset = prim_id * 3;
-                            const tinybvh::bvhvec3 center = {points_ptr[offset], points_ptr[offset+1], points_ptr[offset+2]};
-                            tinybvh::bvhvec3 dir = point - center;
-                            float d_sq = tinybvh_dot(dir, dir);
-                            if (d_sq > 1e-12f) {
-                                float r = radii_ptr ? radii_ptr[prim_id] : radius;
-                                dir = dir * (r / std::sqrt(d_sq));
+
+                        const auto& py_blas = nb::cast<PyBVH&>(source_blases_refs[inst.blasIdx]);
+                        tinybvh::bvhvec3 local_point = tinybvh::tinybvh_transform_point(point, inst.invTransform);
+
+                        // to local space
+                        float scale_x_sq = inst.invTransform[0]*inst.invTransform[0] + inst.invTransform[4]*inst.invTransform[4] + inst.invTransform[8]*inst.invTransform[8];
+                        float local_max_dist_sq = result.distance_sq * scale_x_sq;
+
+                        ClosestPoint local_res = py_blas._closest_point_blas(local_point, local_max_dist_sq);
+
+                        if (local_res.prim_id != static_cast<uint32_t>(-1)) {
+                            //back to world space
+                            tinybvh::bvhvec3 world_hit = tinybvh::tinybvh_transform_point(local_res.closest_point, inst.transform);
+                            tinybvh::bvhvec3 diff = point - world_hit;
+                            float dist_sq = tinybvh_dot(diff, diff);
+
+                            if (dist_sq < result.distance_sq) {
+                                result.distance_sq = dist_sq;
+                                result.closest_point = world_hit;
+                                result.prim_id = local_res.prim_id;
+                                result.inst_id = inst_idx;
                             }
-                            current_closest = center + dir;
-                            break;
                         }
                     }
-
-                    tinybvh::bvhvec3 diff = point - current_closest;
-                    float dist_sq = tinybvh_dot(diff, diff);
-
-                    if (dist_sq < result.distance_sq) {
-                        result.distance_sq = dist_sq;
-                        result.closest_point = current_closest;
-                        result.prim_id = prim_id;
-                        result.inst_id = static_cast<uint32_t>(-1); // BLAS only for now
-                    }
-                }
-            } else { // Internal node
-                uint32_t child1_idx = node->leftFirst;
-                uint32_t child2_idx = node->leftFirst + 1;
-                auto* child1_node = &bvh->bvhNode[child1_idx];
-                auto* child2_node = &bvh->bvhNode[child2_idx];
-
-                float dist1_sq = distance_sq_to_aabb(point, child1_node->aabbMin, child1_node->aabbMax);
-                float dist2_sq = distance_sq_to_aabb(point, child2_node->aabbMin, child2_node->aabbMax);
-
-                // Push closer child last to process it first
-                if (dist1_sq < dist2_sq) {
-                    if (dist2_sq < result.distance_sq) stack[stack_ptr++] = child2_idx;
-                    if (dist1_sq < result.distance_sq) stack[stack_ptr++] = child1_idx;
                 } else {
-                    if (dist1_sq < result.distance_sq) stack[stack_ptr++] = child1_idx;
-                    if (dist2_sq < result.distance_sq) stack[stack_ptr++] = child2_idx;
+                    uint32_t child1_idx = node->leftFirst;
+                    uint32_t child2_idx = node->leftFirst + 1;
+                    float dist1_sq = distance_sq_to_aabb(point, bvh->bvhNode[child1_idx].aabbMin, bvh->bvhNode[child1_idx].aabbMax);
+                    float dist2_sq = distance_sq_to_aabb(point, bvh->bvhNode[child2_idx].aabbMin, bvh->bvhNode[child2_idx].aabbMax);
+
+                    if (dist1_sq < dist2_sq) {
+                        if (dist2_sq < result.distance_sq) stack[stack_ptr++] = child2_idx;
+                        if (dist1_sq < result.distance_sq) stack[stack_ptr++] = child1_idx;
+                    } else {
+                        if (dist1_sq < result.distance_sq) stack[stack_ptr++] = child1_idx;
+                        if (dist2_sq < result.distance_sq) stack[stack_ptr++] = child2_idx;
+                    }
                 }
             }
+        } else {
+            // is BLAS, query directly
+            result = _closest_point_blas(point, FLT_MAX);
+            result.inst_id = static_cast<uint32_t>(-1);
         }
 
-        if (result.prim_id == static_cast<uint32_t>(-1)) {
-            return nb::none();
-        }
+        if (result.prim_id == static_cast<uint32_t>(-1)) return nb::none();
 
         nb::dict res;
         res["point"] = nb::cast(result.closest_point);
         res["prim_id"] = result.prim_id;
         res["inst_id"] = static_cast<int32_t>(result.inst_id);
         res["distance"] = std::sqrt(result.distance_sq);
-
         return res;
     }
 
@@ -4035,11 +4135,12 @@ NB_MODULE(_pytinybvh, m) {
             Args:
                 center (Vec3Like): The center of the sphere.
                 radius (float): The radius of the sphere.
+                mask (int, optional): A 32-bit integer visibility mask. Defaults to 0xFFFFFFFF.
 
             Returns:
                 bool: True if an intersection is found, False otherwise.
             )doc",
-            nb::arg("center"), nb::arg("radius"))
+            nb::arg("center"), nb::arg("radius"), nb::arg("mask") = 0xFFFF)
 
         .def("closest_point", &PyBVH::closest_point,
             R"doc(
@@ -4050,6 +4151,7 @@ NB_MODULE(_pytinybvh, m) {
 
             Args:
                 point (Vec3Like): The 3D point to query from.
+                mask (int, optional): A 32-bit integer visibility mask. Defaults to 0xFFFFFFFF.
 
             Returns:
                 Dict[str, Any] or None: A dictionary containing the query result:
@@ -4059,7 +4161,7 @@ NB_MODULE(_pytinybvh, m) {
                     - 'distance' (float): The Euclidean distance to the closest point.
                 Returns None if the BVH is empty.
             )doc",
-            nb::arg("point"))
+            nb::arg("point"), nb::arg("mask") = 0xFFFF)
 
         // Accessors for the BVH data
 

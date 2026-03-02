@@ -584,7 +584,7 @@ class BVH:
         """
         ...
 
-    def intersect_sphere(self, center: Vec3Like, radius: float) -> bool:
+    def intersect_sphere(self, center: Vec3Like, radius: float, mask: int = 0xFFFF) -> bool:
         """
         Checks if any geometry intersects with a given sphere.
 
@@ -595,13 +595,14 @@ class BVH:
         Args:
             center (Vec3Like): The center of the sphere.
             radius (float): The radius of the sphere.
+            mask (int, optional): A 32-bit integer visibility mask. Defaults to 0xFFFFFFFF.
 
         Returns:
             bool: True if an intersection is found, False otherwise.
         """
         ...
 
-    def closest_point(self, point: Vec3Like) -> Optional[Dict[str, Any]]:
+    def closest_point(self, point: Vec3Like, mask: int = 0xFFFF) -> Optional[Dict[str, Any]]:
         """
         Finds the closest point on the BVH geometry to a given query point.
 
@@ -610,6 +611,7 @@ class BVH:
 
         Args:
             point (Vec3Like): The 3D point to query from.
+            mask (int, optional): A 32-bit integer visibility mask. Defaults to 0xFFFFFFFF.
 
         Returns:
             Dict[str, Any] or None: A dictionary containing the query result:

@@ -221,6 +221,72 @@ class TestCoreFunctionality:
         with pytest.raises(RuntimeError):
             bvh_high.refit()
 
+    def test_refit_points(self):
+        """Tests that refitting works for sphere/point BVHs after in-place edits"""
+
+        # Create two points at Z=5
+        points = np.array([
+            [0.0, 0.0, 5.0],
+            [2.0, 0.0, 5.0]
+        ], dtype=np.float32)
+
+        bvh = BVH.from_points(points, radius=0.5)
+
+        # Initial hit on point 0
+        ray1 = Ray(origin=(0, 0, 0), direction=(0, 0, 1))
+        bvh.intersect(ray1)
+        assert np.isclose(ray1.t, 4.5)
+        assert ray1.prim_id == 0
+
+        # Edit points in-place: move them 5 units further on the Z axis
+        points[:, 2] += 5.0
+
+        bvh.refit()
+
+        # Ray should now travel further to hit point 0
+        ray2 = Ray(origin=(0, 0, 0), direction=(0, 0, 1))
+        bvh.intersect(ray2)
+        assert np.isclose(ray2.t, 9.5)
+        assert ray2.prim_id == 0
+
+        # Verify point 1 has also moved
+        ray3 = Ray(origin=(2.0, 0.0, 0), direction=(0, 0, 1))
+        bvh.intersect(ray3)
+        assert np.isclose(ray3.t, 9.5)
+        assert ray3.prim_id == 1
+
+    def test_refit_aabbs(self):
+        """Tests that refitting works for AABB BVHs after in-place edits"""
+
+        # Create two 1x1x1 AABBs at Z=5
+        aabbs = np.array([
+            [[-0.5, -0.5, 4.5], [0.5, 0.5, 5.5]],  # Centered at (0, 0, 5)
+            [[1.5, -0.5, 4.5], [2.5, 0.5, 5.5]]    # Centered at (2, 0, 5)
+        ], dtype=np.float32)
+
+        bvh = BVH.from_aabbs(aabbs)
+
+        # Initial hit on box 0 (-Z face)
+        ray1 = Ray(origin=(0, 0, 0), direction=(0, 0, 1))
+        bvh.intersect(ray1)
+        assert np.isclose(ray1.t, 4.5)
+        assert ray1.prim_id == 0
+
+        # Edit AABBs in-place: scale box 0 and move it further away
+        aabbs[0] = [[-1.0, -1.0, 9.0], [1.0, 1.0, 11.0]] # Now 2x2x2, centered at Z=10
+
+        bvh.refit()
+
+        # Ray should now travel further to hit box 0
+        ray2 = Ray(origin=(0, 0, 0), direction=(0, 0, 1))
+        bvh.intersect(ray2)
+        assert np.isclose(ray2.t, 9.0)
+        assert ray2.prim_id == 0
+
+        # Verify inverse extents cache was correctly updated
+        # (UVs on the -Z face of the new 2x2 AABB should be dead center)
+        np.testing.assert_allclose((ray2.u, ray2.v), (0.5, 0.5))
+
 
 class TestIntersection:
     def test_single_intersect_hit_miss(self, bvh_two_triangles):

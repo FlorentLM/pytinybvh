@@ -2277,7 +2277,104 @@ public:
         if (!bvh->refittable) {
             throw std::runtime_error("This BVH is not refittable. This is expected for a BVH built with spatial splits (High Quality preset).");
         }
-        bvh->Refit();
+
+        if (custom_type == CustomType::None) {
+            // Standard triangle mesh: refit provided by tinybvh
+            bvh->Refit();
+
+        } else {
+            // Custom geometry (Spheres or AABBs): bottom-up refit
+            const float* points_ptr = nullptr;
+            const float* radii_ptr = nullptr;
+            const float* aabb_ptr = nullptr;
+            float* inv_extents_ptr = nullptr;
+            size_t prim_count = 0;
+
+            // Fetch updated underlying data
+            if (custom_type == CustomType::Sphere) {
+                points_ptr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]).data();
+                if (nb::len(source_geometry_refs) > 1) {
+                    radii_ptr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[1]).data();
+                }
+            } else if (custom_type == CustomType::AABB) {
+                aabb_ptr = nb::cast<nb::ndarray<const float>>(source_geometry_refs[0]).data();
+
+                // Update reciprocal extents cache (used by intersection code)
+                auto inv_extents_arr = nb::cast<nb::ndarray<float>>(source_geometry_refs[1]);
+                inv_extents_ptr = inv_extents_arr.data();
+                prim_count = inv_extents_arr.shape(0);
+            }
+
+            nb::gil_scoped_release release;
+
+            // If AABB, update reciprocal extents *first*
+            if (custom_type == CustomType::AABB && inv_extents_ptr) {
+                for (size_t i = 0; i < prim_count; ++i) {
+                    const size_t a_off = i * 6;
+                    const size_t i_off = i * 3;
+                    const float ex = aabb_ptr[a_off + 3] - aabb_ptr[a_off + 0];
+                    const float ey = aabb_ptr[a_off + 4] - aabb_ptr[a_off + 1];
+                    const float ez = aabb_ptr[a_off + 5] - aabb_ptr[a_off + 2];
+                    inv_extents_ptr[i_off + 0] = ex > 1e-6f ? 1.0f / ex : 0.0f;
+                    inv_extents_ptr[i_off + 1] = ey > 1e-6f ? 1.0f / ey : 0.0f;
+                    inv_extents_ptr[i_off + 2] = ez > 1e-6f ? 1.0f / ez : 0.0f;
+                }
+            }
+
+            // Bottom-up refit
+            // nodes allocated sequentially -> so traverse backwards always processes children before their parents
+            for (int i = static_cast<int>(bvh->usedNodes) - 1; i >= 0; --i) {
+                auto& node = bvh->bvhNode[i];
+
+                if (node.isLeaf()) {
+                    tinybvh::bvhvec3 bmin(1e30f, 1e30f, 1e30f);
+                    tinybvh::bvhvec3 bmax(-1e30f, -1e30f, -1e30f);
+
+                    // Leaf bounds strictly rederived from source arrays
+                    for (uint32_t j = 0; j < node.triCount; ++j) {
+                        uint32_t prim_id = bvh->primIdx[node.leftFirst + j];
+
+                        if (custom_type == CustomType::Sphere) {
+                            float px = points_ptr[prim_id * 3 + 0];
+                            float py = points_ptr[prim_id * 3 + 1];
+                            float pz = points_ptr[prim_id * 3 + 2];
+                            float r = radii_ptr ? radii_ptr[prim_id] : radius;
+
+                            bmin.x = std::min(bmin.x, px - r);
+                            bmin.y = std::min(bmin.y, py - r);
+                            bmin.z = std::min(bmin.z, pz - r);
+                            bmax.x = std::max(bmax.x, px + r);
+                            bmax.y = std::max(bmax.y, py + r);
+                            bmax.z = std::max(bmax.z, pz + r);
+
+                        } else if (custom_type == CustomType::AABB) {
+                            const size_t offset = prim_id * 6;
+                            bmin.x = std::min(bmin.x, aabb_ptr[offset + 0]);
+                            bmin.y = std::min(bmin.y, aabb_ptr[offset + 1]);
+                            bmin.z = std::min(bmin.z, aabb_ptr[offset + 2]);
+                            bmax.x = std::max(bmax.x, aabb_ptr[offset + 3]);
+                            bmax.y = std::max(bmax.y, aabb_ptr[offset + 4]);
+                            bmax.z = std::max(bmax.z, aabb_ptr[offset + 5]);
+                        }
+                    }
+                    node.aabbMin = bmin;
+                    node.aabbMax = bmax;
+
+                } else {
+                    // Inner node: just union the bounds of the two children
+                    const auto& left = bvh->bvhNode[node.leftFirst];
+                    const auto& right = bvh->bvhNode[node.leftFirst + 1];
+
+                    node.aabbMin.x = std::min(left.aabbMin.x, right.aabbMin.x);
+                    node.aabbMin.y = std::min(left.aabbMin.y, right.aabbMin.y);
+                    node.aabbMin.z = std::min(left.aabbMin.z, right.aabbMin.z);
+
+                    node.aabbMax.x = std::max(left.aabbMax.x, right.aabbMax.x);
+                    node.aabbMax.y = std::max(left.aabbMax.y, right.aabbMax.y);
+                    node.aabbMax.z = std::max(left.aabbMax.z, right.aabbMax.z);
+                }
+            }
+        }
     }
 
     static std::unique_ptr<PyBVH> build_tlas(const nb::object& instances_obj, const nb::list& blases_py) {

@@ -22,3 +22,9 @@ dev = ["pytinybvh[test,visualise]"]
 [tool.scikit-build]
 minimum-version = "0.9"
 build-dir = "build/{wheel_tag}"
+
+[tool.scikit-build.sdist]
+exclude = ["assets/**"]
+
+[tool.scikit-build.wheel]
+exclude = ["assets/**"]

@@ -8,7 +8,7 @@ version = "1.2.3"
 authors = [
     { name = "Florent Le Moël", email = "25004801+FlorentLM@users.noreply.github.com" }
 ]
-description = "Tiny Python bindings for tinybvh"
+description = "Tiny Python bindings for the C/C++ library TinyBVH"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }

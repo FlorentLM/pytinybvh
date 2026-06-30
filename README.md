@@ -16,9 +16,9 @@
   </p>
 </div>
 
-PyTinyBVH are Python bindings for the great C++ Bounding Volume Hierarchy (BVH) library [tinybvh](https://github.com/jbikker/tinybvh) by Jacco Bikker.
+PyTinyBVH are Python bindings for the great C++ Bounding Volume Hierarchy (BVH) library [TinyBVH](https://github.com/jbikker/tinybvh) by Jacco Bikker.
 
-Exposes `tinybvh`'s fast geometry acceleration structures for your Python projects.
+Exposes **TinyBVH**'s fast geometry acceleration structures for your Python projects.
 
 **Why?** Real time ray-tracing with PyOpenGL or Vulkan, CPU-side computations like collision detection, etc.
 
@@ -31,7 +31,7 @@ Powered by [nanobind](https://github.com/wjakob/nanobind)
 
 ## Current status
 
-Most of `tinybvh`'s functionality is now implemented and functional :)
+Most of `TinyBVH`'s functionality is now implemented and functional :)
 
 See [Features](#Features) and [Roadmap](#Roadmap) below for more details.
 

@@ -1,0 +1,20 @@
+# This CITATION.cff file was generated with Zotero.
+
+cff-version: 1.2.0
+message: >-
+  If you use this software, please cite it using the metadata from this file.
+title:  >-
+  PyTinyBVH
+abstract: Tiny Python bindings for the C/C++ library TinyBVH
+type: software
+license: MIT
+version: 1.2.2
+url: https://github.com/FlorentLM/pytinybvh
+keywords: 
+  - bvh
+  - Python
+  - raytracing
+authors: 
+  - family-names: Le Moël
+    given-names: Florent
+date-released: 2025-08

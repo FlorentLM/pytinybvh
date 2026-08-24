@@ -10,7 +10,7 @@ authors = [
 ]
 description = "Tiny Python bindings for the C/C++ library TinyBVH"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { file = "LICENSE" }
 dependencies = ["numpy>=2.0.0"]     # runtime dep
 
